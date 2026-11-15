@@ -1,0 +1,259 @@
+import 'dart:convert';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
+
+import '../core/session.dart';
+import '../ui/theme.dart';
+import '../ui/widgets.dart';
+
+/// Ready-made workflow recipes. Every action that changes data is preceded by an
+/// approval step, which the server enforces at publish time.
+final recipes = <Map<String, dynamic>>[
+  {
+    'name': 'Follow up new contacts',
+    'description': 'When a contact is added, ask before creating a follow-up task due in 2 days.',
+    'definition': {
+      'trigger': {'type': 'event', 'event': 'contact.created'},
+      'steps': [
+        {'type': 'approval', 'title': 'Create a follow-up task for {{trigger.name}}?'},
+        {'type': 'action', 'tool': 'tasks.create', 'args': {'title': 'Follow up with {{trigger.name}}', 'dueInDays': 2, 'priority': 'normal'}},
+        {'type': 'notify', 'title': 'Follow-up scheduled for {{trigger.name}}'},
+      ],
+    },
+  },
+  {
+    'name': 'Daily planning reminder',
+    'description': 'Every morning (08:00 Manila / 00:00 UTC), remind you to review today\'s work.',
+    'definition': {
+      'trigger': {'type': 'schedule', 'every': 'day', 'hourUtc': 0},
+      'steps': [
+        {'type': 'notify', 'title': 'Plan your day', 'body': 'Open Work to review what\'s due today.'},
+      ],
+    },
+  },
+  {
+    'name': 'Review imported data',
+    'description': 'After an import finishes, ask before creating a review task.',
+    'definition': {
+      'trigger': {'type': 'event', 'event': 'import.completed'},
+      'steps': [
+        {'type': 'approval', 'title': 'Create a task to review the import?'},
+        {'type': 'action', 'tool': 'tasks.create', 'args': {'title': 'Review imported records', 'dueInDays': 1}},
+      ],
+    },
+  },
+  {
+    'name': 'Weekly client check-in (manual)',
+    'description': 'Run by hand: ask, then create a check-in task and note.',
+    'definition': {
+      'trigger': {'type': 'manual'},
+      'steps': [
+        {'type': 'approval', 'title': 'Create this week\'s client check-in?'},
+        {'type': 'action', 'tool': 'tasks.create', 'args': {'title': 'Weekly client check-in', 'dueInDays': 3, 'priority': 'high'}},
+        {'type': 'action', 'tool': 'notes.create', 'args': {'title': 'Client check-in notes', 'body': 'Who did we talk to? What did they need?'}},
+      ],
+    },
+  },
+];
+
+String triggerLabel(Map? t) => switch (t?['type']) {
+      'event' => 'When ${(t!['event'] as String).replaceAll('.', ' ')}',
+      'schedule' => 'Daily at ${t!['hourUtc']}:00 UTC',
+      _ => 'Run by hand',
+    };
+
+String stepLabel(Map s) => switch (s['type']) {
+      'approval' => 'Ask: ${s['title']}',
+      'notify' => 'Notify: ${s['title']}',
+      _ => '${s['tool']} — ${(s['args'] as Map?)?['title'] ?? ''}',
+    };
+
+IconData stepIcon(String? type) => switch (type) { 'approval' => Icons.verified_user_outlined, 'notify' => Icons.notifications_none, _ => Icons.bolt };
+
+class WorkflowsScreen extends ConsumerWidget {
+  const WorkflowsScreen({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    final canManage = ref.watch(sessionProvider.select((s) => s.role != 'viewer' && s.role != 'member'));
+    return Page2(
+      title: 'Workflows',
+      fab: canManage ? FloatingActionButton.extended(onPressed: () => _pickRecipe(context, ref), icon: const Icon(Icons.add), label: const Text('New workflow')) : null,
+      body: Load<List<Map<String, dynamic>>>(
+        fetch: (api) async => items(await api.get('/workflows')),
+        builder: (context, list, reload) => list.isEmpty
+            ? EmptyState(
+                icon: Icons.account_tree_outlined,
+                title: 'No workflows yet',
+                body: 'Start from a recipe. Workflows run on the server every 15 minutes and always ask before changing data.',
+                action: canManage ? QButton('Browse recipes', onPressed: () => _pickRecipe(context, ref)) : null,
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
+                itemCount: list.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (_, i) {
+                  final w = list[i];
+                  final draft = w['draft'] is Map ? w['draft'] as Map : const {};
+                  return QCard(
+                    onTap: () => push(context, WorkflowDetail(id: w['id'] as String)),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(children: [Expanded(child: Text(w['name'] as String, style: qs(15, w: FontWeight.w600, c: q.text))), StatusPill(w['published_version'] == null ? 'draft' : w['status'] as String)]),
+                      const SizedBox(height: 4),
+                      Text('${triggerLabel(draft['trigger'] as Map?)} · ${w['run_count']} runs${w['last_run_at'] != null ? ' · last ${ago(w['last_run_at'] as String?)}' : ''}', style: qs(13, c: q.text3)),
+                    ]),
+                  );
+                },
+              ),
+      ),
+    );
+  }
+
+  Future<void> _pickRecipe(BuildContext context, WidgetRef ref) async {
+    final r = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), children: [
+          Text('Start from a recipe', style: qs(18, w: FontWeight.w600, c: ctx.q.text)),
+          const SizedBox(height: 4),
+          Text('It\'s saved as a draft. Review, then publish and enable it.', style: qs(13, c: ctx.q.text2)),
+          const SizedBox(height: 12),
+          for (final r in recipes)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: QCard(
+                onTap: () => Navigator.pop(ctx, r),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(r['name'] as String, style: qs(15, w: FontWeight.w600, c: ctx.q.text)),
+                  const SizedBox(height: 2),
+                  Text(r['description'] as String, style: qs(13, c: ctx.q.text3)),
+                ]),
+              ),
+            ),
+        ]),
+      ),
+    );
+    if (r == null || !context.mounted) return;
+    final w = await act(context, ref, (api) => api.post('/workflows', r), ok: 'Draft created');
+    if (w is Map && context.mounted) push(context, WorkflowDetail(id: w['id'] as String));
+  }
+}
+
+class WorkflowDetail extends ConsumerWidget {
+  const WorkflowDetail({super.key, required this.id});
+  final String id;
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    final canManage = ref.watch(sessionProvider.select((s) => s.role != 'viewer' && s.role != 'member'));
+    return Page2(
+      title: 'Workflow',
+      body: Load<Map>(
+        fetch: (api) async => await api.get('/workflows/$id') as Map,
+        builder: (context, w, reload) {
+          final def = w['draft'] is Map ? w['draft'] as Map : const {};
+          final steps = (def['steps'] as List? ?? const []).cast<Map>();
+          final runs = items(w, 'runs');
+          final published = w['published_version'] != null;
+          final enabled = w['status'] == 'enabled';
+          final manual = (def['trigger'] as Map?)?['type'] == 'manual';
+          Future<void> run(String path, String ok) async {
+            final r = await act(context, ref, (api) => api.post('/workflows/$id/$path', path.contains('run') ? {'data': <String, dynamic>{}} : null), ok: ok);
+            await reload();
+            if (r is Map && r['steps'] != null && context.mounted) push(context, WorkflowRunDetail(id: r['id'] as String));
+          }
+
+          return ListView(padding: const EdgeInsets.all(16), children: [
+            Row(children: [StatusPill(published ? w['status'] as String : 'draft'), const SizedBox(width: 8), if (published) Text('v${w['published_version']}', style: qs(12, c: q.text3, family: mono))]),
+            const SizedBox(height: 10),
+            Text(w['name'] as String, style: Theme.of(context).textTheme.headlineSmall),
+            if (w['description'] != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text(w['description'] as String, style: qs(14, c: q.text2))),
+            const SectionLabel('Steps'),
+            QCard(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [Icon(Icons.play_circle_outline, size: 18, color: q.text2), const SizedBox(width: 10), Text(triggerLabel(def['trigger'] as Map?), style: qs(14, w: FontWeight.w600, c: q.text))]),
+                for (final (i, s) in steps.indexed)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Icon(stepIcon(s['type'] as String?), size: 18, color: s['type'] == 'approval' ? q.halo : q.text2),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text('${i + 1}. ${stepLabel(s)}', style: qs(14, c: q.text))),
+                    ]),
+                  ),
+              ]),
+            ),
+            const SizedBox(height: 8),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: Text('Definition (JSON)', style: qs(13, c: q.text2)),
+              children: [SelectableText(const JsonEncoder.withIndent('  ').convert(def), style: qs(11, c: q.text2, family: mono))],
+            ),
+            if (canManage) ...[
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                QButton('Dry run', icon: Icons.science_outlined, onPressed: () => run('dry-run', 'Dry run finished — nothing was changed')),
+                QButton(published ? 'Publish changes' : 'Publish', icon: Icons.publish, onPressed: () => run('publish', 'Published')),
+                if (published) QButton(enabled ? 'Disable' : 'Enable', icon: enabled ? Icons.pause : Icons.play_arrow, onPressed: () => run(enabled ? 'disable' : 'enable', enabled ? 'Disabled' : 'Enabled')),
+                if (published && manual) QButton('Run now', icon: Icons.play_arrow, onPressed: () => run('run', 'Started')),
+              ]),
+            ],
+            SectionLabel('Runs (${runs.length})'),
+            if (runs.isEmpty) Text('No runs yet. Try a dry run first.', style: qs(14, c: q.text3)),
+            for (final r in runs)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                onTap: () => push(context, WorkflowRunDetail(id: r['id'] as String)),
+                leading: StatusPill(r['status'] as String),
+                title: Text('${r['dry_run'] == true ? 'Dry run' : cap(r['trigger_kind'] as String? ?? 'run')} · ${ago(r['started_at'] as String?)}', style: qs(14, c: q.text)),
+                subtitle: r['error'] != null ? Text(r['error'] as String, style: qs(12, c: q.bad)) : null,
+                trailing: Icon(Icons.chevron_right, color: q.text3),
+              ),
+          ]);
+        },
+      ),
+    );
+  }
+}
+
+class WorkflowRunDetail extends StatelessWidget {
+  const WorkflowRunDetail({super.key, required this.id});
+  final String id;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    return Page2(
+      title: 'Run',
+      body: Load<Map>(
+        fetch: (api) async => await api.get('/workflow-runs/$id') as Map,
+        builder: (context, r, reload) {
+          final steps = items(r, 'steps');
+          return RefreshIndicator(
+            onRefresh: reload,
+            child: ListView(padding: const EdgeInsets.all(16), children: [
+              Row(children: [StatusPill(r['status'] as String), const SizedBox(width: 10), if (r['dry_run'] == true) Text('Dry run — no changes made', style: qs(13, c: q.text2))]),
+              if (r['error'] != null) Padding(padding: const EdgeInsets.only(top: 10), child: Text(r['error'] as String, style: qs(14, c: q.bad))),
+              const SectionLabel('Steps'),
+              if (steps.isEmpty) Text('No steps recorded.', style: qs(14, c: q.text3)),
+              for (final s in steps)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: QCard(
+                    child: Row(children: [
+                      Icon(stepIcon(s['kind'] as String?), size: 18, color: q.text2),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text('${(s['step_index'] as num) + 1}. ${s['summary'] ?? s['kind']}', style: qs(14, c: q.text))),
+                      StatusPill(s['status'] as String),
+                    ]),
+                  ),
+                ),
+              if (r['status'] == 'waiting_approval') Text('Waiting for an approval. Open Approvals from the top bar to continue.', style: qs(13, c: q.text2)),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+}
