@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+*.keystore
+*.jks
+key.properties
+apps/mobile/build/
+apps/mobile/.dart_tool/
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+apps/web/.next/
+apps/web/.vercel
+.vercel
+*.zip
+coverage/

@@ -1,0 +1,10 @@
+{
+  "name": "@qline/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=../../.env dist/server.mjs",
+    "build": "node build.mjs"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "qline",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run packages services/api/test/unit.test.ts",
+    "test:integration": "vitest run services/api/test",
+    "build:api": "node services/api/build.mjs",
+    "db:migrate": "node packages/schema/migrate.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1169.0",
+    "@hono/node-server": "2.1.8",
+    "better-auth": "1.7.25",
+    "exceljs": "4.4.0",
+    "hono": "4.13.18",
+    "mammoth": "1.13.0",
+    "papaparse": "5.7.1",
+    "pg": "8.23.1",
+    "unpdf": "2.2.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/papaparse": "^5.3.15",
+    "@types/pg": "^8.15.0",
+    "esbuild": "0.28.2",
+    "typescript": "^5.9.0",
+    "vite": "^7.3.8",
+    "vitest": "5.1.0"
+  }
+}
