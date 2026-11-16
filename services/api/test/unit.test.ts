@@ -123,3 +123,49 @@ describe('voice envelope (v1.2)', () => {
     expect(Math.max(...e)).toBe(1);
   });
 });
+
+describe('v1.3 assistant tools', () => {
+  it('every app tool has a policy, and the 0006 migration only grants known tools to matching templates', async () => {
+    const { appTools } = await import('../src/agent/tools-apps');
+    const { TOOL_POLICIES } = await import('@qline/policy');
+    for (const name of Object.keys(appTools)) expect(TOOL_POLICIES[name], name).toBeTruthy();
+    const { readFileSync } = await import('node:fs');
+    const sql = readFileSync(new URL('../../../packages/schema/migrations/0006_v13_tools_signin.sql', import.meta.url), 'utf8');
+    const groups = [...sql.matchAll(/array\[([^\]]+)\]\) t order by t\)[\s\S]*?current_version([^;]*);/g)];
+    expect(groups.length).toBe(4);
+    for (const [, list, where] of groups) {
+      const tools = [...list.matchAll(/'([a-z_.]+)'/g)].map((m) => m[1]);
+      const templates = where.includes("<> 'research'") ? ['ceo', 'sales', 'marketing', 'finance', 'operations'] : where.includes('in (') ? [...where.matchAll(/'(\w+)'/g)].map((m) => m[1]) : ['ceo', 'sales', 'marketing', 'finance', 'operations', 'research'];
+      for (const tool of tools) {
+        expect(TOOL_POLICIES[tool], tool).toBeTruthy();
+        for (const tpl of templates) expect(TOOL_POLICIES[tool].templates, `${tool} for ${tpl}`).toContain(tpl);
+      }
+    }
+  });
+
+  it('builds Google Forms question bodies for each type', async () => {
+    const { formQuestionBody } = await import('../src/integrations/services');
+    expect(formQuestionBody({ title: 'Name', type: 'short', required: true })).toEqual({ required: true, textQuestion: { paragraph: false } });
+    expect(formQuestionBody({ title: 'Notes', type: 'paragraph' })).toEqual({ required: false, textQuestion: { paragraph: true } });
+    expect((formQuestionBody({ title: 'Size', type: 'dropdown', options: ['S', 'M'] }) as any).choiceQuestion).toEqual({ type: 'DROP_DOWN', options: [{ value: 'S' }, { value: 'M' }] });
+    expect((formQuestionBody({ title: 'Pick', type: 'checkboxes' }) as any).choiceQuestion?.options).toEqual([{ value: 'Option 1' }]);
+    expect(formQuestionBody({ title: 'When', type: 'date' })).toHaveProperty('dateQuestion');
+    expect(formQuestionBody({ title: 'Rate', type: 'scale' })).toHaveProperty('scaleQuestion.high', 5);
+  });
+
+  it('skips workflow steps whose condition renders empty, and every recipe is a valid definition', async () => {
+    const { isFalsy, definitionSchema } = await import('../src/modules/workflows');
+    const { RECIPES } = await import('../src/integrations/steps');
+    for (const v of ['', '0', 'false', ' None ', 'no', 'null', 'undefined']) expect(isFalsy(v), v).toBe(true);
+    for (const v of ['1', '3 overdue', 'yes']) expect(isFalsy(v), v).toBe(false);
+    for (const r of RECIPES) expect(definitionSchema.safeParse(r.definition).success, r.id).toBe(true);
+    expect(RECIPES.map((r) => r.id)).toEqual(expect.arrayContaining(['important_email_task', 'overdue_nudge', 'evening_wrap', 'weekly_review']));
+  });
+
+  it('flags urgent non-bulk mail as important even when it is not a lead', () => {
+    const rules = rulesSchema.parse({});
+    const c = classifyByRules({ subject: 'URGENT: invoice overdue, account suspended', text: 'Please pay today', fromEmail: 'billing@vendor.com', bulk: false } as any, rules);
+    expect(c.important).toBe(true);
+    expect(rules.notifyImportant).toBe(true);
+  });
+});

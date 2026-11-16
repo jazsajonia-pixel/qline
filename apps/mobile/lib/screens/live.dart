@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
@@ -81,10 +79,17 @@ class _LiveState extends ConsumerState<_Live> {
   double _speakLevel = 0;
   int _sttErrors = 0;
   Timer? _relisten;
+  late final UtteranceGate _gate = UtteranceGate(onCommit: _heardRequest);
   bool _loading = true;
   String? _loadError;
 
   Api get _api => ref.read(apiProvider);
+
+  double get _wordWeight {
+    final w = wordsOf(_spoken);
+    if (_word < 0 || _word >= w.length) return .5;
+    return (syllables(w[_word]) / 3).clamp(0, 1).toDouble();
+  }
 
   Map<String, dynamic>? get _agentAi => items(_ai, 'agents').where((a) => a['id'] == _agent?['id']).firstOrNull;
   bool get _agentReady => _agentAi?['ready'] == true;
@@ -334,7 +339,8 @@ class _LiveState extends ConsumerState<_Live> {
             _listening = false;
             if (_core == CoreState.listening) _core = CoreState.idle;
           });
-          if (_handsFree) _scheduleListen();
+          _gate.ended(); // sends whatever was heard, even if no final result came
+          if (_handsFree && !_gate.committed) _scheduleListen();
         }
       },
       onError: (e) {
@@ -344,6 +350,10 @@ class _LiveState extends ConsumerState<_Live> {
           _listening = false;
           if (_core == CoreState.listening) _core = CoreState.idle;
         });
+        if (_gate.heard.isNotEmpty) {
+          _gate.ended(); // keep what was already heard instead of dropping it
+          return;
+        }
         if (_handsFree) {
           if (!quiet && ++_sttErrors >= 3) {
             _setHandsFree(false);
@@ -368,6 +378,9 @@ class _LiveState extends ConsumerState<_Live> {
     if (!await _ensureStt()) return;
     await _voice.stop();
     if (!mounted) return;
+    _gate
+      ..reset()
+      ..silence = Duration(milliseconds: _handsFree ? 1500 : 1300);
     setState(() {
       _listening = true;
       _core = CoreState.listening;
@@ -375,17 +388,9 @@ class _LiveState extends ConsumerState<_Live> {
     });
     await _stt.listen(
       onResult: (SpeechRecognitionResult r) {
+        if (_gate.committed) return;
         setState(() => _input.text = r.recognizedWords);
-        if (!r.finalResult) return;
-        final words = r.recognizedWords.trim();
-        if (words.isEmpty) return;
-        _sttErrors = 0;
-        if (_handsFree && _stopPhrase.hasMatch(words)) {
-          _input.clear();
-          _setHandsFree(false);
-          return;
-        }
-        _send(words);
+        _gate.feed(r.recognizedWords, isFinal: r.finalResult);
       },
       onSoundLevelChange: (l) => setState(() => _level = ((l + 2) / 12).clamp(0, 1).toDouble()),
       listenOptions: SpeechListenOptions(
@@ -396,6 +401,19 @@ class _LiveState extends ConsumerState<_Live> {
         pauseFor: Duration(milliseconds: _handsFree ? 2200 : 3000),
       ),
     );
+  }
+
+  /// The user finished speaking: send it (or end hands-free on a stop phrase).
+  void _heardRequest(String words) {
+    if (!mounted) return;
+    _sttErrors = 0;
+    if (_listening) _stt.stop();
+    if (_handsFree && _stopPhrase.hasMatch(words)) {
+      _input.clear();
+      _setHandsFree(false);
+      return;
+    }
+    _send(words);
   }
 
   void _newChat() {
@@ -416,6 +434,7 @@ class _LiveState extends ConsumerState<_Live> {
     _sub?.cancel();
     _stt.cancel();
     _relisten?.cancel();
+    _gate.dispose();
     _voice.dispose();
     if (_handsFree) WakelockPlus.disable();
     _input.dispose();
@@ -463,31 +482,38 @@ class _LiveState extends ConsumerState<_Live> {
       body: SafeArea(
         top: false,
         child: Column(children: [
+          // The core keeps its own band at the top; the conversation sits below it and never covers it.
+          // It grows while listening or speaking so the voice animation stays the focus.
           AnimatedContainer(
-            duration: MediaQuery.of(context).disableAnimations ? Duration.zero : const Duration(milliseconds: 320),
+            duration: MediaQuery.of(context).disableAnimations ? Duration.zero : const Duration(milliseconds: 360),
             curve: Curves.easeOutCubic,
-            height: hasChat ? 150 : MediaQuery.of(context).size.height * .42,
-            child: Stack(children: [
-              Positioned.fill(
+            height: coreHeight(MediaQuery.of(context).size.height, hasChat: hasChat, voiceActive: _listening || _core == CoreState.speaking),
+            child: Column(children: [
+              Expanded(
                 child: Semantics(
                   button: true,
                   label: _core == CoreState.speaking ? 'Stop speaking' : (_listening ? 'Stop listening' : 'Start talking'),
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: _tapCore,
-                    child: EnergyCore(state: _core, agent: template, reduceMotion: prefs.reduceMotion, level: _listening ? _level : (_core == CoreState.speaking ? _speakLevel : 0), compact: hasChat),
+                    child: EnergyCore(
+                      state: _core,
+                      agent: template,
+                      reduceMotion: prefs.reduceMotion,
+                      level: _listening ? _level : (_core == CoreState.speaking ? _speakLevel : 0),
+                      word: _core == CoreState.speaking ? _word : -1,
+                      wordWeight: _wordWeight,
+                      compact: hasChat,
+                    ),
                   ),
                 ),
               ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 8,
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6, top: 2),
                 child: Semantics(liveRegion: true, child: Text(coreLabel(_core), textAlign: TextAlign.center, style: qs(13, w: FontWeight.w600, c: q.text2, ls: .4))),
               ),
             ]),
           ),
-          LiveCaption(text: _spoken, word: _word, visible: _core == CoreState.speaking && _spoken.isNotEmpty, reduceMotion: prefs.reduceMotion),
           if (_handsFree) HandsFreeBar(listening: _listening, speaking: _core == CoreState.speaking, onEnd: () => _setHandsFree(false)),
           if (_loading) const LinearProgressIndicator(minHeight: 2),
           if (!_loading && (_loadError != null || !aiOk)) _AiBanner(
@@ -503,11 +529,16 @@ class _LiveState extends ConsumerState<_Live> {
           Expanded(
             child: !hasChat
                 ? _Starters(agent: _agent, onPick: aiOk ? _send : null)
-                : ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                    itemCount: _msgs.length,
-                    itemBuilder: (_, i) => _Bubble(msg: _msgs[i], agentName: _agent?['name'] as String? ?? 'Assistant', template: template),
+                : ShaderMask(
+                    // Messages fade out as they scroll up toward the core instead of cutting into it.
+                    shaderCallback: (r) => const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x00000000), Color(0xFF000000)], stops: [0, .08]).createShader(r),
+                    blendMode: BlendMode.dstIn,
+                    child: ListView.builder(
+                      controller: _scroll,
+                      padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
+                      itemCount: _msgs.length,
+                      itemBuilder: (_, i) => _Bubble(msg: _msgs[i], agentName: _agent?['name'] as String? ?? 'Assistant', template: template),
+                    ),
                   ),
           ),
           _Composer(
@@ -787,47 +818,12 @@ class _History extends StatelessWidget {
   }
 }
 
-/// Live captions: the word being spoken is lit in the accent colour; spoken words stay bright, upcoming words are dim.
-class LiveCaption extends StatelessWidget {
-  const LiveCaption({super.key, required this.text, required this.word, required this.visible, required this.reduceMotion});
-  final String text;
-  final int word;
-  final bool visible, reduceMotion;
-  @override
-  Widget build(BuildContext context) {
-    final q = context.q;
-    final words = wordsOf(text);
-    final start = word < 0 ? 0 : (word ~/ 14) * 14; // page in groups so the line doesn't jitter
-    final end = math.min(words.length, start + 22);
-    return AnimatedSize(
-      duration: reduceMotion ? Duration.zero : const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-      child: !visible || words.isEmpty
-          ? const SizedBox(width: double.infinity)
-          : Padding(
-              padding: const EdgeInsets.fromLTRB(24, 4, 24, 10),
-              child: Semantics(
-                liveRegion: false,
-                label: text,
-                excludeSemantics: true,
-                child: Text.rich(
-                  TextSpan(children: [
-                    if (start > 0) TextSpan(text: '… ', style: qs(17, c: q.text3)),
-                    for (var i = start; i < end; i++)
-                      TextSpan(
-                        text: '${words[i]} ',
-                        style: qs(17, h: 1.45, w: i == word ? FontWeight.w700 : FontWeight.w500, c: i == word ? q.halo : (i < word ? q.text : q.text3)),
-                      ),
-                    if (end < words.length) TextSpan(text: '…', style: qs(17, c: q.text3)),
-                  ]),
-                  textAlign: TextAlign.center,
-                  maxLines: 3,
-                  overflow: TextOverflow.fade,
-                ),
-              ),
-            ),
-    );
-  }
+/// Height of the core band: big when the chat is empty, a steady band once messages exist,
+/// and a little larger while listening or speaking.
+double coreHeight(double screen, {required bool hasChat, required bool voiceActive}) {
+  if (!hasChat) return screen * .42;
+  final base = (screen * .27).clamp(180.0, 250.0);
+  return voiceActive ? (screen * .36).clamp(base, 320.0) : base;
 }
 
 class HandsFreeBar extends StatelessWidget {

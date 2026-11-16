@@ -102,6 +102,12 @@ class SessionNotifier extends Notifier<SessionState> {
     await _start(t);
   }
 
+  /// Finishes a sign-in that happened outside the email form (Continue with Google).
+  Future<void> signInWithToken(String token) => _start(token);
+
+  /// Exposed for the Google sign-in handshake (public endpoints, no token needed).
+  Api get api => _api;
+
   Future<void> _start(String token) async {
     _api.token = token;
     await _storage.write(key: 'token', value: token);

@@ -60,6 +60,76 @@ String speakable(String s) => s
 
 List<String> wordsOf(String s) => s.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
 
+/// Decides when a spoken request is finished and sends it exactly once.
+///
+/// Many Android speech services never deliver a `finalResult`, or report `done` / `notListening`
+/// before it arrives. So a request is committed on whichever comes first: the final result, the
+/// recogniser stopping, or [silence] with no new words.
+class UtteranceGate {
+  UtteranceGate({required this.onCommit, this.silence = const Duration(milliseconds: 1500)});
+  final void Function(String words) onCommit;
+  Duration silence;
+  String _heard = '';
+  bool _committed = false;
+  Timer? _timer;
+
+  String get heard => _heard;
+  bool get committed => _committed;
+
+  /// Starts a new utterance.
+  void reset() {
+    _timer?.cancel();
+    _heard = '';
+    _committed = false;
+  }
+
+  /// A recognition result (partial or final).
+  void feed(String words, {bool isFinal = false}) {
+    if (_committed) return;
+    final w = words.trim();
+    if (w.isEmpty) return;
+    final changed = w != _heard;
+    _heard = w;
+    if (isFinal) return commit();
+    if (changed) {
+      _timer?.cancel();
+      _timer = Timer(silence, commit);
+    }
+  }
+
+  /// The recogniser stopped (done / notListening / user tapped the mic).
+  void ended() => commit();
+
+  void commit() {
+    _timer?.cancel();
+    if (_committed || _heard.isEmpty) return;
+    _committed = true;
+    onCommit(_heard);
+  }
+
+  void dispose() => _timer?.cancel();
+}
+
+/// Rough syllable count, used to size the core's pulse for each spoken word.
+int syllables(String word) {
+  final w = word.toLowerCase().replaceAll(RegExp(r'[^a-z]'), '');
+  if (w.isEmpty) return 1;
+  final groups = RegExp(r'[aeiouy]+').allMatches(w).length - (w.length > 3 && w.endsWith('e') && !w.endsWith('le') ? 1 : 0);
+  return groups.clamp(1, 6);
+}
+
+/// Estimated word boundaries (ms from start) for [words] at TTS [rate] (0..1, 0.5 = normal).
+List<double> estimateWordTimes(List<String> words, double rate) {
+  final msPerSyllable = 210 / (rate <= 0 ? .5 : rate) * .5; // ~ 4.8 syllables/s at normal rate
+  final out = <double>[];
+  var acc = 0.0;
+  for (final w in words) {
+    acc += syllables(w) * msPerSyllable + (RegExp(r'[,;:]$').hasMatch(w) ? 180 : 0) + (RegExp(r'[.!?]$').hasMatch(w) ? 380 : 0) + 40;
+    out.add(acc);
+  }
+  return out;
+}
+
 /// Splits long replies so the first audio arrives quickly: a short opener, then up to ~1200 chars per part.
 List<String> chunk(String text) {
   final sentences = RegExp(r'[^.!?]+[.!?]+["”)]*\s*|[^.!?]+$').allMatches(text).map((m) => m[0]!.trim()).where((s) => s.isNotEmpty).toList();
@@ -79,7 +149,7 @@ List<String> chunk(String text) {
 }
 
 /// Plays a reply aloud and reports the spoken word index and a 0..1 loudness level as it goes,
-/// so the energy core and the captions follow the actual speech.
+/// so the energy core pulses with each word as it is spoken.
 class Speaker {
   Speaker({required this.onWord, required this.onLevel, required this.onDone, required this.onNotice});
   final void Function(int index) onWord;
@@ -208,21 +278,45 @@ class Speaker {
     for (final m in RegExp(r'\S+').allMatches(part)) {
       starts.add(m.start);
     }
+    final words = wordsOf(part);
+    var gotProgress = false;
+    var lastWord = -1;
+    void hit(int idx) {
+      if (idx == lastWord) return;
+      lastWord = idx;
+      onWord(offset + idx);
+      _level = .55 + .45 * math.min(1, syllables(words[idx.clamp(0, words.length - 1)]) / 3); // a pulse per spoken word
+    }
+
     _tts.setProgressHandler((String t, int start, int end, String word) {
       if (my != _session) return;
+      gotProgress = true;
       var idx = 0;
       while (idx + 1 < starts.length && starts[idx + 1] <= start) {
         idx++;
       }
-      onWord(offset + idx);
-      _level = .55 + .45 * math.min(1, word.length / 7); // a pulse per spoken word
+      hit(idx);
     });
+    // Some engines never send progress callbacks: fall back to estimated word timing.
+    final est = estimateWordTimes(words, p.rate);
+    final clock = Stopwatch();
     _tick?.cancel();
     _tick = Timer.periodic(const Duration(milliseconds: 33), (_) {
+      if (my != _session) return;
+      if (!gotProgress && words.isNotEmpty) {
+        final t = clock.elapsedMilliseconds - 250; // engine start latency
+        if (t >= 0) {
+          var w = est.indexWhere((b) => b > t);
+          if (w < 0) w = words.length - 1;
+          hit(w);
+        }
+      }
       _level *= .86;
       onLevel(_level);
     });
+    clock.start();
     await _tts.speak(part);
+    clock.stop();
   }
 
   Future<void> _playAudio(Map<String, dynamic> a, String part, int offset, int my) async {

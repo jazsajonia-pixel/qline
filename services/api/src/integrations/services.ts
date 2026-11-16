@@ -74,6 +74,44 @@ export async function gmailNewMessages(token: string, afterEpochSec: number, max
   return out;
 }
 
+/** Search results with headers + snippet only (format=metadata keeps it light). */
+export async function gmailSearch(token: string, query: string, max = 8) {
+  const list = await api(token, `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${max}&q=${encodeURIComponent(query)}`);
+  const out: { id: string; from: string | null; subject: string; date: string | null; snippet: string; unread: boolean }[] = [];
+  for (const m of list.messages ?? []) {
+    const r = await api(token, `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
+    const h: Record<string, string> = {};
+    for (const x of r.payload?.headers ?? []) h[String(x.name).toLowerCase()] = x.value;
+    out.push({ id: m.id, from: h['from'] ?? null, subject: h['subject'] ?? '(no subject)', date: h['date'] ?? null, snippet: String(r.snippet ?? '').slice(0, 300), unread: (r.labelIds ?? []).includes('UNREAD') });
+  }
+  return out;
+}
+
+export async function gmailMessage(token: string, id: string) {
+  const full = await api(token, `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`);
+  const h: Record<string, string> = {};
+  for (const x of full.payload?.headers ?? []) h[String(x.name).toLowerCase()] = x.value;
+  let plain = '';
+  let html = '';
+  const walk = (p: any) => {
+    if (!p) return;
+    if (p.mimeType === 'text/plain' && p.body?.data && !plain) plain = b64url(p.body.data);
+    if (p.mimeType === 'text/html' && p.body?.data && !html) html = b64url(p.body.data);
+    for (const c of p.parts ?? []) walk(c);
+  };
+  walk(full.payload);
+  return { id, from: h['from'] ?? null, to: h['to'] ?? null, subject: h['subject'] ?? '(no subject)', date: h['date'] ?? null, text: (plain || stripHtml(html) || full.snippet || '').slice(0, 4000) };
+}
+
+export async function outlookSearch(token: string, query: string, max = 8) {
+  const plain = query.replace(/\b(in|is|newer_than|older_than|label|category):\S+/g, ' ').replace(/\s+/g, ' ').trim();
+  const url = plain
+    ? `https://graph.microsoft.com/v1.0/me/messages?$top=${max}&$search=${encodeURIComponent(`"${plain.replace(/"/g, '')}"`)}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead`
+    : `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=${max}&$orderby=receivedDateTime desc&$select=id,subject,from,receivedDateTime,bodyPreview,isRead`;
+  const r = await api(token, url);
+  return (r.value ?? []).map((m: any) => ({ id: m.id, from: m.from?.emailAddress?.address ?? null, subject: m.subject ?? '(no subject)', date: m.receivedDateTime, snippet: String(m.bodyPreview ?? '').slice(0, 300), unread: !m.isRead }));
+}
+
 function mime(to: string, subject: string, body: string, from?: string | null) {
   const enc = (s: string) => `=?UTF-8?B?${Buffer.from(s).toString('base64')}?=`;
   return [from ? `From: ${from}` : null, `To: ${to}`, `Subject: ${enc(subject)}`, 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: 8bit', '', body]
@@ -199,6 +237,72 @@ export async function formCreate(token: string, title: string, description: stri
     if (k && qid) questions[k] = qid;
   }
   return { id: f.formId as string, responderUri: (full.responderUri ?? f.responderUri) as string, editUrl: `https://docs.google.com/forms/d/${f.formId}/edit`, questions };
+}
+
+export interface FormQuestion {
+  title: string;
+  type: 'short' | 'paragraph' | 'multiple_choice' | 'checkboxes' | 'dropdown' | 'date' | 'scale';
+  required?: boolean;
+  options?: string[];
+}
+
+/** The Forms API body for one question. Exported for tests. */
+export function formQuestionBody(x: FormQuestion) {
+  const choice = { multiple_choice: 'RADIO', checkboxes: 'CHECKBOX', dropdown: 'DROP_DOWN' } as const;
+  const base = { required: !!x.required };
+  if (x.type in choice) {
+    const opts = (x.options?.length ? x.options : ['Option 1']).slice(0, 30).map((value) => ({ value }));
+    return { ...base, choiceQuestion: { type: choice[x.type as keyof typeof choice], options: opts } };
+  }
+  if (x.type === 'date') return { ...base, dateQuestion: { includeYear: true } };
+  if (x.type === 'scale') return { ...base, scaleQuestion: { low: 1, high: 5, lowLabel: 'Low', highLabel: 'High' } };
+  return { ...base, textQuestion: { paragraph: x.type === 'paragraph' } };
+}
+
+/** Creates and publishes a Google Form with any questions. */
+export async function formCreateCustom(token: string, title: string, description: string, questions: FormQuestion[]) {
+  const f = await api(token, 'https://forms.googleapis.com/v1/forms', { body: { info: { title, documentTitle: title } } });
+  const requests: any[] = [];
+  if (description) requests.push({ updateFormInfo: { info: { description }, updateMask: 'description' } });
+  questions.forEach((x, i) => requests.push({ createItem: { item: { title: x.title, questionItem: { question: formQuestionBody(x) } }, location: { index: i } } }));
+  await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}:batchUpdate`, { body: { requests } });
+  try {
+    await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}:setPublishSettings`, {
+      body: { publishSettings: { publishState: { isPublished: true, isAcceptingResponses: true } }, updateMask: '*' },
+    });
+  } catch {
+    /* older forms are published by default */
+  }
+  const full = await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}`);
+  return { id: f.formId as string, responderUri: (full.responderUri ?? f.responderUri) as string, editUrl: `https://docs.google.com/forms/d/${f.formId}/edit` };
+}
+
+/** Responses with answers keyed by question title. */
+export async function formResponsesReadable(token: string, id: string, limit = 20) {
+  const form = await api(token, `https://forms.googleapis.com/v1/forms/${encodeURIComponent(id)}`);
+  const titles: Record<string, string> = {};
+  for (const it of form.items ?? []) {
+    const qid = it.questionItem?.question?.questionId;
+    if (qid) titles[qid] = it.title;
+  }
+  const r = await api(token, `https://forms.googleapis.com/v1/forms/${encodeURIComponent(id)}/responses`);
+  return ((r.responses ?? []) as any[])
+    .sort((a, b) => String(b.lastSubmittedTime).localeCompare(String(a.lastSubmittedTime)))
+    .slice(0, limit)
+    .map((x) => ({
+      submittedAt: x.lastSubmittedTime,
+      email: x.respondentEmail ?? null,
+      answers: Object.fromEntries(Object.entries(x.answers ?? {}).map(([qid, v]: [string, any]) => [titles[qid] ?? qid, (v.textAnswers?.answers ?? []).map((t: any) => t.value).join(', ')])),
+    }));
+}
+
+/** A spreadsheet with custom headers and rows. */
+export async function sheetCreateCustom(token: string, title: string, headers: string[], rows: string[][]) {
+  const r = await api(token, 'https://sheets.googleapis.com/v4/spreadsheets', {
+    body: { properties: { title }, sheets: [{ properties: { title: 'Sheet1', gridProperties: { frozenRowCount: 1 } } }] },
+  });
+  await api(token, `https://sheets.googleapis.com/v4/spreadsheets/${r.spreadsheetId}/values/Sheet1!A1?valueInputOption=USER_ENTERED`, { method: 'PUT', body: { values: [headers, ...rows] } });
+  return { id: r.spreadsheetId as string, url: r.spreadsheetUrl as string };
 }
 
 export async function formResponses(token: string, id: string, afterIso: string | null) {

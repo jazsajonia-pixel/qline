@@ -14,6 +14,7 @@ import { internalRoutes, systemRoutes } from './modules/system';
 import { workflowRoutes } from './modules/workflows';
 import { workRoutes } from './modules/work';
 import { integrationRoutes, oauthPublicRoutes } from './modules/integrations';
+import { googleSignInRoutes } from './modules/google-signin';
 import { voiceRoutes } from './modules/voice';
 
 export const app = new Hono<Env>();
@@ -71,6 +72,7 @@ app.on(['GET', 'POST'], '/v1/auth/*', (c) => getAuth().handler(c.req.raw));
 app.route('/v1', systemRoutes);
 app.route('/v1', orgRoutes);
 app.route('/v1', oauthPublicRoutes);
+app.route('/v1', googleSignInRoutes);
 
 // Everything else is tenant-scoped.
 app.use('/v1/*', requireUser, requireTenant);

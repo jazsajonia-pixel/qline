@@ -14,25 +14,28 @@ import { buildDigest, RECIPES, runAutomationStep } from '../integrations/steps';
 // ---------------------------------------------------------------------------
 // Definition schema (docs/08 §3, linear MVP subset)
 // ---------------------------------------------------------------------------
-const WORKFLOW_TOOLS = ['tasks.create', 'tasks.update', 'notes.create', 'memory.propose', 'drafts.email.create', 'contacts.update'] as const;
+const WORKFLOW_TOOLS = ['tasks.create', 'tasks.update', 'notes.create', 'memory.propose', 'drafts.email.create', 'contacts.update', 'contacts.create', 'calendar.create', 'forms.create', 'sheets.create'] as const;
+
+/** Optional condition on any step: rendered with the run context; '', '0', 'false' or 'none' skips the step. */
+const when = { when: z.string().max(300).optional() };
 
 const step = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('action'), tool: z.enum(WORKFLOW_TOOLS), args: z.record(z.string(), z.any()) }),
-  z.object({ type: z.literal('approval'), title: z.string().min(1).max(200) }),
-  z.object({ type: z.literal('notify'), title: z.string().min(1).max(200), body: z.string().max(4000).optional() }),
+  z.object({ type: z.literal('action'), ...when, tool: z.enum(WORKFLOW_TOOLS), args: z.record(z.string(), z.any()) }),
+  z.object({ type: z.literal('approval'), ...when, title: z.string().min(1).max(200) }),
+  z.object({ type: z.literal('notify'), ...when, title: z.string().min(1).max(200), body: z.string().max(4000).optional() }),
   // v1.2 automation steps
-  z.object({ type: z.literal('ai'), prompt: z.string().min(1).max(4000), saveAs: z.string().regex(/^[a-z_]{1,30}$/) }),
-  z.object({ type: z.literal('slack'), text: z.string().min(1).max(4000) }),
-  z.object({ type: z.literal('email'), to: z.string().max(320), subject: z.string().min(1).max(300), body: z.string().min(1).max(20000) }),
-  z.object({ type: z.literal('calendar'), title: z.string().min(1).max(200), inDays: z.number().int().min(0).max(60).default(1), hourUtc: z.number().int().min(0).max(23).default(1), minutes: z.number().int().min(10).max(480).default(30) }),
+  z.object({ type: z.literal('ai'), ...when, prompt: z.string().min(1).max(4000), saveAs: z.string().regex(/^[a-z_]{1,30}$/) }),
+  z.object({ type: z.literal('slack'), ...when, text: z.string().min(1).max(4000) }),
+  z.object({ type: z.literal('email'), ...when, to: z.string().max(320), subject: z.string().min(1).max(300), body: z.string().min(1).max(20000) }),
+  z.object({ type: z.literal('calendar'), ...when, title: z.string().min(1).max(200), inDays: z.number().int().min(0).max(60).default(1), hourUtc: z.number().int().min(0).max(23).default(1), minutes: z.number().int().min(10).max(480).default(30) }),
 ]);
 const STEP_LABEL: Record<string, string> = { ai: 'AI writes', slack: 'Post to Slack', email: 'Send email', calendar: 'Calendar event' };
 
 export const definitionSchema = z.object({
   trigger: z.discriminatedUnion('type', [
     z.object({ type: z.literal('manual') }),
-    z.object({ type: z.literal('event'), event: z.enum(['contact.created', 'task.created', 'import.completed', 'lead.created', 'lead.urgent']) }),
-    z.object({ type: z.literal('schedule'), every: z.literal('day').default('day'), hourUtc: z.number().int().min(0).max(23) }),
+    z.object({ type: z.literal('event'), event: z.enum(['contact.created', 'task.created', 'import.completed', 'lead.created', 'lead.urgent', 'email.important']) }),
+    z.object({ type: z.literal('schedule'), every: z.enum(['day', 'week']).default('day'), hourUtc: z.number().int().min(0).max(23), weekday: z.number().int().min(0).max(6).optional().describe('0 = Sunday (UTC); only for every=week') }),
   ]),
   steps: z.array(step).min(1).max(20),
 });
@@ -51,6 +54,8 @@ function render(v: unknown, ctx: Record<string, any>): any {
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, render(x, ctx)]));
   return v;
 }
+
+export const isFalsy = (v: string) => ['', '0', 'false', 'none', 'no', 'null', 'undefined'].includes(v.trim().toLowerCase());
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -119,6 +124,12 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string): Promise<a
           output ? JSON.stringify(output) : null,
         ]);
       const next = () => q.exec('update workflow_runs set current_step=current_step+1 where id=$1', [runId]);
+
+      if ('when' in s && s.when !== undefined && isFalsy(s.when)) {
+        await record('skipped', `Skipped: condition not met`);
+        await next();
+        return { stop: false };
+      }
 
       if (s.type === 'approval') {
         if (run.dry_run) {
@@ -290,6 +301,10 @@ export async function runScheduledWorkflows(): Promise<{ started: number }> {
       return q.one('select workspace_id from workflows where id=$1', [d.workflow_id]);
     });
     const day = new Date().toISOString().slice(0, 10);
+    const trig = await withTenant({ orgId: d.org_id, userId: d.owner_id }, (q) =>
+      q.one(`select v.definition->'trigger' as t from workflows w join workflow_versions v on v.workflow_id=w.id and v.version=w.published_version where w.id=$1`, [d.workflow_id]),
+    );
+    if (trig?.t?.every === 'week' && trig.t.weekday != null && new Date().getUTCDay() !== Number(trig.t.weekday)) continue; // not this weekday
     const digest = await withTenant({ orgId: d.org_id, userId: d.owner_id }, (q) => buildDigest(q));
     await startWorkflowRun({ orgId: d.org_id, workspaceId: ws.workspace_id, userId: d.owner_id }, d.workflow_id, { kind: 'schedule', dedupeKey: `schedule:${day}`, data: { date: day, ...digest } });
     started += 1;

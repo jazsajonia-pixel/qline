@@ -58,7 +58,8 @@ void main() {
     await t.pump();
     expect(find.text('Enter a valid email'), findsOneWidget);
     expect(find.text('Enter your password'), findsOneWidget);
-    expect(find.textContaining('not configured'), findsOneWidget);
+    expect(find.text('Continue with Google'), findsOneWidget);
+    expect(find.textContaining('not configured'), findsNothing);
     await t.ensureVisible(find.text('New to Qline? Create an account'));
     await t.tap(find.text('New to Qline? Create an account'));
     await t.pump();

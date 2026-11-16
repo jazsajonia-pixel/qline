@@ -27,6 +27,7 @@ import {
 import { classify, loadRules, rulesSchema, saveRules, syncConnection } from '../integrations/leads';
 import { formCreate, sheetCreate, slackChannels, slackPost, upcomingEvents } from '../integrations/services';
 import { open } from '../core/secrets';
+import { finishGoogleSignIn, SIGNIN_STATE_PREFIX } from './google-signin';
 import { complete } from '@qline/ai';
 import { resolveModel } from '../agent/models';
 
@@ -77,8 +78,8 @@ const publicConn = (c: any) =>
 // ---------------------------------------------------------------------------------------------
 export const oauthPublicRoutes = new Hono<Env>();
 
-function page(ok: boolean, title: string, detail: string, provider: string) {
-  const link = `qline://integrations?provider=${encodeURIComponent(provider)}&ok=${ok ? 1 : 0}`;
+function page(ok: boolean, title: string, detail: string, provider: string, back?: string) {
+  const link = back ?? `qline://integrations?provider=${encodeURIComponent(provider)}&ok=${ok ? 1 : 0}`;
   const esc = (s: string) => s.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]!);
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qline</title>
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0A0812;color:#EFECF6;font:16px/1.5 system-ui,sans-serif}
@@ -94,6 +95,10 @@ oauthPublicRoutes.get('/integrations/:provider/callback', async (c) => {
   const state = c.req.query('state') ?? '';
   const code = c.req.query('code');
   const err = c.req.query('error');
+  if (p === 'google' && state.startsWith(SIGNIN_STATE_PREFIX)) {
+    const r = await finishGoogleSignIn(state, code, err);
+    return c.html(page(r.ok, r.title, r.detail, p, `qline://auth?ok=${r.ok ? 1 : 0}`), r.ok ? 200 : 400);
+  }
   const st = state
     ? await withTenant({ orgId: null, userId: 'system:oauth' }, async (q) => {
         const r = await q.one(`delete from oauth_states where state=$1 and provider=$2 returning *, created_at > now() - interval '30 minutes' as fresh`, [state, p]);

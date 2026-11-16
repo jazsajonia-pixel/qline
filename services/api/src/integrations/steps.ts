@@ -86,8 +86,23 @@ export async function buildDigest(q: Q) {
   const today = await q.many(
     `select title from tasks where deleted_at is null and status <> 'done' and due_at >= now() and due_at < now() + interval '24 hours' order by due_at limit 15`,
   );
+  const doneToday = await q.many(`select title from tasks where deleted_at is null and status = 'done' and updated_at > now() - interval '24 hours' order by updated_at desc limit 15`);
+  const tomorrow = await q.many(
+    `select title from tasks where deleted_at is null and status <> 'done' and due_at >= now() + interval '12 hours' and due_at < now() + interval '36 hours' order by due_at limit 15`,
+  );
+  const week = await q.one(
+    `select (select count(*) from contacts where deleted_at is null and stage='lead' and created_at > now() - interval '7 days')::int as leads,
+            (select count(*) from tasks where deleted_at is null and status='done' and updated_at > now() - interval '7 days')::int as done,
+            (select count(*) from tasks where deleted_at is null and status<>'done')::int as open`,
+  );
   const fmt = (rows: any[], f: (r: any) => string) => (rows.length ? rows.map((r) => `- ${f(r)}`).join('\n') : '(none)');
   return {
+    done_today_count: doneToday.length,
+    done_today_text: fmt(doneToday, (t) => t.title),
+    tomorrow_text: fmt(tomorrow, (t) => t.title),
+    week_leads: week?.leads ?? 0,
+    week_done: week?.done ?? 0,
+    open_tasks: week?.open ?? 0,
     leads_count: leads.length,
     urgent_count: leads.filter((l: any) => l.urgency === 'urgent' || l.urgency === 'high').length,
     leads_text: fmt(leads, (l) => `${l.name}${l.urgency ? ` [${l.urgency}]` : ''}${l.s ? `: ${l.s}` : ''}`),
@@ -159,6 +174,66 @@ export const RECIPES = [
         },
         { type: 'notify', title: 'Morning briefing', body: '{{brief}}' },
         { type: 'slack', text: ':sunrise: *Morning briefing*\n{{brief}}' },
+      ],
+    },
+  },
+  {
+    id: 'important_email_task',
+    name: 'Important email → task',
+    description: 'When AI flags an email as important (bills, client problems, deadlines), you get a notification and one tap turns it into a task.',
+    needs: ['Gmail or Outlook', 'AI provider'],
+    definition: {
+      trigger: { type: 'event', event: 'email.important' },
+      steps: [
+        { type: 'approval', title: 'Make a task for “{{trigger.subject}}”?' },
+        { type: 'action', tool: 'tasks.create', args: { title: 'Handle: {{trigger.subject}}', description: '{{trigger.summary}} (from {{trigger.from}})', priority: 'high', dueInDays: 1 } },
+      ],
+    },
+  },
+  {
+    id: 'overdue_nudge',
+    name: 'Overdue task nudge',
+    description: 'Every morning at 9:00 Manila time, a notification lists overdue tasks. Nothing is sent when you are all caught up.',
+    needs: [],
+    definition: {
+      trigger: { type: 'schedule', every: 'day', hourUtc: 1 },
+      steps: [{ type: 'notify', when: '{{trigger.overdue_count}}', title: '{{trigger.overdue_count}} overdue task(s)', body: '{{trigger.overdue_text}}' }],
+    },
+  },
+  {
+    id: 'evening_wrap',
+    name: 'Evening wrap-up',
+    description: 'At 6:00 pm Manila time, AI sums up what got done today and what is due tomorrow.',
+    needs: ['AI provider'],
+    definition: {
+      trigger: { type: 'schedule', every: 'day', hourUtc: 10 },
+      steps: [
+        {
+          type: 'ai',
+          saveAs: 'wrap',
+          prompt:
+            'Write an end-of-day wrap-up for a business owner in at most 5 short lines: a one-line win, then what is due tomorrow, then anything overdue. Use only this data.\nDone today ({{trigger.done_today_count}}):\n{{trigger.done_today_text}}\nDue tomorrow:\n{{trigger.tomorrow_text}}\nOverdue ({{trigger.overdue_count}}):\n{{trigger.overdue_text}}',
+        },
+        { type: 'notify', title: 'Evening wrap-up', body: '{{wrap}}' },
+      ],
+    },
+  },
+  {
+    id: 'weekly_review',
+    name: 'Weekly review',
+    description: 'Every Monday at 8:00 am Manila time, AI writes a short review of last week (leads, finished tasks, open work) for the app and Slack.',
+    needs: ['AI provider', 'Slack (optional)'],
+    definition: {
+      trigger: { type: 'schedule', every: 'week', weekday: 1, hourUtc: 0 },
+      steps: [
+        {
+          type: 'ai',
+          saveAs: 'review',
+          prompt:
+            'Write a weekly review for a small-business owner in at most 7 short lines: the headline, leads, finished work, and the top 3 priorities for this week. Use only this data.\nNew leads last 7 days: {{trigger.week_leads}}\nTasks finished last 7 days: {{trigger.week_done}}\nOpen tasks: {{trigger.open_tasks}}\nOverdue ({{trigger.overdue_count}}):\n{{trigger.overdue_text}}\nRecent leads:\n{{trigger.leads_text}}',
+        },
+        { type: 'notify', title: 'Weekly review', body: '{{review}}' },
+        { type: 'slack', text: ':bar_chart: *Weekly review*\n{{review}}' },
       ],
     },
   },

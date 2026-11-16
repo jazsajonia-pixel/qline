@@ -66,12 +66,19 @@ class _Model {
   _P p = _states[CoreState.idle]!.clone();
   Color hue = AgentStyle.of('ceo').hue;
   double t = 0, flash = 0;
+  /// Per-word speech pulse 0..1 (decays), and expanding ripples [age 0..1, strength].
+  double pulse = 0, pulsePhase = 0;
+  final List<List<double>> ripples = [];
 }
 
 /// Animated energy core. Purely decorative: wrapped in a Semantics label of the state.
 class EnergyCore extends StatefulWidget {
-  const EnergyCore({super.key, required this.state, this.agent = 'ceo', this.reduceMotion = false, this.compact = false, this.level = 0, this.background = true});
+  const EnergyCore({super.key, required this.state, this.agent = 'ceo', this.reduceMotion = false, this.compact = false, this.level = 0, this.background = true, this.word = -1, this.wordWeight = 1});
   final CoreState state;
+  /// Index of the word being spoken (speaking state). Each change sends a pulse through the core.
+  final int word;
+  /// 0..1 strength of the current word (e.g. syllables / 3).
+  final double wordWeight;
   final String agent;
   final bool reduceMotion;
   final bool compact;
@@ -122,6 +129,14 @@ class _EnergyCoreState extends State<EnergyCore> with SingleTickerProviderStateM
   void didUpdateWidget(EnergyCore old) {
     super.didUpdateWidget(old);
     if (widget.state == CoreState.success && old.state != CoreState.success) _m.flash = 1;
+    if (widget.state == CoreState.speaking && widget.word >= 0 && widget.word != old.word) {
+      final k = (.55 + .45 * widget.wordWeight).clamp(.3, 1.0).toDouble();
+      _m.pulse = math.max(_m.pulse, k);
+      _m.pulsePhase = (widget.word * 1.7) % 6.283;
+      if (_m.ripples.length < 6) _m.ripples.add([0, k]);
+      if (widget.reduceMotion) _m.ripples.clear();
+    }
+    if (widget.state != CoreState.speaking) _m.ripples.clear();
     _apply();
   }
 
@@ -134,6 +149,11 @@ class _EnergyCoreState extends State<EnergyCore> with SingleTickerProviderStateM
     _m.p.towards(_states[widget.state]!, k);
     _m.hue = Color.lerp(_m.hue, ag.hue, k)!;
     _m.flash = math.max(0, _m.flash - dt * 2.5);
+    _m.pulse = math.max(0, _m.pulse - dt * 4.2);
+    for (final r in _m.ripples) {
+      r[0] += dt * 1.6;
+    }
+    _m.ripples.removeWhere((r) => r[0] >= 1);
     _repaint.value++;
   }
 
@@ -174,7 +194,8 @@ class _CorePainter extends CustomPainter {
     final hue = _mix(m.hue, const Color(0xFF969EA8), p.desat);
     final cx = w / 2, cy = h * .5, R = math.min(w, h) * (compact ? .3 : .22);
     final synth = .35 + .35 * math.sin(t * 7.3) * math.sin(t * 2.1) + .3 * math.sin(t * 13.7).abs();
-    final micAmp = p.amp * (level > 0 ? level : synth);
+    final talk = state == CoreState.speaking ? m.pulse : 0.0;
+    final micAmp = p.amp * (level > 0 ? level : synth) * (state == CoreState.speaking ? .6 : 1) + talk * .9;
     final ctr = Offset(cx, cy);
     final paint = Paint();
 
@@ -224,7 +245,7 @@ class _CorePainter extends CustomPainter {
       }
     }
     final ringC = p.ring;
-    final haloR = R * (1.0 + p.halo * .9 + micAmp * .12);
+    final haloR = R * (1.0 + p.halo * .9 + micAmp * .12 + talk * .16);
     paint.shader = RadialGradient(colors: [_rgba(ringC, 0), _rgba(ringC, .10 * (p.halo * 2 + .2)), _rgba(ringC, 0)], stops: [(R * .95) / (haloR + R * .35), .25 + .75 * (R * .95) / (haloR + R * .35), 1])
         .createShader(Rect.fromCircle(center: ctr, radius: haloR + R * .35));
     c.drawCircle(ctr, haloR + R * .35, paint);
@@ -232,7 +253,7 @@ class _CorePainter extends CustomPainter {
     if (p.halo > .3) {
       c.drawCircle(ctr, R * (1.28 + micAmp * .05), Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = _rgba(ringC, .18 * p.halo));
     }
-    final sc = p.scale * (1 + micAmp * .06);
+    final sc = p.scale * (1 + micAmp * .06 + talk * .12);
     paint.shader = RadialGradient(colors: [_rgba(_mix(hue, Colors.white, .3), .55 * p.glow), _rgba(_mix(hue, const Color(0xFF0A0C14), .55), .55), const Color(0xF5080A12)], stops: const [0, .45, 1])
         .createShader(Rect.fromCircle(center: ctr, radius: R));
     c.drawCircle(ctr, R, paint);
@@ -270,7 +291,7 @@ class _CorePainter extends CustomPainter {
     if (p.wave > .02) {
       for (var i = 0; i <= 120; i++) {
         final a = startA + sweep * i / 120;
-        final rr = R * (1 + p.wave * .022 * math.sin(a * 9 + t * 9) * (.6 + .4 * math.sin(t * 5.1)));
+        final rr = R * (1 + p.wave * (.018 + talk * .06) * math.sin(a * 9 + t * 9 + m.pulsePhase) * (.6 + .4 * math.sin(t * 5.1)) + talk * .035);
         final o = Offset(cx + math.cos(a) * rr, cy + math.sin(a) * rr);
         i == 0 ? ringPath.moveTo(o.dx, o.dy) : ringPath.lineTo(o.dx, o.dy);
       }
@@ -279,6 +300,11 @@ class _CorePainter extends CustomPainter {
     }
     c.drawPath(ringPath, Paint()..style = PaintingStyle.stroke..strokeWidth = p.ringW + 4..color = _rgba(ringC, .35)..maskFilter = MaskFilter.blur(BlurStyle.normal, 7 + p.halo * 8));
     c.drawPath(ringPath, Paint()..style = PaintingStyle.stroke..strokeWidth = p.ringW..color = _rgba(ringC, .95));
+    // word ripples: one soft ring per spoken word, expanding outward
+    for (final r in m.ripples) {
+      final age = r[0], k = r[1];
+      c.drawCircle(ctr, R * (1.04 + age * .7), Paint()..style = PaintingStyle.stroke..strokeWidth = 1.6 * (1 - age) + .4..color = _rgba(_mix(hue, _halo, .5), .55 * k * (1 - age) * (1 - age)));
+    }
     if (p.notch > .3) {
       c.drawLine(Offset(cx, cy - R - 6), Offset(cx, cy - R - 16), Paint()..strokeWidth = 2..color = _rgba(_halo, p.notch));
     }
@@ -296,7 +322,7 @@ class _CorePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_CorePainter old) => old.agent != agent || old.state != state || old.level != level;
+  bool shouldRepaint(_CorePainter old) => old.agent != agent || old.state != state || old.level != level || old.compact != compact;
 }
 
 /// The Qline mark: a ring with a short tail — the "Q-line".
