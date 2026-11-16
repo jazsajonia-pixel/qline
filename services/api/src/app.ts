@@ -13,6 +13,8 @@ import { memberRoutes, orgRoutes } from './modules/orgs';
 import { internalRoutes, systemRoutes } from './modules/system';
 import { workflowRoutes } from './modules/workflows';
 import { workRoutes } from './modules/work';
+import { integrationRoutes, oauthPublicRoutes } from './modules/integrations';
+import { voiceRoutes } from './modules/voice';
 
 export const app = new Hono<Env>();
 
@@ -68,6 +70,7 @@ app.route('/internal', internalRoutes);
 app.on(['GET', 'POST'], '/v1/auth/*', (c) => getAuth().handler(c.req.raw));
 app.route('/v1', systemRoutes);
 app.route('/v1', orgRoutes);
+app.route('/v1', oauthPublicRoutes);
 
 // Everything else is tenant-scoped.
 app.use('/v1/*', requireUser, requireTenant);
@@ -99,3 +102,5 @@ app.route('/v1', aiRoutes);
 app.route('/v1', workflowRoutes);
 app.route('/v1', onboardingRoutes);
 app.route('/v1', importRoutes);
+app.route('/v1', integrationRoutes);
+app.route('/v1', voiceRoutes);

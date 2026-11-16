@@ -3,6 +3,8 @@ import ExcelJS from 'exceljs';
 import { detectFormat, parseFile, suggestMapping } from '../src/modules/imports';
 import { analyseWithRules, buildProposal } from '../src/modules/onboarding';
 import { DEFAULT_CONFIG } from '../src/modules/templates';
+import { classifyByRules, rulesSchema } from '../src/integrations/leads';
+import { envelope } from '../src/modules/voice';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -94,5 +96,30 @@ describe('API key encryption', () => {
       if (prev) process.env.QLINE_DATA_KEY = prev;
       else delete process.env.QLINE_DATA_KEY;
     }
+  });
+});
+
+describe('lead rules (v1.2)', () => {
+  const r = rulesSchema.parse({ vipDomains: ['vip.test'], ignoreDomains: ['spam.test'] });
+  it('finds leads and urgency from keywords', () => {
+    expect(classifyByRules({ fromEmail: 'a@b.test', fromName: 'A', subject: 'Quote request', text: 'Need it ASAP' }, r)).toMatchObject({ isLead: true, urgency: 'urgent' });
+    expect(classifyByRules({ fromEmail: 'a@b.test', fromName: 'A', subject: 'Hello', text: 'How are you' }, r)).toMatchObject({ isLead: false });
+  });
+  it('VIP domains are at least high; ignore list and newsletters are never leads', () => {
+    expect(classifyByRules({ fromEmail: 'boss@sub.vip.test', fromName: null, subject: 'Hi', text: '' }, r)).toMatchObject({ isLead: true, urgency: 'high' });
+    expect(classifyByRules({ fromEmail: 'x@spam.test', fromName: null, subject: 'Pricing', text: 'urgent quote' }, r).isLead).toBe(false);
+    expect(classifyByRules({ fromEmail: 'x@news.test', fromName: null, subject: 'Pricing', text: 'quote', bulk: true }, r).isLead).toBe(false);
+  });
+});
+
+describe('voice envelope (v1.2)', () => {
+  it('normalises loudness per window', () => {
+    const rate = 1000;
+    const pcm = Buffer.alloc(rate * 2 * 0.2); // 200 ms
+    for (let i = 100; i < 200; i++) pcm.writeInt16LE(i % 2 ? 12000 : -12000, i * 2); // loud second half
+    const e = envelope(pcm, rate, 50);
+    expect(e.length).toBe(4);
+    expect(e[0]).toBe(0);
+    expect(Math.max(...e)).toBe(1);
   });
 });

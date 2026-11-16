@@ -58,7 +58,11 @@ final recipes = <Map<String, dynamic>>[
 ];
 
 String triggerLabel(Map? t) => switch (t?['type']) {
-      'event' => 'When ${(t!['event'] as String).replaceAll('.', ' ')}',
+      'event' => switch (t!['event']) {
+          'lead.created' => 'When a new lead arrives',
+          'lead.urgent' => 'When an urgent lead arrives',
+          _ => 'When ${(t['event'] as String).replaceAll('.', ' ')}',
+        },
       'schedule' => 'Daily at ${t!['hourUtc']}:00 UTC',
       _ => 'Run by hand',
     };
@@ -66,10 +70,63 @@ String triggerLabel(Map? t) => switch (t?['type']) {
 String stepLabel(Map s) => switch (s['type']) {
       'approval' => 'Ask: ${s['title']}',
       'notify' => 'Notify: ${s['title']}',
+      'ai' => 'AI writes ${s['saveAs'] ?? 'a draft'}',
+      'slack' => 'Slack: ${s['text'] ?? s['title'] ?? 'post a message'}',
+      'email' => 'Email ${s['to'] ?? 'the lead'}: ${s['subject'] ?? ''}',
+      'calendar' => 'Calendar: ${s['title'] ?? 'add an event'}',
       _ => '${s['tool']} — ${(s['args'] as Map?)?['title'] ?? ''}',
     };
 
-IconData stepIcon(String? type) => switch (type) { 'approval' => Icons.verified_user_outlined, 'notify' => Icons.notifications_none, _ => Icons.bolt };
+IconData stepIcon(String? type) => switch (type) {
+      'approval' => Icons.verified_user_outlined,
+      'notify' => Icons.notifications_none,
+      'ai' => Icons.auto_awesome_outlined,
+      'slack' => Icons.tag,
+      'email' => Icons.mail_outline,
+      'calendar' => Icons.event_outlined,
+      _ => Icons.bolt,
+    };
+
+/// One-tap automations built on integrations (server recipes).
+class _Automations extends ConsumerWidget {
+  const _Automations({required this.canManage});
+  final bool canManage;
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    return Load<List<Map<String, dynamic>>>(
+      fetch: (api) async => items(await api.get('/workflow-recipes')),
+      skeleton: const SizedBox(height: 4),
+      builder: (context, list, reload) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const SectionLabel('Ready-made automations'),
+        for (final r in list)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: QCard(
+              accent: r['installed'] == true ? q.halo.withValues(alpha: .4) : null,
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Expanded(child: Text(r['name'] as String, style: qs(15, w: FontWeight.w600, c: q.text))),
+                  if (r['installed'] == true) const StatusPill('enabled'),
+                ]),
+                const SizedBox(height: 4),
+                Text(r['description'] as String, style: qs(13, c: q.text2, h: 1.4)),
+                const SizedBox(height: 6),
+                Text('Needs: ${((r['needs'] as List?) ?? const []).join(' · ')}', style: qs(12, c: q.text3)),
+                if (r['installed'] != true && canManage) ...[
+                  const SizedBox(height: 10),
+                  QButton('Turn on', icon: Icons.play_arrow, onPressed: () async {
+                    final w = await act(context, ref, (api) => api.post('/workflow-recipes/${r['id']}/install'), ok: '${r['name']} is on');
+                    if (w != null) await reload();
+                  }),
+                ],
+              ]),
+            ),
+          ),
+      ]),
+    );
+  }
+}
 
 class WorkflowsScreen extends ConsumerWidget {
   const WorkflowsScreen({super.key});
@@ -82,30 +139,36 @@ class WorkflowsScreen extends ConsumerWidget {
       fab: canManage ? FloatingActionButton.extended(onPressed: () => _pickRecipe(context, ref), icon: const Icon(Icons.add), label: const Text('New workflow')) : null,
       body: Load<List<Map<String, dynamic>>>(
         fetch: (api) async => items(await api.get('/workflows')),
-        builder: (context, list, reload) => list.isEmpty
-            ? EmptyState(
+        builder: (context, list, reload) => RefreshIndicator(
+          onRefresh: reload,
+          child: ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 96), children: [
+            _Automations(canManage: canManage),
+            SectionLabel('Your workflows${list.isEmpty ? '' : ' (${list.length})'}'),
+            if (list.isEmpty)
+              EmptyState(
                 icon: Icons.account_tree_outlined,
                 title: 'No workflows yet',
-                body: 'Start from a recipe. Workflows run on the server every 15 minutes and always ask before changing data.',
+                body: 'Turn on a ready-made automation above, or start from a recipe. Workflows run on the server every 15 minutes and ask before risky actions.',
                 action: canManage ? QButton('Browse recipes', onPressed: () => _pickRecipe(context, ref)) : null,
               )
-            : ListView.separated(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
-                itemCount: list.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 8),
-                itemBuilder: (_, i) {
-                  final w = list[i];
-                  final draft = w['draft'] is Map ? w['draft'] as Map : const {};
-                  return QCard(
-                    onTap: () => push(context, WorkflowDetail(id: w['id'] as String)),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Row(children: [Expanded(child: Text(w['name'] as String, style: qs(15, w: FontWeight.w600, c: q.text))), StatusPill(w['published_version'] == null ? 'draft' : w['status'] as String)]),
-                      const SizedBox(height: 4),
-                      Text('${triggerLabel(draft['trigger'] as Map?)} · ${w['run_count']} runs${w['last_run_at'] != null ? ' · last ${ago(w['last_run_at'] as String?)}' : ''}', style: qs(13, c: q.text3)),
-                    ]),
-                  );
-                },
-              ),
+            else
+              for (final (i, w) in list.indexed)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Reveal(
+                    index: i,
+                    child: QCard(
+                      onTap: () => push(context, WorkflowDetail(id: w['id'] as String)),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [Expanded(child: Text(w['name'] as String, style: qs(15, w: FontWeight.w600, c: q.text))), StatusPill(w['published_version'] == null ? 'draft' : w['status'] as String)]),
+                        const SizedBox(height: 4),
+                        Text('${triggerLabel((w['draft'] is Map ? w['draft'] as Map : const {})['trigger'] as Map?)} · ${w['run_count']} runs${w['last_run_at'] != null ? ' · last ${ago(w['last_run_at'] as String?)}' : ''}', style: qs(13, c: q.text3)),
+                      ]),
+                    ),
+                  ),
+                ),
+          ]),
+        ),
       ),
     );
   }

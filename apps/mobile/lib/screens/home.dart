@@ -6,6 +6,8 @@ import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'approvals.dart';
 import 'business.dart';
+import 'integrations.dart';
+import 'leads.dart';
 import 'work.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -51,6 +53,7 @@ class HomeScreen extends ConsumerWidget {
                 ]),
               ),
             ],
+            const _LeadsToday(),
             if (approvals.isNotEmpty) ...[
               SectionLabel('Waiting for you', trailing: TextButton(onPressed: () => push(context, const ApprovalsScreen()), child: Text('See all', style: qs(13, w: FontWeight.w600, c: q.text2)))),
               for (final a in approvals)
@@ -126,6 +129,124 @@ class HomeScreen extends ConsumerWidget {
           ]),
         );
       },
+    );
+  }
+}
+
+int _n(dynamic v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
+
+/// Leads from connected email/forms/sheets, plus the next calendar events. Hidden pieces stay honest.
+class _LeadsToday extends ConsumerWidget {
+  const _LeadsToday();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    return Load<Map<String, dynamic>>(
+      skeleton: const SizedBox.shrink(),
+      fetch: (api) async {
+        final r = await Future.wait([
+          api.get('/leads/inbox', {'filter': 'urgent'}).catchError((_) => <String, dynamic>{}),
+          api.get('/calendar/upcoming').catchError((_) => <String, dynamic>{}),
+          api.get('/integrations').catchError((_) => <String, dynamic>{}),
+        ]);
+        return {'inbox': r[0], 'cal': r[1], 'int': r[2]};
+      },
+      builder: (context, d, _) {
+        final counts = ((d['inbox'] as Map?)?['counts'] as Map?) ?? const {};
+        final urgent = items(d['inbox']).take(2).toList();
+        final events = items(d['cal']).take(3).toList();
+        final connected = items(d['int'], 'providers').any((p) => p['connection'] != null);
+        if (!connected) {
+          return Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: QCard(
+              onTap: () => push(context, const IntegrationsScreen()),
+              child: Row(children: [
+                Icon(Icons.hub_outlined, color: q.halo),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Catch leads automatically', style: qs(15, w: FontWeight.w600, c: q.text)),
+                    const SizedBox(height: 2),
+                    Text('Connect Gmail, Outlook, Forms or Sheets and new enquiries land here, rated by urgency.', style: qs(13, c: q.text2)),
+                  ]),
+                ),
+                Icon(Icons.chevron_right, color: q.text3),
+              ]),
+            ),
+          );
+        }
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SectionLabel('Leads', trailing: TextButton(onPressed: () => push(context, const LeadInboxScreen()), child: Text('Inbox', style: qs(13, w: FontWeight.w600, c: q.text2)))),
+          QCard(
+            onTap: () => push(context, const LeadInboxScreen()),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                _Stat(label: 'New today', value: _n(counts['today'])),
+                _Stat(label: 'Urgent', value: _n(counts['urgent']), alert: _n(counts['urgent']) > 0),
+                _Stat(label: 'All leads', value: _n(counts['leads'])),
+              ]),
+              for (final u in urgent) ...[
+                const Divider(height: 20),
+                Row(children: [
+                  UrgencyPill(u['urgency'] as String?),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text('${u['contact_name'] ?? u['from_name'] ?? u['from_email'] ?? ''} · ${u['subject'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(14, c: q.text))),
+                ]),
+              ],
+            ]),
+          ),
+          if (events.isNotEmpty) ...[
+            const SectionLabel('Coming up'),
+            QCard(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: Column(children: [
+                for (final e in events)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Row(children: [
+                      Icon(Icons.event_outlined, size: 18, color: q.text2),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text(e['title'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(14, c: q.text))),
+                      Text(_when(e['start'] as String?), style: qs(12, c: q.text3, family: mono)),
+                    ]),
+                  ),
+              ]),
+            ),
+          ],
+        ]);
+      },
+    );
+  }
+
+  static String _when(String? iso) {
+    final d = iso == null ? null : DateTime.tryParse(iso)?.toLocal();
+    if (d == null) return '';
+    final now = DateTime.now();
+    final day = DateTime(d.year, d.month, d.day).difference(DateTime(now.year, now.month, now.day)).inDays;
+    final hm = iso!.length <= 10 ? 'all day' : '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    return day == 0 ? 'Today $hm' : day == 1 ? 'Tmrw $hm' : '${dateLabel(iso)} $hm';
+  }
+}
+
+class _Stat extends StatelessWidget {
+  const _Stat({required this.label, required this.value, this.alert = false});
+  final String label;
+  final int value;
+  final bool alert;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    return Expanded(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: value.toDouble()),
+          duration: MediaQuery.of(context).disableAnimations ? Duration.zero : const Duration(milliseconds: 600),
+          curve: Curves.easeOutCubic,
+          builder: (_, v, _) => Text('${v.round()}', style: qs(26, w: FontWeight.w600, c: alert ? q.bad : q.text, family: mono)),
+        ),
+        Text(label, style: qs(12, c: q.text2)),
+      ]),
     );
   }
 }

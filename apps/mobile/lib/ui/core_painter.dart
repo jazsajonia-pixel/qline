@@ -8,7 +8,7 @@ import 'theme.dart';
 
 enum CoreState { idle, listening, thinking, tool, approval, speaking, success, error, offline }
 
-const _ivory = Color(0xFFECE2CC), _halo = Color(0xFFEBCB8B), _amber = Color(0xFFF2B544), _bad = Color(0xFFF2777A), _grey = Color(0xFF788492);
+const _ivory = Color(0xFFE9E4F5), _halo = Color(0xFF5EF2C6), _amber = Color(0xFFB79BFF), _bad = Color(0xFFFF7A8A), _grey = Color(0xFF7E7894);
 
 class _P {
   _P(this.glow, this.scale, this.ring, this.ringW, this.halo, this.sSpeed, this.sAlpha, this.conv, this.dash, this.sats, this.notch, this.err, this.wave, this.amp, this.desat, this.cross);
@@ -31,7 +31,7 @@ final _states = <CoreState, _P>{
   CoreState.thinking: _P(.9, .94, _ivory, 1.6, .2, 2.4, .42, 1, 1, 0, 0, 0, 0, 0, 0, .7),
   CoreState.tool: _P(.85, 1.0, _amber, 2.2, .26, 1.6, .36, .5, 1, 2, 0, 0, 0, 0, 0, .85),
   CoreState.approval: _P(.5, .96, _halo, 2.6, .3, .15, .18, 0, 0, 0, 1, 0, 0, 0, 0, .1),
-  CoreState.speaking: _P(1.0, 1.04, _ivory, 1.8, .3, 1.1, .34, 0, 0, 0, 0, 0, 1, 0, 0, .3),
+  CoreState.speaking: _P(1.0, 1.04, _ivory, 1.8, .3, 1.1, .34, 0, 0, 0, 0, 0, 1, 1, 0, .3),
   CoreState.success: _P(1.25, 1.02, _ivory, 1.8, .34, .8, .3, 0, 0, 0, 0, 0, 0, 0, 0, .2),
   CoreState.error: _P(.35, .92, _grey, 1.4, .08, .35, .16, 0, 0, 0, 0, 1, 0, 0, .75, .05),
   CoreState.offline: _P(.2, .9, _grey, 1.2, 0, 0, .08, 0, 1, 0, 0, 0, 0, 0, 1, 0),
@@ -179,8 +179,8 @@ class _CorePainter extends CustomPainter {
     final paint = Paint();
 
     if (background) {
-      c.drawRect(Offset.zero & size, paint..color = const Color(0xFF05070A));
-      paint.shader = RadialGradient(colors: [_rgba(hue, .16 * p.glow), _rgba(hue, .05 * p.glow), const Color(0x0005070A)], stops: const [0, .5, 1])
+      c.drawRect(Offset.zero & size, paint..color = const Color(0xFF07060D));
+      paint.shader = RadialGradient(colors: [_rgba(hue, .16 * p.glow), _rgba(hue, .05 * p.glow), const Color(0x0007060D)], stops: const [0, .5, 1])
           .createShader(Rect.fromCircle(center: ctr, radius: R * 3.4));
       c.drawRect(Offset.zero & size, paint);
       paint.shader = null;

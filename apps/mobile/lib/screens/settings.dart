@@ -10,6 +10,9 @@ import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'ai.dart';
+import 'integrations.dart';
+import 'leads.dart';
+import 'voice_settings.dart';
 import 'setup.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -42,6 +45,8 @@ class SettingsScreen extends ConsumerWidget {
         ),
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('Organisation')),
         nav(Icons.memory, 'AI providers', 'Your keys for OpenAI, Claude, Gemini, Grok, DeepSeek', const AiProvidersScreen()),
+        nav(Icons.hub_outlined, 'Integrations', 'Gmail, Sheets, Forms, Calendar, Outlook, Slack', const IntegrationsScreen()),
+        nav(Icons.rule, 'Lead rules', 'What counts as a lead, what is urgent', const LeadRulesScreen()),
         nav(Icons.group_outlined, 'Team', 'Members, roles and invite codes', const MembersScreen()),
         if (s.role != 'member' && s.role != 'viewer') nav(Icons.fact_check_outlined, 'Audit log', 'Every change, tamper-evident', const AuditScreen()),
         nav(Icons.history, 'Configuration versions', 'Review and roll back setup', const Page2(title: 'Configuration', body: SingleChildScrollView(padding: EdgeInsets.all(16), child: ConfigHistory()))),
@@ -63,7 +68,7 @@ class SettingsScreen extends ConsumerWidget {
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('Display')),
         SwitchListTile(secondary: const Icon(Icons.light_mode_outlined), title: const Text('Light theme'), subtitle: const Text('Live AI always stays dark'), value: prefs.light, onChanged: (v) => ref.read(prefsProvider.notifier).set(light: v)),
         SwitchListTile(secondary: const Icon(Icons.motion_photos_off_outlined), title: const Text('Reduce motion'), subtitle: const Text('Still core, no transitions'), value: prefs.reduceMotion, onChanged: (v) => ref.read(prefsProvider.notifier).set(reduceMotion: v)),
-        SwitchListTile(secondary: const Icon(Icons.volume_up_outlined), title: const Text('Speak replies'), subtitle: const Text('Read AI answers aloud (device voice)'), value: prefs.speak, onChanged: (v) => ref.read(prefsProvider.notifier).set(speak: v)),
+        nav(Icons.record_voice_over_outlined, 'Voice', prefs.speak ? 'Spoken replies on · choose a natural voice' : 'Spoken replies off · choose a natural voice', const VoiceSettingsScreen()),
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('About')),
         nav(Icons.health_and_safety_outlined, 'System status', 'Server, storage and AI availability', const StatusScreen()),
         ListTile(leading: const Icon(Icons.info_outline), title: const Text('Version'), subtitle: Text('${AppConfig.version} (${AppConfig.build})', style: qs(13, c: q.text3, family: mono))),

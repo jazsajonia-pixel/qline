@@ -34,21 +34,29 @@ npm run build:api
 cd apps/mobile
 flutter pub get
 flutter analyze && flutter test
-flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --dart-define=QLINE_VERSION=1.1.0 --dart-define=QLINE_BUILD=2
+flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --dart-define=QLINE_VERSION=1.2.0 --dart-define=QLINE_BUILD=3
 ```
 
 Release signing reads `apps/mobile/android/key.properties`. That file and the keystore are gitignored and are never committed.
 
-## Honest status (v1.1.0)
+## Honest status (v1.2.0)
 
 Working end to end against production: sign-up/sign-in (email and password), organisations, invitations and roles, tasks, projects, comments, contacts, documents and notes, memory confirm/supersede/forget, search, approvals, guided setup with config versions and rollback, CSV/XLSX import with mapping and rollback, workflows (dry run, publish, enable, run), audit log verification, data export.
 
-Not yet working, and the app says so instead of pretending:
+New in 1.2.0 (code complete and tested; see the verification notes):
 
-- **AI agents / Live AI** work with your own keys (bring your own key). In Settings → AI providers an owner or admin can connect any of OpenAI, Anthropic (Claude), Google Gemini, xAI (Grok) and DeepSeek. Nothing is required: connect one, several or none. Keys are checked with the provider, encrypted at rest (AES-256-GCM, `QLINE_DATA_KEY`) and never returned to the app. Model lists come live from each provider. Each agent can use its own provider + model or the workspace default. With no key connected the app says so and saves messages without an answer.
-  - Verified: adapters against recorded request/stream formats (unit tests), real fake-key rejection from all five providers, storage/assignment/runner against a Neon dev branch. Not verified by me: a real answer from each provider, because that needs your keys. Use **Test** on a provider card to check yours.
-- **Google sign-in**: no OAuth client is configured. The button shows "not configured".
-- **Integrations** (Gmail, Calendar, Slack, etc.): listed in the catalogue as not connected. No connector is live.
-- **Email delivery**: invitations generate a code to share manually. No emails are sent.
-- **Web companion**: planned, not built.
-- **Push notifications**: planned.
+- **Integrations with per-user sign-in.** Google (Gmail lead inbox, Sheets, Forms, Calendar), Microsoft (Outlook lead inbox) and Slack (alerts). Each person signs in with their own account; Qline only asks for the scopes of the features they tick. Tokens are encrypted at rest. The server owner registers one OAuth app per provider once and enters its client ID/secret in Integrations → Integration setup. See [docs/integration-setup.md](docs/integration-setup.md).
+- **Lead inbox.** New mail is checked for leads by rules (keywords, ignored domains) and, if a model is connected, by AI. Each lead gets an urgency (urgent / normal / low). Lead rules can be drafted by AI from a plain-language description and tried in a tester. Leads can sync to a Google Sheet and come in from a Google Form.
+- **Automations.** Ready-made recipes ("Turn on") and new workflow steps: AI, Slack message, email draft, calendar event. Triggers include new lead and urgent lead.
+- **Natural voice.** Choose the device voice (free, offline) or Gemini or OpenAI voices through your own key (Gemini has a free tier). Captions light up word by word and the energy core follows the audio level. Hands-free mode (hearing icon in the composer) keeps listening after each reply; say "stop listening" or tap End. Tap the core to interrupt.
+- **New palette** "Mint Signal on Violet Ink", press/reveal motion that respects reduced motion.
+
+Verification:
+
+- Verified: API unit tests, the 12-test integration suite against a Neon dev branch (OAuth state, token sealing, Gmail/Graph/Slack/Sheets calls against mocked provider endpoints, lead classification by rules and AI, recipes), `flutter analyze`, the widget tests, and rendered screenshots of the new screens, including Live captions and the hands-free bar.
+- Not verified: real OAuth logins (these need the registered apps); Gmail lead reading for accounts outside Google's Testing-mode list (Gmail read access is a restricted scope: Testing mode allows 100 test users and logins expire after 7 days; going public needs Google's security review); real Gemini/OpenAI speech (needs your keys); Forms creation against live Google; the APK on a physical device.
+
+Still not built:
+
+- **Email delivery**: invitations generate a code to share manually.
+- **Web companion** and **push notifications**: planned.

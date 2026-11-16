@@ -1,7 +1,7 @@
 import type { TenantCtx } from './context';
 
 export interface DomainEvent {
-  type: 'contact.created' | 'task.created' | 'import.completed';
+  type: 'contact.created' | 'task.created' | 'import.completed' | 'lead.created' | 'lead.urgent';
   id: string;
   data: Record<string, any>;
 }

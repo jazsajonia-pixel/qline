@@ -1,3 +1,4 @@
+import { runDueSyncs } from '../integrations/leads';
 import { timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import { verifyAuditChain } from '../core/audit';
@@ -49,15 +50,6 @@ systemRoutes.get('/health/ready', async (c) => {
 
 systemRoutes.get('/ai/status', requireUser, async (c) => c.json(await aiStatus(c.req.query('refresh') === '1')));
 
-systemRoutes.get('/integrations', requireUser, requireTenant, (c) => c.json({ items: CATALOGUE }));
-systemRoutes.post('/integrations/:id/connect', requireUser, requireTenant, (c) => {
-  need(c, 'integrations.manage');
-  const item = CATALOGUE.find((x) => x.id === c.req.param('id'));
-  if (!item) throw new ApiError(404, 'NOT_FOUND', 'Integration not found');
-  if (item.id === 'file_import') return c.json({ ok: true, detail: 'File import is built in. Use Import in the app.' });
-  throw new ApiError(501, 'CONNECTOR_NOT_CONFIGURED', `${item.name} is not configured`, item.detail);
-});
-
 // ---- Audit ------------------------------------------------------------------
 systemRoutes.get('/audit', requireUser, requireTenant, async (c) => {
   const t = need(c, 'audit.read');
@@ -102,7 +94,13 @@ export const internalRoutes = new Hono();
 const tick = async (c: any, key: string | undefined) => {
   if (!env.cronKey || !key || key.length !== env.cronKey.length || !timingSafeEqual(Buffer.from(key), Buffer.from(env.cronKey))) return c.json({ error: 'forbidden' }, 403);
   const r = await runScheduledWorkflows();
-  return c.json({ ok: true, ...r });
+  let sync: unknown = null;
+  try {
+    sync = await runDueSyncs();
+  } catch (e) {
+    sync = { error: (e as Error).message };
+  }
+  return c.json({ ok: true, ...r, sync });
 };
 // Neon trigger paths cannot carry a query string, so the key is a path segment.
 internalRoutes.all('/tick/:key', (c) => tick(c, c.req.param('key')));

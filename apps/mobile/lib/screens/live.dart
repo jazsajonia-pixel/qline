@@ -1,13 +1,15 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api.dart';
 import '../core/session.dart';
+import '../core/voice.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
@@ -61,7 +63,24 @@ class _LiveState extends ConsumerState<_Live> {
   final _stt = SpeechToText();
   bool _sttReady = false, _listening = false;
   double _level = 0;
-  final _tts = FlutterTts();
+  late final Speaker _voice = Speaker(
+    onWord: (i) {
+      if (mounted && i != _word) setState(() => _word = i);
+    },
+    onLevel: (l) {
+      if (mounted && (l - _speakLevel).abs() > .01) setState(() => _speakLevel = l);
+    },
+    onDone: _afterSpeech,
+    onNotice: (m) {
+      if (mounted) toast(context, m);
+    },
+  );
+  bool _handsFree = false, _busy = false;
+  String _spoken = '';
+  int _word = -1;
+  double _speakLevel = 0;
+  int _sttErrors = 0;
+  Timer? _relisten;
   bool _loading = true;
   String? _loadError;
 
@@ -75,9 +94,76 @@ class _LiveState extends ConsumerState<_Live> {
     super.initState();
     _convId = widget.conversationId;
     _init();
-    _tts.setCompletionHandler(() {
-      if (mounted && _core == CoreState.speaking) setState(() => _core = CoreState.idle);
+  }
+
+  static final _stopPhrase = RegExp(r"^(please )?(stop listening|stop|that'?s all|goodbye|bye|end hands[- ]free|exit)[.!]?$", caseSensitive: false);
+
+  Future<void> _speakReply(String text) async {
+    setState(() {
+      _spoken = speakable(text);
+      _word = -1;
+      _core = CoreState.speaking;
     });
+    await _voice.speak(_api, text, ref.read(voicePrefsProvider));
+  }
+
+  void _afterSpeech() {
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _speakLevel = 0;
+      if (_core == CoreState.speaking) _core = CoreState.idle;
+    });
+    if (_handsFree) _scheduleListen();
+  }
+
+  void _scheduleListen([int ms = 450]) {
+    _relisten?.cancel();
+    _relisten = Timer(Duration(milliseconds: ms), () {
+      if (mounted && _handsFree && !_busy && !_listening && _runId == null && !_voice.speaking) _listen();
+    });
+  }
+
+  Future<void> _setHandsFree(bool on) async {
+    setState(() => _handsFree = on);
+    if (on) {
+      try {
+        await WakelockPlus.enable();
+      } catch (_) {}
+      if (mounted) toast(context, 'Hands-free is on. Talk any time; say "stop listening" to end.');
+      _sttErrors = 0;
+      if (!_busy && _runId == null) await _listen();
+    } else {
+      _relisten?.cancel();
+      try {
+        await WakelockPlus.disable();
+      } catch (_) {}
+      if (_listening) await _stt.stop();
+      await _voice.stop();
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _spoken = '';
+          if (_core == CoreState.listening || _core == CoreState.speaking) _core = CoreState.idle;
+        });
+      }
+    }
+  }
+
+  /// Tap on the core: interrupt speech (and listen again in hands-free), or start/stop the mic.
+  Future<void> _tapCore() async {
+    if (_core == CoreState.speaking && _voice.speaking) {
+      await _voice.stop();
+      setState(() {
+        _busy = false;
+        _core = CoreState.idle;
+        _speakLevel = 0;
+      });
+      if (_handsFree) await _listen();
+      return;
+    }
+    if (_runId != null || _loading || _loadError != null) return;
+    await _toggleMic();
   }
 
   Future<void> _init() async {
@@ -118,8 +204,12 @@ class _LiveState extends ConsumerState<_Live> {
     final content = (text ?? _input.text).trim();
     if (content.isEmpty || _runId != null) return;
     _input.clear();
-    await _tts.stop();
+    _busy = true;
+    _relisten?.cancel();
+    if (_listening) await _stt.stop();
+    await _voice.stop();
     setState(() {
+      _spoken = '';
       _msgs.add(_Msg('user', content));
       _core = CoreState.thinking;
     });
@@ -133,7 +223,9 @@ class _LiveState extends ConsumerState<_Live> {
       setState(() {
         _msgs.add(_Msg('system_notice', '', error: e.message));
         _core = e.isNetwork ? CoreState.offline : CoreState.error;
+        _busy = false;
       });
+      if (_handsFree) _scheduleListen(1500);
     }
   }
 
@@ -151,7 +243,7 @@ class _LiveState extends ConsumerState<_Live> {
               _core = d['state'] == 'thinking' ? CoreState.thinking : _core;
             case 'token':
               reply.text += d['text'] as String? ?? '';
-              _core = CoreState.speaking;
+              _core = (_handsFree || ref.read(prefsProvider).speak) ? CoreState.thinking : CoreState.speaking;
             case 'tool.planned':
               reply.steps!.add(_Step(d['stepId'] as String?, d['tool'] as String? ?? 'tool', d['summary'] as String? ?? '', d['decision'] as String? ?? 'allow'));
               _core = CoreState.tool;
@@ -188,16 +280,22 @@ class _LiveState extends ConsumerState<_Live> {
         if (reply.text.isEmpty && reply.error == null && reply.approval == null && (reply.steps?.isEmpty ?? true)) {
           setState(() => reply.error = 'No answer came back. Try again.');
         }
+        final voiceOn = _handsFree || ref.read(prefsProvider).speak;
         if (_core == CoreState.success) {
-          if (ref.read(prefsProvider).speak && reply.text.isNotEmpty) {
-            setState(() => _core = CoreState.speaking);
-            await _tts.speak(reply.text);
+          if (voiceOn && reply.text.isNotEmpty) {
+            await _speakReply(reply.text);
           } else {
             await Future<void>.delayed(const Duration(milliseconds: 900));
             if (mounted && _core == CoreState.success) setState(() => _core = CoreState.idle);
+            _afterSpeech();
           }
-        } else if (_core == CoreState.speaking || _core == CoreState.thinking) {
-          setState(() => _core = CoreState.idle);
+        } else if (_handsFree && _core == CoreState.approval) {
+          await _speakReply('That needs your approval. I put it on the screen for you.');
+        } else if (_handsFree && reply.error != null) {
+          await _speakReply('Sorry, that did not work. ${reply.error}');
+        } else {
+          if (_core == CoreState.speaking || _core == CoreState.thinking) setState(() => _core = CoreState.idle);
+          _afterSpeech();
         }
         setState(() {});
       },
@@ -219,56 +317,93 @@ class _LiveState extends ConsumerState<_Live> {
   }
 
   Future<void> _toggleMic() async {
+    if (_handsFree) return _setHandsFree(false);
     if (_listening) {
       await _stt.stop();
       return;
     }
-    if (!_sttReady) {
-      _sttReady = await _stt.initialize(
-        onStatus: (s) {
-          if (s == 'done' || s == 'notListening') {
-            if (mounted) {
-              setState(() {
-                _listening = false;
-                if (_core == CoreState.listening) _core = CoreState.idle;
-              });
-            }
+    await _listen();
+  }
+
+  Future<bool> _ensureStt() async {
+    if (_sttReady) return true;
+    _sttReady = await _stt.initialize(
+      onStatus: (s) {
+        if ((s == 'done' || s == 'notListening') && mounted) {
+          setState(() {
+            _listening = false;
+            if (_core == CoreState.listening) _core = CoreState.idle;
+          });
+          if (_handsFree) _scheduleListen();
+        }
+      },
+      onError: (e) {
+        if (!mounted) return;
+        final quiet = e.errorMsg == 'error_no_match' || e.errorMsg == 'error_speech_timeout';
+        setState(() {
+          _listening = false;
+          if (_core == CoreState.listening) _core = CoreState.idle;
+        });
+        if (_handsFree) {
+          if (!quiet && ++_sttErrors >= 3) {
+            _setHandsFree(false);
+            toast(context, 'Hands-free stopped: voice input keeps failing (${e.errorMsg.replaceAll('_', ' ')}).');
+          } else {
+            _scheduleListen(quiet ? 300 : 1200);
           }
-        },
-        onError: (e) {
-          if (mounted) {
-            setState(() {
-              _listening = false;
-              _core = CoreState.idle;
-            });
-            toast(context, e.errorMsg == 'error_no_match' ? 'Didn\'t catch that. Try again.' : 'Voice input stopped: ${e.errorMsg.replaceAll('_', ' ')}');
-          }
-        },
-      );
-      if (!_sttReady) {
-        if (mounted) toast(context, 'Voice input is unavailable. Allow microphone access or install a speech service.');
-        return;
-      }
+          return;
+        }
+        toast(context, e.errorMsg == 'error_no_match' ? 'Didn\'t catch that. Try again.' : 'Voice input stopped: ${e.errorMsg.replaceAll('_', ' ')}');
+      },
+    );
+    if (!_sttReady && mounted) {
+      toast(context, 'Voice input is unavailable. Allow microphone access or install a speech service.');
+      if (_handsFree) _setHandsFree(false);
     }
-    await _tts.stop();
+    return _sttReady;
+  }
+
+  Future<void> _listen() async {
+    if (!mounted || _listening || _runId != null) return;
+    if (!await _ensureStt()) return;
+    await _voice.stop();
+    if (!mounted) return;
     setState(() {
       _listening = true;
       _core = CoreState.listening;
+      _spoken = '';
     });
     await _stt.listen(
       onResult: (SpeechRecognitionResult r) {
         setState(() => _input.text = r.recognizedWords);
-        if (r.finalResult && r.recognizedWords.trim().isNotEmpty) _send(r.recognizedWords);
+        if (!r.finalResult) return;
+        final words = r.recognizedWords.trim();
+        if (words.isEmpty) return;
+        _sttErrors = 0;
+        if (_handsFree && _stopPhrase.hasMatch(words)) {
+          _input.clear();
+          _setHandsFree(false);
+          return;
+        }
+        _send(words);
       },
       onSoundLevelChange: (l) => setState(() => _level = ((l + 2) / 12).clamp(0, 1).toDouble()),
-      listenOptions: SpeechListenOptions(partialResults: true, cancelOnError: true, listenMode: ListenMode.dictation, pauseFor: const Duration(seconds: 3)),
+      listenOptions: SpeechListenOptions(
+        partialResults: true,
+        cancelOnError: true,
+        listenMode: ListenMode.dictation,
+        listenFor: Duration(seconds: _handsFree ? 60 : 30),
+        pauseFor: Duration(milliseconds: _handsFree ? 2200 : 3000),
+      ),
     );
   }
 
   void _newChat() {
     _sub?.cancel();
-    _tts.stop();
+    _voice.stop();
     setState(() {
+      _spoken = '';
+      _busy = false;
       _convId = null;
       _runId = null;
       _msgs.clear();
@@ -280,7 +415,9 @@ class _LiveState extends ConsumerState<_Live> {
   void dispose() {
     _sub?.cancel();
     _stt.cancel();
-    _tts.stop();
+    _relisten?.cancel();
+    _voice.dispose();
+    if (_handsFree) WakelockPlus.disable();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -294,7 +431,7 @@ class _LiveState extends ConsumerState<_Live> {
     final hasChat = _msgs.isNotEmpty;
     final template = _agent?['template'] as String? ?? 'ceo';
     return Scaffold(
-      backgroundColor: const Color(0xFF05070A),
+      backgroundColor: const Color(0xFF07060D),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
@@ -331,7 +468,17 @@ class _LiveState extends ConsumerState<_Live> {
             curve: Curves.easeOutCubic,
             height: hasChat ? 150 : MediaQuery.of(context).size.height * .42,
             child: Stack(children: [
-              Positioned.fill(child: EnergyCore(state: _core, agent: template, reduceMotion: prefs.reduceMotion, level: _listening ? _level : 0, compact: hasChat)),
+              Positioned.fill(
+                child: Semantics(
+                  button: true,
+                  label: _core == CoreState.speaking ? 'Stop speaking' : (_listening ? 'Stop listening' : 'Start talking'),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _tapCore,
+                    child: EnergyCore(state: _core, agent: template, reduceMotion: prefs.reduceMotion, level: _listening ? _level : (_core == CoreState.speaking ? _speakLevel : 0), compact: hasChat),
+                  ),
+                ),
+              ),
               Positioned(
                 left: 0,
                 right: 0,
@@ -340,6 +487,8 @@ class _LiveState extends ConsumerState<_Live> {
               ),
             ]),
           ),
+          LiveCaption(text: _spoken, word: _word, visible: _core == CoreState.speaking && _spoken.isNotEmpty, reduceMotion: prefs.reduceMotion),
+          if (_handsFree) HandsFreeBar(listening: _listening, speaking: _core == CoreState.speaking, onEnd: () => _setHandsFree(false)),
           if (_loading) const LinearProgressIndicator(minHeight: 2),
           if (!_loading && (_loadError != null || !aiOk)) _AiBanner(
                 error: _loadError,
@@ -364,6 +513,8 @@ class _LiveState extends ConsumerState<_Live> {
           _Composer(
             controller: _input,
             listening: _listening,
+            handsFree: _handsFree,
+            onHandsFree: () => _setHandsFree(!_handsFree),
             running: _runId != null,
             enabled: !_loading && _loadError == null,
             onSend: () => _send(),
@@ -553,10 +704,10 @@ class _InlineApproval extends StatelessWidget {
 }
 
 class _Composer extends StatelessWidget {
-  const _Composer({required this.controller, required this.listening, required this.running, required this.enabled, required this.onSend, required this.onMic, required this.onStop});
+  const _Composer({required this.controller, required this.listening, required this.handsFree, required this.onHandsFree, required this.running, required this.enabled, required this.onSend, required this.onMic, required this.onStop});
   final TextEditingController controller;
-  final bool listening, running, enabled;
-  final VoidCallback onSend, onMic, onStop;
+  final bool listening, running, enabled, handsFree;
+  final VoidCallback onSend, onMic, onStop, onHandsFree;
   @override
   Widget build(BuildContext context) {
     final q = context.q;
@@ -581,7 +732,16 @@ class _Composer extends StatelessWidget {
           IconButton.filledTonal(tooltip: 'Stop', onPressed: onStop, icon: const Icon(Icons.stop), iconSize: 22, constraints: const BoxConstraints.tightFor(width: 48, height: 48))
         else ...[
           IconButton.filledTonal(
-            tooltip: listening ? 'Stop listening' : 'Speak (turn-based)',
+            tooltip: handsFree ? 'End hands-free' : 'Hands-free: keep listening',
+            isSelected: handsFree,
+            style: handsFree ? IconButton.styleFrom(backgroundColor: q.halo, foregroundColor: q.onHalo) : null,
+            onPressed: enabled ? onHandsFree : null,
+            icon: Icon(handsFree ? Icons.hearing : Icons.hearing_outlined),
+            constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+          ),
+          const SizedBox(width: 6),
+          IconButton.filledTonal(
+            tooltip: listening ? 'Stop listening' : 'Speak once',
             isSelected: listening,
             onPressed: enabled ? onMic : null,
             icon: Icon(listening ? Icons.mic : Icons.mic_none),
@@ -623,6 +783,71 @@ class _History extends StatelessWidget {
                   ),
               ]),
       ),
+    );
+  }
+}
+
+/// Live captions: the word being spoken is lit in the accent colour; spoken words stay bright, upcoming words are dim.
+class LiveCaption extends StatelessWidget {
+  const LiveCaption({super.key, required this.text, required this.word, required this.visible, required this.reduceMotion});
+  final String text;
+  final int word;
+  final bool visible, reduceMotion;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    final words = wordsOf(text);
+    final start = word < 0 ? 0 : (word ~/ 14) * 14; // page in groups so the line doesn't jitter
+    final end = math.min(words.length, start + 22);
+    return AnimatedSize(
+      duration: reduceMotion ? Duration.zero : const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      child: !visible || words.isEmpty
+          ? const SizedBox(width: double.infinity)
+          : Padding(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 10),
+              child: Semantics(
+                liveRegion: false,
+                label: text,
+                excludeSemantics: true,
+                child: Text.rich(
+                  TextSpan(children: [
+                    if (start > 0) TextSpan(text: '… ', style: qs(17, c: q.text3)),
+                    for (var i = start; i < end; i++)
+                      TextSpan(
+                        text: '${words[i]} ',
+                        style: qs(17, h: 1.45, w: i == word ? FontWeight.w700 : FontWeight.w500, c: i == word ? q.halo : (i < word ? q.text : q.text3)),
+                      ),
+                    if (end < words.length) TextSpan(text: '…', style: qs(17, c: q.text3)),
+                  ]),
+                  textAlign: TextAlign.center,
+                  maxLines: 3,
+                  overflow: TextOverflow.fade,
+                ),
+              ),
+            ),
+    );
+  }
+}
+
+class HandsFreeBar extends StatelessWidget {
+  const HandsFreeBar({super.key, required this.listening, required this.speaking, required this.onEnd});
+  final bool listening, speaking;
+  final VoidCallback onEnd;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    final msg = speaking ? 'Hands-free · tap the core to interrupt' : (listening ? 'Hands-free · listening for you' : 'Hands-free · working…');
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
+      decoration: BoxDecoration(color: q.halo.withValues(alpha: .08), borderRadius: BorderRadius.circular(999), border: Border.all(color: q.halo.withValues(alpha: .45))),
+      child: Row(children: [
+        Icon(Icons.hearing, size: 16, color: q.halo),
+        const SizedBox(width: 8),
+        Expanded(child: Semantics(liveRegion: true, child: Text(msg, style: qs(13, w: FontWeight.w600, c: q.text)))),
+        TextButton(onPressed: onEnd, child: Text('End', style: qs(13, w: FontWeight.w700, c: q.halo))),
+      ]),
     );
   }
 }

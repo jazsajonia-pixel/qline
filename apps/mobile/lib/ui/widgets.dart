@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
@@ -36,7 +38,9 @@ class QButton extends StatelessWidget {
       if (busy || icon != null) const SizedBox(width: 8),
       Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: qs(15, w: FontWeight.w600, c: fg))),
     ]);
-    return Opacity(
+    return Pressable(
+      enabled: !disabled,
+      child: Opacity(
       opacity: onPressed == null ? .45 : 1,
       child: Material(
         color: bg,
@@ -50,6 +54,7 @@ class QButton extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -273,11 +278,15 @@ class QCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final q = context.q;
-    return Material(
-      color: q.surface1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: accent ?? q.line)),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(onTap: onTap, child: Padding(padding: padding, child: child)),
+    return Pressable(
+      enabled: onTap != null,
+      scale: .985,
+      child: Material(
+        color: q.surface1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: accent ?? q.line)),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(onTap: onTap, child: Padding(padding: padding, child: child)),
+      ),
     );
   }
 }
@@ -398,4 +407,101 @@ class KV extends StatelessWidget {
           Expanded(child: Text(v, style: qs(14, c: context.q.text))),
         ]),
       );
+}
+
+bool motionOff(BuildContext context, WidgetRef? ref) => MediaQuery.of(context).disableAnimations || (ref?.read(prefsProvider).reduceMotion ?? false);
+
+/// Subtle press-down scale. Listens to raw pointer events so it never steals taps.
+class Pressable extends ConsumerStatefulWidget {
+  const Pressable({super.key, required this.child, this.enabled = true, this.scale = .97});
+  final Widget child;
+  final bool enabled;
+  final double scale;
+  @override
+  ConsumerState<Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends ConsumerState<Pressable> {
+  bool _down = false;
+  void _set(bool v) {
+    if (widget.enabled && _down != v) setState(() => _down = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final off = MediaQuery.of(context).disableAnimations || ref.watch(prefsProvider).reduceMotion;
+    return Listener(
+      onPointerDown: (_) => _set(true),
+      onPointerUp: (_) => _set(false),
+      onPointerCancel: (_) => _set(false),
+      child: AnimatedScale(scale: _down && !off ? widget.scale : 1, duration: const Duration(milliseconds: 110), curve: Curves.easeOut, child: widget.child),
+    );
+  }
+}
+
+/// Staggered entrance: fade + 12px rise, 40ms per index (capped). Static when motion is reduced.
+class Reveal extends ConsumerStatefulWidget {
+  const Reveal({super.key, required this.child, this.index = 0});
+  final Widget child;
+  final int index;
+  @override
+  ConsumerState<Reveal> createState() => _RevealState();
+}
+
+class _RevealState extends ConsumerState<Reveal> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 360));
+  Timer? _t;
+  bool _started = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (MediaQuery.of(context).disableAnimations || ref.read(prefsProvider).reduceMotion) {
+      _c.value = 1;
+      return;
+    }
+    _t = Timer(Duration(milliseconds: 40 * widget.index.clamp(0, 8)), () {
+      if (mounted) _c.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).disableAnimations || ref.watch(prefsProvider).reduceMotion) return widget.child;
+    final a = CurvedAnimation(parent: _c, curve: Curves.easeOutCubic);
+    return AnimatedBuilder(
+      animation: a,
+      builder: (_, child) => Opacity(opacity: a.value, child: Transform.translate(offset: Offset(0, 12 * (1 - a.value)), child: child)),
+      child: widget.child,
+    );
+  }
+}
+
+/// Lead urgency: icon + word, never colour alone.
+class UrgencyPill extends StatelessWidget {
+  const UrgencyPill(this.urgency, {super.key});
+  final String? urgency;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    final (IconData icon, Color col, String word) = switch (urgency) {
+      'urgent' => (Icons.local_fire_department, q.bad, 'Urgent'),
+      'high' => (Icons.trending_up, q.warn, 'Hot'),
+      'normal' => (Icons.circle_outlined, q.info, 'Normal'),
+      _ => (Icons.remove, q.text3, 'Low'),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(color: col.withValues(alpha: .1), borderRadius: BorderRadius.circular(999), border: Border.all(color: col.withValues(alpha: .4))),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(icon, size: 13, color: col), const SizedBox(width: 4), Text(word, style: qs(12, w: FontWeight.w600, c: col))]),
+    );
+  }
 }

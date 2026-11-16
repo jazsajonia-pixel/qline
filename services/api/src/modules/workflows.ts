@@ -9,6 +9,7 @@ import { onEvents, type DomainEvent } from '../core/events';
 import { body } from '../core/validate';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { notify } from './work';
+import { buildDigest, RECIPES, runAutomationStep } from '../integrations/steps';
 
 // ---------------------------------------------------------------------------
 // Definition schema (docs/08 §3, linear MVP subset)
@@ -18,13 +19,19 @@ const WORKFLOW_TOOLS = ['tasks.create', 'tasks.update', 'notes.create', 'memory.
 const step = z.discriminatedUnion('type', [
   z.object({ type: z.literal('action'), tool: z.enum(WORKFLOW_TOOLS), args: z.record(z.string(), z.any()) }),
   z.object({ type: z.literal('approval'), title: z.string().min(1).max(200) }),
-  z.object({ type: z.literal('notify'), title: z.string().min(1).max(200), body: z.string().max(1000).optional() }),
+  z.object({ type: z.literal('notify'), title: z.string().min(1).max(200), body: z.string().max(4000).optional() }),
+  // v1.2 automation steps
+  z.object({ type: z.literal('ai'), prompt: z.string().min(1).max(4000), saveAs: z.string().regex(/^[a-z_]{1,30}$/) }),
+  z.object({ type: z.literal('slack'), text: z.string().min(1).max(4000) }),
+  z.object({ type: z.literal('email'), to: z.string().max(320), subject: z.string().min(1).max(300), body: z.string().min(1).max(20000) }),
+  z.object({ type: z.literal('calendar'), title: z.string().min(1).max(200), inDays: z.number().int().min(0).max(60).default(1), hourUtc: z.number().int().min(0).max(23).default(1), minutes: z.number().int().min(10).max(480).default(30) }),
 ]);
+const STEP_LABEL: Record<string, string> = { ai: 'AI writes', slack: 'Post to Slack', email: 'Send email', calendar: 'Calendar event' };
 
 export const definitionSchema = z.object({
   trigger: z.discriminatedUnion('type', [
     z.object({ type: z.literal('manual') }),
-    z.object({ type: z.literal('event'), event: z.enum(['contact.created', 'task.created', 'import.completed']) }),
+    z.object({ type: z.literal('event'), event: z.enum(['contact.created', 'task.created', 'import.completed', 'lead.created', 'lead.urgent']) }),
     z.object({ type: z.literal('schedule'), every: z.literal('day').default('day'), hourUtc: z.number().int().min(0).max(23) }),
   ]),
   steps: z.array(step).min(1).max(20),
@@ -120,7 +127,19 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string): Promise<a
           return { stop: false };
         }
         const remaining = def.steps.slice(i + 1).map((x: any) => render(x, ctx));
-        const lines = remaining.map((x: any) => (x.type === 'action' ? (getTool(x.tool)?.preview(x.args).title ?? x.tool) : x.type === 'notify' ? `Notify: ${x.title}` : x.title));
+        const lines = remaining.map((x: any) =>
+          x.type === 'action'
+            ? (getTool(x.tool)?.preview(x.args).title ?? x.tool)
+            : x.type === 'notify'
+              ? `Notify: ${x.title}`
+              : x.type === 'email'
+                ? `Send email to ${x.to}: ${x.subject}\n${String(x.body).slice(0, 600)}`
+                : x.type === 'slack'
+                  ? `Post to Slack: ${String(x.text).slice(0, 200)}`
+                  : x.type === 'calendar'
+                    ? `Calendar: ${x.title} in ${x.inDays} day(s)`
+                    : (x.title ?? STEP_LABEL[x.type] ?? x.type),
+        );
         const tc = await q.one(
           `insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,'workflow.approval',$3,'L1','require_approval',$4,'waiting_approval') returning id`,
           [e.orgId, runId, JSON.stringify({ step: i }), `wf:${runId}:${i}`],
@@ -141,6 +160,30 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string): Promise<a
         else {
           await notify(q, e.orgId, wf.owner_id, { category: 'workflow', title: s.title, body: s.body, ref: { type: 'workflow_run', id: runId } });
           await record('succeeded', `Notified: ${s.title}`);
+        }
+        await next();
+        return { stop: false };
+      }
+
+      if (s.type === 'ai' || s.type === 'slack' || s.type === 'email' || s.type === 'calendar') {
+        if (run.dry_run) {
+          if (s.type === 'ai') await q.exec(`update workflow_runs set context = context || jsonb_build_object($2::text, $3::text) where id=$1`, [runId, s.saveAs, '(AI text would appear here)']);
+          await record('simulated', `Would ${STEP_LABEL[s.type]!.toLowerCase()}${s.type === 'email' ? ` to ${s.to}` : ''}`);
+          await next();
+          return { stop: false };
+        }
+        if (s.type === 'email' && !ctx.approved) {
+          await record('failed', 'Sending email needs an approval step before it.');
+          await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Missing approval step']);
+          return { stop: true, run: { ...run, status: 'failed' } };
+        }
+        const r = await runAutomationStep(q, { orgId: e.orgId, workspaceId: e.workspaceId, ownerId: wf.owner_id, runId }, s);
+        if (s.type === 'ai' && r.ok && r.text != null) await q.exec(`update workflow_runs set context = context || jsonb_build_object($2::text, $3::text) where id=$1`, [runId, s.saveAs, r.text]);
+        await record(r.ok ? (r.skipped ? 'skipped' : 'succeeded') : 'failed', r.summary);
+        if (!r.ok) {
+          await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, r.summary]);
+          await notify(q, e.orgId, wf.owner_id, { category: 'workflow', title: `Workflow "${wf.name}" stopped`, body: r.summary });
+          return { stop: true, run: { ...run, status: 'failed' } };
         }
         await next();
         return { stop: false };
@@ -247,7 +290,8 @@ export async function runScheduledWorkflows(): Promise<{ started: number }> {
       return q.one('select workspace_id from workflows where id=$1', [d.workflow_id]);
     });
     const day = new Date().toISOString().slice(0, 10);
-    await startWorkflowRun({ orgId: d.org_id, workspaceId: ws.workspace_id, userId: d.owner_id }, d.workflow_id, { kind: 'schedule', dedupeKey: `schedule:${day}`, data: { date: day } });
+    const digest = await withTenant({ orgId: d.org_id, userId: d.owner_id }, (q) => buildDigest(q));
+    await startWorkflowRun({ orgId: d.org_id, workspaceId: ws.workspace_id, userId: d.owner_id }, d.workflow_id, { kind: 'schedule', dedupeKey: `schedule:${day}`, data: { date: day, ...digest } });
     started += 1;
   }
   return { started };
@@ -328,6 +372,7 @@ workflowRoutes.post('/workflows/:id/publish', async (c) => {
     let approved = false;
     for (const s of parsed.data.steps) {
       if (s.type === 'approval') approved = true;
+      if (s.type === 'email' && !approved) throw badRequest('Sending email needs an approval step before it.');
       if (s.type === 'action') {
         const d = decideTool({ tool: s.tool, allowlist: IMPLEMENTED_TOOLS as string[], userRole: t.role });
         if (d.decision === 'deny') throw badRequest(`${s.tool}: ${d.reason}`);
@@ -377,6 +422,37 @@ workflowRoutes.get('/workflow-runs/:id', async (c) => {
   const exists = await tx(t, (q) => q.one('select id from workflow_runs where id=$1', [c.req.param('id')]));
   if (!exists) throw notFound('Workflow run');
   return c.json(await getRunDetail({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId }, c.req.param('id')));
+});
+
+workflowRoutes.get('/workflow-recipes', async (c) => {
+  const t = need(c, 'workflows.read');
+  const have = await tx(t, (q) => q.many('select name from workflows'));
+  const names = new Set(have.map((r: any) => r.name));
+  return c.json({ items: RECIPES.map((r) => ({ id: r.id, name: r.name, description: r.description, needs: r.needs, installed: names.has(r.name), steps: r.definition.steps.length })) });
+});
+
+/** Installs a ready-made automation: creates, publishes and enables it in one go. */
+workflowRoutes.post('/workflow-recipes/:id/install', async (c) => {
+  const t = need(c, 'workflows.manage');
+  const r = RECIPES.find((x) => x.id === c.req.param('id'));
+  if (!r) throw notFound('Recipe');
+  const def = definitionSchema.parse(r.definition);
+  const row = await tx(t, async (q) => {
+    const exists = await q.one('select id from workflows where name=$1', [r.name]);
+    if (exists) throw new ApiError(409, 'ALREADY_INSTALLED', `${r.name} is already set up`, 'Find it in Workflows.');
+    const w = await q.one(`insert into workflows (org_id, workspace_id, name, description, draft, owner_id, published_version, status) values ($1,$2,$3,$4,$5,$6,1,'enabled') returning *`, [
+      t.orgId,
+      t.workspaceId,
+      r.name,
+      r.description,
+      JSON.stringify(def),
+      t.userId,
+    ]);
+    await q.exec(`insert into workflow_versions (org_id, workflow_id, version, definition, created_by) values ($1,$2,1,$3,$4)`, [t.orgId, w.id, JSON.stringify(def), t.userId]);
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'workflow.installed', targetRef: `workflow:${w.id}`, detail: { recipe: r.id } });
+    return w;
+  });
+  return c.json(row, 201);
 });
 
 export type { DomainEvent };

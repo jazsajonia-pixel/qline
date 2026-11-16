@@ -6,6 +6,8 @@ import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'ai.dart';
 import 'import.dart';
+import 'integrations.dart';
+import 'leads.dart';
 import 'settings.dart';
 import 'setup.dart';
 import 'workflows.dart';
@@ -37,7 +39,8 @@ class BusinessScreen extends ConsumerWidget {
       tile(Icons.people_outline, 'Clients & contacts', 'People and companies you work with', const ContactsScreen()),
       tile(Icons.account_tree_outlined, 'Workflows', 'Automations with approval steps', const WorkflowsScreen()),
       tile(Icons.upload_file_outlined, 'Import data', 'Spreadsheets and documents into Qline', const ImportScreen()),
-      tile(Icons.extension_outlined, 'Integrations', 'Connected apps and what\'s planned', const IntegrationsScreen()),
+      tile(Icons.hub_outlined, 'Integrations', 'Gmail, Sheets, Forms, Calendar, Outlook, Slack', const IntegrationsScreen()),
+      tile(Icons.inbox_outlined, 'Lead inbox', 'New enquiries from email and forms, rated by urgency', const LeadInboxScreen()),
       const SectionLabel('Configure'),
       tile(Icons.auto_awesome_outlined, 'Business setup', 'Guided interview and configuration history', const SetupScreen()),
       tile(Icons.settings_outlined, 'Settings', 'Account, team, audit log, export', const SettingsScreen()),
@@ -278,45 +281,3 @@ Future<void> showContactEditor(BuildContext context, WidgetRef ref, {Map? contac
   );
 }
 
-class IntegrationsScreen extends ConsumerWidget {
-  const IntegrationsScreen({super.key});
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final q = context.q;
-    return Page2(
-      title: 'Integrations',
-      body: Load<List<Map<String, dynamic>>>(
-        fetch: (api) async => items(await api.get('/integrations')),
-        builder: (context, list, _) => ListView(padding: const EdgeInsets.all(16), children: [
-          Text('Only file import works today. The others are listed so you can see what\'s planned — none of them are connected, and Qline won\'t pretend they are.', style: qs(14, c: q.text2)),
-          const SizedBox(height: 12),
-          for (final i in list)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: QCard(
-                child: Row(children: [
-                  Expanded(
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(i['name'] as String, style: qs(15, w: FontWeight.w600, c: q.text)),
-                      const SizedBox(height: 2),
-                      Text('${i['category']} · ${i['detail']}', style: qs(13, c: q.text3)),
-                    ]),
-                  ),
-                  const SizedBox(width: 10),
-                  i['status'] == 'available'
-                      ? QButton('Open', onPressed: () => push(context, const ImportScreen()))
-                      : QButton('Connect', onPressed: () async {
-                          try {
-                            await ref.read(apiProvider).post('/integrations/${i['id']}/connect');
-                          } catch (e) {
-                            if (context.mounted) toastError(context, e);
-                          }
-                        }),
-                ]),
-              ),
-            ),
-        ]),
-      ),
-    );
-  }
-}

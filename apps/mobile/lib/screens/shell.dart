@@ -173,7 +173,7 @@ class _BottomNav extends ConsumerWidget {
                     child: Container(
                       width: 56,
                       height: 56,
-                      decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF05070A), border: Border.all(color: q.line)),
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF07060D), border: Border.all(color: q.line)),
                       clipBehavior: Clip.antiAlias,
                       child: ExcludeSemantics(child: EnergyCore(state: CoreState.idle, reduceMotion: reduce, compact: true, background: false)),
                     ),

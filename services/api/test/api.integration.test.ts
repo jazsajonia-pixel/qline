@@ -291,12 +291,206 @@ d('Qline API (integration)', () => {
     expect((await call(A, 'GET', '/tasks?q=WF%20kickoff')).json.items.length).toBe(1);
   });
 
-  it('integrations are honest: only file import is available', async () => {
+  it('integrations: honest until registered, OAuth login stores sealed tokens, Gmail + Sheets sync make leads, triggers workflows', async () => {
     const l = await call(A, 'GET', '/integrations');
-    expect(l.json.items.filter((x: any) => x.status === 'available').map((x: any) => x.id)).toEqual(['file_import']);
-    const g = await call(A, 'POST', '/integrations/google_drive/connect', {});
-    expect(g.status).toBe(501);
-    expect(g.json.code).toBe('CONNECTOR_NOT_CONFIGURED');
+    expect(l.status).toBe(200);
+    expect(l.json.providers.map((p: any) => p.id)).toEqual(['google', 'microsoft', 'slack']);
+    expect(l.json.providers.every((p: any) => !p.registered && !p.connection)).toBe(true);
+    expect(l.json.canSetup).toBe(false);
+    const g0 = await call(A, 'POST', '/integrations/google/connect', {});
+    expect(g0.status).toBe(409);
+    expect(g0.json.code).toBe('INTEGRATION_NOT_REGISTERED');
+    expect((await call(A, 'PUT', '/platform/oauth-apps/google', { clientId: 'client-123456', clientSecret: 'secret-abcdef-XYZ' })).status).toBe(403);
+
+    const me = await call(A, 'GET', '/me');
+    const email = me.json.user?.email ?? me.json.email;
+    const prevAdmins = process.env.QLINE_PLATFORM_ADMINS;
+    process.env.QLINE_PLATFORM_ADMINS = email;
+    const realFetch = globalThis.fetch;
+    const appended: any[] = [];
+    const j = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
+    const b64 = (s: string) => Buffer.from(s).toString('base64url');
+    const gmsg = (id: string, from: string, subject: string, text: string, extra: any[] = []) => ({
+      id,
+      internalDate: String(Date.now() - 60_000),
+      snippet: text.slice(0, 50),
+      payload: { mimeType: 'multipart/alternative', headers: [{ name: 'From', value: from }, { name: 'Subject', value: subject }, ...extra], parts: [{ mimeType: 'text/plain', body: { data: b64(text) } }] },
+    });
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(input instanceof Request ? input.url : input);
+      const method = init?.method ?? 'GET';
+      if (url.startsWith('https://oauth2.googleapis.com/token'))
+        return j({ access_token: 'at-SECRET-1', refresh_token: 'rt-SECRET-1', expires_in: 3600, scope: 'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.events' });
+      if (url.startsWith('https://oauth2.googleapis.com/revoke')) return j({});
+      if (url.startsWith('https://openidconnect.googleapis.com')) return j({ email: 'owner@acme.test', name: 'Acme Owner' });
+      if (url.includes('/gmail/v1/users/me/messages?')) return j({ messages: [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }] });
+      if (url.includes('/gmail/v1/users/me/messages/m1')) return j(gmsg('m1', 'Dana Buyer <dana@bigco.test>', 'Pricing for 20 seats', 'Hi, we are interested in pricing and need a quote today. Call +63 917 555 0101.'));
+      if (url.includes('/gmail/v1/users/me/messages/m2')) return j(gmsg('m2', 'News <news@letters.test>', 'Weekly pricing digest', 'Big sale on pricing', [{ name: 'List-Unsubscribe', value: '<mailto:x@y>' }]));
+      if (url.includes('/gmail/v1/users/me/messages/m3')) return j(gmsg('m3', 'Pat Friend <pat@friends.test>', 'Lunch?', 'Free for lunch on Friday?'));
+      if (url === 'https://sheets.googleapis.com/v4/spreadsheets' && method === 'POST') return j({ spreadsheetId: 'S1', spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/S1' });
+      if (url.includes('/spreadsheets/S1/values/Leads!A2:J2000')) return j({ values: [['', 'Row Lead', 'row@lead.test', '', 'Row Co', 'lead', 'high', 'Wants a demo', '', '']] });
+      if (url.includes('/spreadsheets/S1/values/') && url.includes(':append')) {
+        appended.push(JSON.parse(init.body));
+        return j({});
+      }
+      if (url.includes('/spreadsheets/S1/values/')) return j({});
+      return realFetch(input, init);
+    }) as any;
+    let turn = 0;
+    ai.setTestProvider(
+      new ai.MockProvider((req) => {
+        turn++;
+        const u = String(req.messages.at(-1)?.content ?? '');
+        const out = u.includes('Pricing for 20 seats')
+          ? { is_lead: true, urgency: 'urgent', score: 92, summary: 'Wants a quote for 20 seats today', reason: 'Explicit buying intent with a same-day deadline', name: 'Dana Buyer', company: 'BigCo', phone: '+63 917 555 0101' }
+          : { is_lead: false, urgency: 'low', score: 5, summary: 'Not business', reason: 'Personal or newsletter', name: null, company: null, phone: null };
+        return [{ type: 'token', text: 'Here you go: ' + JSON.stringify(out) }, { type: 'done' }];
+      }),
+    );
+    try {
+      const s1 = await call(A, 'PUT', '/platform/oauth-apps/google', { clientId: 'client-123456.apps.googleusercontent.com', clientSecret: 'secret-abcdef-XYZ' });
+      expect(s1.status).toBe(200);
+      const apps = await call(A, 'GET', '/platform/oauth-apps');
+      expect(apps.json.items.find((x: any) => x.id === 'google')).toMatchObject({ configured: true });
+      expect(apps.json.items.find((x: any) => x.id === 'google').redirectUri).toMatch(/\/v1\/integrations\/google\/callback$/);
+      expect(JSON.stringify(apps.json)).not.toContain('secret-abcdef');
+      expect((await call(M, 'POST', '/integrations/google/connect', {})).status).toBe(403); // viewer
+
+      const recipe = await call(A, 'POST', '/workflow-recipes/urgent_lead_alert/install', {});
+      expect(recipe.status).toBe(201);
+      expect((await call(A, 'POST', '/workflow-recipes/urgent_lead_alert/install', {})).status).toBe(409);
+
+      const cn = await call(A, 'POST', '/integrations/google/connect', { features: ['gmail', 'sheets'] });
+      expect(cn.status).toBe(200);
+      const u = new URL(cn.json.url);
+      expect(u.host).toBe('accounts.google.com');
+      expect(u.searchParams.get('scope')).toContain('gmail.readonly');
+      expect(u.searchParams.get('scope')).toContain('drive.file');
+      expect(u.searchParams.get('scope')).not.toContain('calendar');
+      expect(u.searchParams.get('access_type')).toBe('offline');
+      expect(u.searchParams.get('code_challenge_method')).toBe('S256');
+      const state = u.searchParams.get('state')!;
+      const bad = await call(null, 'GET', `/integrations/google/callback?state=nope&code=x`);
+      expect(bad.status).toBe(400);
+      const cb = await call(null, 'GET', `/integrations/google/callback?state=${state}&code=good-code`);
+      expect(cb.status).toBe(200);
+      expect(String(cb.json)).toContain('Google connected');
+      expect(String(cb.json)).toContain('qline://integrations');
+      expect((await call(null, 'GET', `/integrations/google/callback?state=${state}&code=good-code`)).status).toBe(400); // single use
+
+      const l2 = await call(A, 'GET', '/integrations');
+      const gc = l2.json.providers.find((p: any) => p.id === 'google').connection;
+      expect(gc).toMatchObject({ accountEmail: 'owner@acme.test', status: 'ok' });
+      expect(gc.features).toEqual(expect.arrayContaining(['gmail', 'sheets', 'forms', 'calendar']));
+      expect(JSON.stringify(l2.json)).not.toContain('SECRET');
+      expect((await call(B, 'GET', '/integrations')).json.providers.find((p: any) => p.id === 'google').connection).toBeNull();
+
+      // AI triage needs a model: connect a (mocked) provider the way the API stores it.
+      const { seal } = await import('../src/core/secrets');
+      const { aad } = await import('../src/agent/models');
+      const { withTenant } = await import('../src/core/db');
+      await withTenant({ orgId: A.org!, userId: me.json.user?.id ?? me.json.id }, (q) =>
+        q.exec(`insert into ai_provider_keys (org_id, provider, key_ciphertext, key_hint, models, created_by) values ($1,'anthropic',$2,'TEST',$3,'test') on conflict do nothing`, [
+          A.org,
+          seal('sk-ant-test-key', aad(A.org!, 'anthropic')),
+          JSON.stringify([{ id: 'claude-test', name: 'Claude Test' }]),
+        ]),
+      );
+      expect((await call(A, 'PUT', '/ai/default', { provider: 'anthropic', model: 'claude-test' })).status).toBe(200);
+
+      const sync = await call(A, 'POST', '/integrations/google/sync', {});
+      expect(sync.status).toBe(200);
+      expect(sync.json).toMatchObject({ checked: 3, leads: 1 });
+      const inbox = await call(A, 'GET', '/leads/inbox');
+      expect(inbox.json.counts).toMatchObject({ leads: 1, urgent: 1, ignored: 2 });
+      const dana = inbox.json.items.find((x: any) => x.from_email === 'dana@bigco.test');
+      expect(dana).toMatchObject({ is_lead: true, urgency: 'urgent', classified_by: 'ai' });
+      const news = inbox.json.items.find((x: any) => x.from_email === 'news@letters.test');
+      expect(news.is_lead).toBe(false);
+      const cs = await call(A, 'GET', '/contacts?q=Dana');
+      expect(cs.json.items[0]).toMatchObject({ stage: 'lead', urgency: 'urgent', phone: '+63 917 555 0101' });
+      expect((await call(B, 'GET', '/leads/inbox')).json.items.length).toBe(0);
+      const notes = await call(A, 'GET', '/notifications');
+      expect(JSON.stringify(notes.json)).toContain('Urgent lead: Dana Buyer');
+      const pend = await call(A, 'GET', '/approvals?status=pending');
+      expect(JSON.stringify(pend.json)).toContain('Create a reply task for Dana Buyer?');
+      // dedupe
+      expect((await call(A, 'POST', '/integrations/google/sync', {})).json.leads).toBe(0);
+
+      // Sheets: create, import a row added by hand, export Qline leads
+      const sh = await call(A, 'POST', '/integrations/google/sheet', {});
+      expect(sh.status).toBe(201);
+      expect(sh.json.sheet.id).toBe('S1');
+      expect((await call(A, 'GET', '/contacts?q=Row%20Lead')).json.items[0]).toMatchObject({ stage: 'lead', urgency: 'high' });
+      expect(JSON.stringify(appended)).toContain('dana@bigco.test');
+      expect(JSON.stringify(appended)).not.toContain('row@lead.test'); // already in the sheet
+
+      // People can correct the AI
+      const pat = inbox.json.items.find((x: any) => x.from_email === 'pat@friends.test');
+      const mk = await call(A, 'POST', `/leads/inbox/${pat.id}/mark`, { lead: true, urgency: 'normal' });
+      expect(mk.json).toMatchObject({ is_lead: true, status: 'lead' });
+      expect(mk.json.contact_id).toBeTruthy();
+      const nk = await call(A, 'POST', `/leads/inbox/${news.id}/mark`, { lead: false, ignoreSender: true });
+      expect(nk.status).toBe(200);
+      const rules = await call(A, 'GET', '/leads/rules');
+      expect(rules.json.ignoreDomains).toContain('letters.test');
+      ai.setTestProvider(null);
+      const put = await call(A, 'PUT', '/leads/rules', { ...rules.json, useAi: false, urgentKeywords: ['rush'], vipDomains: ['vip.test'] });
+      expect(put.status).toBe(200);
+      expect((await call(M, 'PUT', '/leads/rules', rules.json)).status).toBe(403);
+      const t1 = await call(A, 'POST', '/leads/rules/test', { from: 'ceo@vip.test', subject: 'Quick question', text: 'rush please' });
+      expect(t1.json).toMatchObject({ isLead: true, urgency: 'urgent', by: 'rules' });
+      const t2 = await call(A, 'POST', '/leads/rules/test', { from: 'a@letters.test', subject: 'Pricing', text: 'interested' });
+      expect(t2.json.isLead).toBe(false);
+
+      expect((await call(A, 'DELETE', '/integrations/google')).status).toBe(200);
+      expect((await call(A, 'GET', '/integrations')).json.providers.find((p: any) => p.id === 'google').connection).toBeNull();
+    } finally {
+      globalThis.fetch = realFetch;
+      ai.setTestProvider(null);
+      process.env.QLINE_PLATFORM_ADMINS = prevAdmins ?? '';
+      await call(A, 'PUT', '/ai/default', { provider: null });
+      await call(A, 'DELETE', '/ai/providers/anthropic');
+      const { deleteApp } = await import('../src/integrations/oauth');
+      await deleteApp('google');
+    }
+    expect(turn).toBeGreaterThan(0);
+  });
+
+  it('automation steps: email needs approval, dry run simulates AI/Slack/email, voice is honest without keys', async () => {
+    const bad = await call(A, 'POST', '/workflows', {
+      name: 'Bad mailer',
+      definition: { trigger: { type: 'manual' }, steps: [{ type: 'email', to: 'x@y.test', subject: 'Hi', body: 'Hello' }] },
+    });
+    expect(bad.status).toBe(201);
+    const pub = await call(A, 'POST', `/workflows/${bad.json.id}/publish`, {});
+    expect(pub.status).toBe(400);
+    const ok = await call(A, 'POST', '/workflows', {
+      name: 'Reply flow',
+      definition: {
+        trigger: { type: 'event', event: 'lead.created' },
+        steps: [
+          { type: 'ai', prompt: 'Write a reply to {{trigger.name}}', saveAs: 'reply' },
+          { type: 'slack', text: 'New lead {{trigger.name}}' },
+          { type: 'approval', title: 'Send?' },
+          { type: 'email', to: '{{trigger.email}}', subject: 'Re: hi', body: '{{reply}}' },
+          { type: 'calendar', title: 'Follow up {{trigger.name}}', inDays: 2 },
+        ],
+      },
+    });
+    expect((await call(A, 'POST', `/workflows/${ok.json.id}/publish`, {})).status).toBe(200);
+    const dr = await call(A, 'POST', `/workflows/${ok.json.id}/dry-run`, { data: { name: 'Sam', email: 'sam@x.test' } });
+    expect(dr.status).toBe(201);
+    expect(dr.json.steps.map((s: any) => s.status)).toEqual(['simulated', 'simulated', 'simulated', 'simulated', 'simulated']);
+    const rec = await call(A, 'GET', '/workflow-recipes');
+    expect(rec.json.items.map((r: any) => r.id)).toEqual(['urgent_lead_alert', 'lead_auto_reply', 'lead_follow_up', 'daily_briefing']);
+    expect(rec.json.items.find((r: any) => r.id === 'urgent_lead_alert').installed).toBe(true);
+
+    const vo = await call(A, 'GET', '/voice/options');
+    expect(vo.json.engines.find((e: any) => e.id === 'gemini').available).toBe(false);
+    const sp = await call(A, 'POST', '/voice/speak', { text: 'Hello there', engine: 'gemini' });
+    expect(sp.status).toBe(409);
+    expect(sp.json.code).toBe('VOICE_NOT_CONFIGURED');
   });
 
   it('exports JSON for owners', async () => {
