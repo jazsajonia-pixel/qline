@@ -14,6 +14,10 @@ export const env = {
   get aiModel() {
     return process.env.QLINE_AI_MODEL ?? 'gemini-4-carbon';
   },
+  /** 32+ random bytes (any string); encrypts organizations' AI provider keys at rest. */
+  get dataKey() {
+    return process.env.QLINE_DATA_KEY ?? '';
+  },
   get bucket() {
     return process.env.QLINE_BUCKET ?? 'qline-files';
   },

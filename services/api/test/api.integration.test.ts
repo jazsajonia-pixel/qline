@@ -117,23 +117,61 @@ d('Qline API (integration)', () => {
     expect(r2.headers.get('idempotent-replay')).toBe('true');
   });
 
-  it('reports AI honestly when no provider is configured', async () => {
-    const s = await call(A, 'GET', '/ai/status?refresh=1');
-    expect(s.json.status).toBe('not_configured');
+  it('AI providers: honest when none is connected, owner-only keys, real key validation', async () => {
+    const o = await call(A, 'GET', '/ai/overview');
+    expect(o.status).toBe(200);
+    expect(o.json.status).toBe('not_configured');
+    expect(o.json.providers.map((p: any) => p.id)).toEqual(['openai', 'anthropic', 'google', 'xai', 'deepseek']);
+    expect(o.json.providers.every((p: any) => !p.connected)).toBe(true);
     const conv = await call(A, 'POST', '/conversations', {});
     const m = await call(A, 'POST', `/conversations/${conv.json.id}/messages`, { content: 'Hello' });
     expect(m.status).toBe(202);
     const st = await app.fetch(new Request(`http://localhost/v1/runs/${m.json.runId}/stream`, { headers: { authorization: `Bearer ${A.token}`, 'x-qline-org': A.org! } }));
     const body = await st.text();
     expect(body).toContain('AI_PROVIDER_NOT_CONFIGURED');
-    const run = await call(A, 'GET', `/runs/${m.json.runId}`);
-    expect(run.json.status).toBe('failed');
+    expect(body).toContain('Settings');
+    expect((await call(A, 'GET', `/runs/${m.json.runId}`)).json.status).toBe('failed');
+    // Viewers cannot add keys; unknown providers 404; a fake key is rejected by Google itself.
+    expect((await call(M, 'PUT', '/ai/providers/google', { apiKey: 'AIzaFAKEFAKEFAKEFAKEFAKE' })).status).toBe(403);
+    expect((await call(A, 'PUT', '/ai/providers/nope', { apiKey: 'AIzaFAKEFAKEFAKEFAKEFAKE' })).status).toBe(404);
+    const bad = await call(A, 'PUT', '/ai/providers/google', { apiKey: 'AIzaSyFAKE-not-a-real-key-000000000' });
+    expect(bad.status).toBe(400);
+    expect(bad.json.code).toBe('AI_KEY_REJECTED');
+    expect((await call(A, 'PUT', '/ai/default', { provider: 'google', model: 'gemini-x' })).status).toBe(409);
   });
 
   it('runs an agent with tools, parks risky actions for human approval, executes once', async () => {
+    // Connect a provider the way the API stores it (encrypted), then assign it.
+    const { seal } = await import('../src/core/secrets');
+    const { aad } = await import('../src/agent/models');
+    const { withTenant } = await import('../src/core/db');
+    const me = await call(A, 'GET', '/me');
+    const userId = me.json.user?.id ?? me.json.id;
+    await withTenant({ orgId: A.org!, userId }, (q) =>
+      q.exec(`insert into ai_provider_keys (org_id, provider, key_ciphertext, key_hint, models, created_by) values ($1,'anthropic',$2,'TEST',$3,'test')`, [
+        A.org,
+        seal('sk-ant-test-key', aad(A.org!, 'anthropic')),
+        JSON.stringify([{ id: 'claude-test', name: 'Claude Test' }]),
+      ]),
+    );
+    const ov = await call(A, 'GET', '/ai/overview');
+    expect(ov.json.status).toBe('no_default');
+    expect(JSON.stringify(ov.json)).not.toContain('sk-ant-test-key');
+    expect(ov.json.providers.find((p: any) => p.id === 'anthropic')).toMatchObject({ connected: true, keyHint: 'TEST', modelCount: 1 });
+    expect((await call(B, 'GET', '/ai/overview')).json.providers.find((p: any) => p.id === 'anthropic').connected).toBe(false);
+    expect((await call(M, 'PUT', '/ai/default', { provider: 'anthropic', model: 'claude-test' })).status).toBe(403);
+    expect((await call(A, 'PUT', '/ai/default', { provider: 'anthropic', model: 'claude-test' })).status).toBe(200);
+    const ceo = ov.json.agents.find((a: any) => a.template === 'ceo');
+    expect((await call(A, 'PUT', `/agents/${ceo.id}/model`, { provider: 'openai', model: 'gpt-x' })).status).toBe(409); // not connected
+    const setM = await call(A, 'PUT', `/agents/${ceo.id}/model`, { provider: 'anthropic', model: 'claude-test' });
+    expect(setM.status).toBe(200);
+    expect(setM.json.version).toBeGreaterThan(1);
+    const ov2 = await call(A, 'GET', '/ai/overview');
+    expect(ov2.json.status).toBe('ready');
+    expect(ov2.json.agents.find((a: any) => a.id === ceo.id)).toMatchObject({ assignment: { provider: 'anthropic', model: 'claude-test' }, ready: true });
+
     let turn = 0;
-    ai.setTestProvider(
-      new ai.MockProvider((req) => {
+    const mock = new ai.MockProvider((req) => {
         turn++;
         const lastTool = [...req.messages].reverse().find((m) => m.role === 'tool');
         if (!lastTool) {
@@ -144,8 +182,8 @@ d('Qline API (integration)', () => {
           ];
         }
         return [{ type: 'token', text: 'I found 1 task and asked you to approve a new one.' }, { type: 'usage', inputTokens: 10, outputTokens: 12 }, { type: 'done' }];
-      }),
-    );
+      });
+    ai.setTestProvider(mock);
     try {
       const conv = await call(A, 'POST', '/conversations', {});
       const m = await call(A, 'POST', `/conversations/${conv.json.id}/messages`, { content: 'What is open, and add a follow-up task' });
@@ -170,9 +208,16 @@ d('Qline API (integration)', () => {
       expect(after.json.items.length).toBe(1);
       expect(after.json.items[0].created_by).toMatch(/^agent:/);
       expect(turn).toBeGreaterThanOrEqual(1);
+      expect(mock.calls[0].model).toBe('claude-test');
+      expect(sse).toContain('"provider":"anthropic"');
     } finally {
       ai.setTestProvider(null);
     }
+    // Back to "use workspace default", then disconnect.
+    expect((await call(A, 'PUT', `/agents/${ceo.id}/model`, { provider: null })).status).toBe(200);
+    expect((await call(A, 'PUT', '/ai/default', { provider: null })).status).toBe(200);
+    expect((await call(A, 'DELETE', '/ai/providers/anthropic')).status).toBe(200);
+    expect((await call(A, 'GET', '/ai/overview')).json.status).toBe('not_configured');
   });
 
   it('onboarding: rules analysis → proposal → apply → rollback', async () => {

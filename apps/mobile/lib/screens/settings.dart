@@ -9,6 +9,7 @@ import '../core/config.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'ai.dart';
 import 'setup.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -40,6 +41,7 @@ class SettingsScreen extends ConsumerWidget {
                 },
         ),
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('Organisation')),
+        nav(Icons.memory, 'AI providers', 'Your keys for OpenAI, Claude, Gemini, Grok, DeepSeek', const AiProvidersScreen()),
         nav(Icons.group_outlined, 'Team', 'Members, roles and invite codes', const MembersScreen()),
         if (s.role != 'member' && s.role != 'viewer') nav(Icons.fact_check_outlined, 'Audit log', 'Every change, tamper-evident', const AuditScreen()),
         nav(Icons.history, 'Configuration versions', 'Review and roll back setup', const Page2(title: 'Configuration', body: SingleChildScrollView(padding: EdgeInsets.all(16), child: ConfigHistory()))),
@@ -235,7 +237,7 @@ class StatusScreen extends StatelessWidget {
     return Page2(
       title: 'System status',
       body: Load<List<dynamic>>(
-        fetch: (api) async => [await api.get('/health/ready').catchError((e) => {'status': 'degraded'}), await api.get('/ai/status', {'refresh': '1'})],
+        fetch: (api) async => [await api.get('/health/ready').catchError((e) => {'status': 'degraded'}), await api.get('/ai/overview').catchError((e) => {'status': 'unavailable'})],
         builder: (context, r, reload) {
           final h = r[0] as Map;
           final ai = r[1] as Map;
@@ -250,7 +252,12 @@ class StatusScreen extends StatelessWidget {
             row('Server', h['status'] == 'ok', h['status'] == 'ok' ? 'Reachable' : 'Degraded'),
             row('Database', checks['database'] == true, checks['database'] == true ? 'Connected' : 'Not reachable'),
             row('File storage', checks['storage'] == true, checks['storage'] == true ? 'Connected' : 'Not available'),
-            row('AI', ai['status'] == 'available', '${cap(ai['status'] as String? ?? '')} · ${ai['model']}\n${ai['detail']}'),
+            row('AI', ai['status'] == 'ready', switch (ai['status']) {
+              'ready' => 'Default: ${modelLabel(ai['default'] as Map?, items(ai, 'providers'))}',
+              'no_default' => 'Provider connected, no default model chosen',
+              'not_configured' => 'No AI provider connected (Settings → AI providers)',
+              _ => 'Could not check',
+            }),
             const SizedBox(height: 8),
             Text('Server: ${AppConfig.apiBase}', style: qs(11, c: q.text3, family: mono)),
             const SizedBox(height: 12),

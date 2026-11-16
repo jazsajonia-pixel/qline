@@ -30,6 +30,7 @@ export const PERMISSIONS = [
   'audit.read',
   'export.run',
   'integrations.manage',
+  'ai.manage',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 

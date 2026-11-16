@@ -1,4 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:qline/core/api.dart';
+import 'package:qline/core/session.dart';
+import 'package:qline/screens/ai.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:qline/screens/auth.dart';
@@ -65,5 +72,32 @@ void main() {
   testWidgets('light theme also builds', (t) async {
     await t.pumpWidget(wrap(const EmptyState(icon: Icons.inbox, title: 'Nothing here', body: 'Body'), light: true));
     expect(find.text('Nothing here'), findsOneWidget);
+  });
+
+  testWidgets('AI providers lists all five; connecting is optional per provider', (t) async {
+    Map<String, dynamic> prov(String id, String name, {bool connected = false}) => {
+          'id': id, 'name': name, 'maker': '$name models', 'keyUrl': 'https://example.test', 'costNote': 'Pay as you go.', 'freeTier': id == 'google',
+          'connected': connected, 'keyHint': connected ? 'ab12' : null, 'status': connected ? 'ok' : null, 'modelCount': connected ? 3 : 0,
+        };
+    final overview = {
+      'status': 'ready',
+      'canManage': true,
+      'default': {'provider': 'google', 'model': 'gemini-test'},
+      'providers': [prov('openai', 'OpenAI'), prov('anthropic', 'Anthropic'), prov('google', 'Google Gemini', connected: true), prov('xai', 'xAI'), prov('deepseek', 'DeepSeek')],
+      'agents': [],
+    };
+    t.view.physicalSize = const Size(1200, 5000);
+    t.view.devicePixelRatio = 1;
+    addTearDown(t.view.reset);
+    final api = Api(client: MockClient((r) async => http.Response(jsonEncode(overview), 200, headers: {'content-type': 'application/json'})));
+    await t.pumpWidget(ProviderScope(overrides: [apiProvider.overrideWithValue(api)], child: MaterialApp(theme: buildTheme(false), home: const AiProvidersScreen())));
+    await t.pumpAndSettle();
+    expect(find.text('Google Gemini · gemini-test'), findsOneWidget);
+    expect(find.text('Connected'), findsOneWidget);
+    expect(find.text('Not connected'), findsNWidgets(4));
+    expect(find.textContaining('Key ending ab12'), findsOneWidget);
+    expect(find.text('DeepSeek'), findsOneWidget);
+    expect(find.text('Add key'), findsNWidgets(4));
+    expect(find.text('Replace key'), findsOneWidget);
   });
 }

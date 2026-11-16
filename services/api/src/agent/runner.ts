@@ -1,8 +1,8 @@
-import { createProvider, ProviderError, type ChatMessage, type ToolCallReq } from '@qline/ai';
+import { ProviderError, type ChatMessage, type ToolCallReq } from '@qline/ai';
 import { decideTool, riskLabel, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { withTenant, type Q } from '../core/db';
-import { env } from '../core/env';
+import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName } from './tools';
 
 export const MAX_TOOL_CALLS = 8;
@@ -49,7 +49,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
 
   const setup = await db(async (q) => {
     const run = await q.one(
-      `select r.*, a.name as agent_name, a.status as agent_status, a.template, v.instructions, v.model, v.tool_allowlist
+      `select r.*, a.name as agent_name, a.status as agent_status, a.template, v.instructions, v.model, v.provider, v.tool_allowlist
        from agent_runs r join agents a on a.id = r.agent_id join agent_versions v on v.id = r.agent_version_id where r.id=$1`,
       [runId],
     );
@@ -60,10 +60,11 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     );
     const ws = await q.one('select config from workspaces where id=$1', [ctx.workspaceId]);
     const profile = await q.one('select profile from business_profiles where workspace_id=$1', [ctx.workspaceId]);
-    return { run, history: history.reverse(), config: ws?.config ?? {}, profile: profile?.profile ?? {} };
+    const resolved = await resolveModel(q, ctx.orgId, { provider: run.provider, model: run.model, name: run.agent_name });
+    return { run, history: history.reverse(), config: ws?.config ?? {}, profile: profile?.profile ?? {}, resolved };
   });
   if (!setup) return;
-  const { run, history, config, profile } = setup;
+  const { run, history, config, profile, resolved } = setup;
 
   const finish = async (status: 'completed' | 'failed' | 'waiting_approval', text: string, usage: { i: number; o: number }, error?: string, refs: unknown[] = []) => {
     await db(async (q) => {
@@ -110,15 +111,14 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     return;
   }
 
-  const provider = createProvider(process.env);
-  if (!provider) {
-    const msg = 'AI is not configured on this server, so no answer was generated.';
-    await emit('error', { code: 'AI_PROVIDER_NOT_CONFIGURED', retryable: false, message: msg });
-    await finish('failed', '', { i: 0, o: 0 }, msg);
+  if (!resolved.ok) {
+    await emit('error', { code: resolved.code, retryable: false, message: resolved.message });
+    await finish('failed', '', { i: 0, o: 0 }, resolved.message);
     return;
   }
+  const { provider, model, providerId } = resolved;
 
-  await emit('status', { state: 'thinking' });
+  await emit('status', { state: 'thinking', provider: providerId, model });
 
   const allow: string[] = run.tool_allowlist;
   const policy = (config.agentPolicy ?? {}) as { relaxed?: string[]; tightened?: string[] };
@@ -144,8 +144,10 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
       if (signal?.aborted) break;
       const calls: ToolCallReq[] = [];
       let turnText = '';
-      for await (const ev of provider.stream({ model: run.model || env.aiModel, messages, tools: toolCount < MAX_TOOL_CALLS ? tools : undefined, maxTokens: 1200 }, signal)) {
-        if (ev.type === 'token') {
+      let reasoning = '';
+      for await (const ev of provider.stream({ model, messages, tools: toolCount < MAX_TOOL_CALLS ? tools : undefined, maxTokens: 4096 }, signal)) {
+        if (ev.type === 'reasoning') reasoning += ev.text;
+        else if (ev.type === 'token') {
           turnText += ev.text;
           await emit('token', { text: ev.text });
         } else if (ev.type === 'tool_call') calls.push(ev.call);
@@ -154,7 +156,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
       text += turnText;
       if (!calls.length) break;
 
-      messages.push({ role: 'assistant', content: turnText || null, tool_calls: calls });
+      messages.push({ role: 'assistant', content: turnText || null, tool_calls: calls, reasoning_content: reasoning || undefined });
       for (const call of calls) {
         toolCount += 1;
         const name = fromModelName(call.function.name);
@@ -172,9 +174,11 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     const pe = e instanceof ProviderError ? e : new ProviderError('PROVIDER_UNAVAILABLE', (e as Error).message, true);
     const code = pe.code === 'PROVIDER_NOT_CONFIGURED' ? 'AI_PROVIDER_NOT_CONFIGURED' : pe.code;
     const human =
-      pe.code === 'PROVIDER_NOT_CONFIGURED'
-        ? 'AI is not available yet: the Neon AI Gateway on this project needs prepaid credits. No answer was generated.'
-        : `The AI provider failed: ${pe.message}`;
+      pe.code === 'PROVIDER_AUTH_FAILED'
+        ? `The ${providerId} key was rejected (${pe.message}). Replace it in Settings → AI providers.`
+        : pe.code === 'PROVIDER_RATE_LIMITED'
+          ? `The AI provider is rate limiting this key. Try again shortly, or pick another model. (${pe.message})`
+          : `The AI provider failed: ${pe.message}`;
     await emit('error', { code, retryable: pe.retryable, message: human, detail: pe.detail });
     await finish('failed', text, usage, human, refs);
     return;

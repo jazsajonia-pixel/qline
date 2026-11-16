@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'ai.dart';
 import 'import.dart';
 import 'settings.dart';
 import 'setup.dart';
@@ -130,7 +131,9 @@ class AgentDetail extends ConsumerWidget {
               ]),
             const SectionLabel('Instructions'),
             QCard(child: Text(a['instructions'] as String? ?? '', style: qs(14, c: q.text2, h: 1.5))),
-            Padding(padding: const EdgeInsets.only(top: 6, left: 4), child: Text('Version ${a['current_version']} · model ${a['model']}', style: qs(11, c: q.text3, family: mono))),
+            Padding(padding: const EdgeInsets.only(top: 6, left: 4), child: Text('Version ${a['current_version']}', style: qs(11, c: q.text3, family: mono))),
+            const SectionLabel('AI model'),
+            AgentModelCard(agentId: id, canManage: canManage),
             const SectionLabel('What it can do'),
             QCard(
               padding: EdgeInsets.zero,

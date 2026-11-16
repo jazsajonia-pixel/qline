@@ -6,6 +6,7 @@ import { requireTenant, requireUser, tx, type Env } from './core/context';
 import { env } from './core/env';
 import { ApiError } from './core/errors';
 import { agentRoutes } from './modules/agents';
+import { aiRoutes } from './modules/ai';
 import { importRoutes } from './modules/imports';
 import { onboardingRoutes } from './modules/onboarding';
 import { memberRoutes, orgRoutes } from './modules/orgs';
@@ -94,6 +95,7 @@ app.use('/v1/*', async (c, next) => {
 app.route('/v1', memberRoutes);
 app.route('/v1', workRoutes);
 app.route('/v1', agentRoutes);
+app.route('/v1', aiRoutes);
 app.route('/v1', workflowRoutes);
 app.route('/v1', onboardingRoutes);
 app.route('/v1', importRoutes);

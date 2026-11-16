@@ -21,7 +21,7 @@ agentRoutes.get('/agents', async (c) => {
   const t = c.get('tenant');
   const items = await tx(t, (q) =>
     q.many(
-      `select a.id, a.template, a.name, a.status, a.current_version, v.instructions, v.model, v.tool_allowlist,
+      `select a.id, a.template, a.name, a.status, a.current_version, v.instructions, v.model, v.provider, v.tool_allowlist,
               (select count(*)::int from agent_runs r where r.agent_id=a.id and r.created_at > now() - interval '7 days') as runs_week,
               (select max(r.created_at) from agent_runs r where r.agent_id=a.id) as last_run_at
        from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version
@@ -45,7 +45,7 @@ agentRoutes.get('/agents/:id', async (c) => {
   const t = c.get('tenant');
   const data = await tx(t, async (q) => {
     const a = await q.one(
-      `select a.*, v.instructions, v.model, v.tool_allowlist from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version where a.id=$1`,
+      `select a.*, v.instructions, v.model, v.provider, v.tool_allowlist from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version where a.id=$1`,
       [c.req.param('id')],
     );
     if (!a) throw notFound('Agent');
@@ -69,7 +69,7 @@ agentRoutes.patch('/agents/:id', async (c) => {
     }),
   );
   const row = await tx(t, async (q) => {
-    const a = await q.one(`select a.*, v.instructions, v.model, v.tool_allowlist from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version where a.id=$1`, [c.req.param('id')]);
+    const a = await q.one(`select a.*, v.instructions, v.model, v.provider, v.tool_allowlist from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version where a.id=$1`, [c.req.param('id')]);
     if (!a) throw notFound('Agent');
     if (input.toolAllowlist) {
       // Only tools that the template is entitled to (policy floor); never widen beyond it.
@@ -81,8 +81,8 @@ agentRoutes.patch('/agents/:id', async (c) => {
     if (input.instructions || input.toolAllowlist) {
       const next = a.current_version + 1;
       await q.exec(
-        `insert into agent_versions (org_id, agent_id, version, instructions, model, tool_allowlist, created_by) values ($1,$2,$3,$4,$5,$6,$7)`,
-        [t.orgId, a.id, next, input.instructions ?? a.instructions, a.model, input.toolAllowlist ?? a.tool_allowlist, `user:${t.userId}`],
+        `insert into agent_versions (org_id, agent_id, version, instructions, model, provider, tool_allowlist, created_by) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [t.orgId, a.id, next, input.instructions ?? a.instructions, a.model, a.provider, input.toolAllowlist ?? a.tool_allowlist, `user:${t.userId}`],
       );
       await q.exec('update agents set current_version=$2 where id=$1', [a.id, next]);
     }

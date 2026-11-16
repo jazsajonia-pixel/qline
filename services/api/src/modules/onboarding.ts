@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { complete, createProvider, extractJson, ProviderError } from '@qline/ai';
+import { complete, extractJson, ProviderError } from '@qline/ai';
+import { resolveModel } from '../agent/models';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import type { Q } from '../core/db';
@@ -155,14 +156,15 @@ export function buildProposal(model: BusinessModel, current: any) {
   return { snapshot: next, diff };
 }
 
-async function analyseWithAi(a: Answers): Promise<BusinessModel | null> {
-  const provider = createProvider(process.env);
-  if (!provider) return null;
+async function analyseWithAi(t: TenantCtx, a: Answers): Promise<BusinessModel | null> {
+  const r = await tx(t, (q) => resolveModel(q, t.orgId)).catch(() => null);
+  if (!r || !r.ok) return null;
+  const provider = r.provider;
   const base = analyseWithRules(a);
   try {
     const { text } = await complete(provider, {
-      model: env.aiModel,
-      maxTokens: 1500,
+      model: r.model,
+      maxTokens: 4096,
       messages: [
         {
           role: 'system',
@@ -286,7 +288,7 @@ onboardingRoutes.post('/onboarding/sessions/:id/analysis', async (c) => {
   const t = need(c, 'config.apply');
   const s = await tx(t, (q) => q.one('select * from onboarding_sessions where id=$1', [c.req.param('id')]));
   if (!s) throw notFound('Onboarding session');
-  const ai = await analyseWithAi(s.answers);
+  const ai = await analyseWithAi(t, s.answers);
   const model = ai ?? analyseWithRules(s.answers);
   const source = ai ? 'ai' : 'rules';
   const updated = await tx(t, (q) => q.one(`update onboarding_sessions set analysis=$2, analysis_source=$3, state='analysis', updated_at=now() where id=$1 returning *`, [s.id, JSON.stringify(model), source]));

@@ -11,6 +11,7 @@ import '../core/session.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'ai.dart';
 import 'approvals.dart';
 
 class _Step {
@@ -66,6 +67,9 @@ class _LiveState extends ConsumerState<_Live> {
 
   Api get _api => ref.read(apiProvider);
 
+  Map<String, dynamic>? get _agentAi => items(_ai, 'agents').where((a) => a['id'] == _agent?['id']).firstOrNull;
+  bool get _agentReady => _agentAi?['ready'] == true;
+
   @override
   void initState() {
     super.initState();
@@ -82,12 +86,12 @@ class _LiveState extends ConsumerState<_Live> {
       _loadError = null;
     });
     try {
-      final results = await Future.wait([_api.get('/agents'), _api.get('/ai/status').catchError((_) => <String, dynamic>{'status': 'unavailable', 'detail': 'Could not check AI status.'})]);
+      final results = await Future.wait([_api.get('/agents'), _api.get('/ai/overview').catchError((_) => <String, dynamic>{'status': 'unavailable', 'detail': 'Could not check AI status.'})]);
       _agents = items(results[0]);
       _ai = (results[1] as Map).cast<String, dynamic>();
       _agent = _agents.where((a) => a['template'] == 'ceo').firstOrNull ?? _agents.firstOrNull;
       if (_convId != null) await _loadConversation(_convId!);
-      if (_ai?['status'] != 'available') _core = CoreState.error;
+      if (!_agentReady) _core = CoreState.error;
     } on ApiException catch (e) {
       _loadError = e.message;
       _core = e.isNetwork ? CoreState.offline : CoreState.error;
@@ -268,7 +272,7 @@ class _LiveState extends ConsumerState<_Live> {
       _convId = null;
       _runId = null;
       _msgs.clear();
-      _core = _ai?['status'] == 'available' ? CoreState.idle : CoreState.error;
+      _core = _agentReady ? CoreState.idle : CoreState.error;
     });
   }
 
@@ -286,7 +290,7 @@ class _LiveState extends ConsumerState<_Live> {
   Widget build(BuildContext context) {
     final q = context.q;
     final prefs = ref.watch(prefsProvider);
-    final aiOk = _ai?['status'] == 'available';
+    final aiOk = _agentReady;
     final hasChat = _msgs.isNotEmpty;
     final template = _agent?['template'] as String? ?? 'ceo';
     return Scaffold(
@@ -294,7 +298,7 @@ class _LiveState extends ConsumerState<_Live> {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
-        title: _AgentPicker(agents: _agents, selected: _agent, onPick: _runId != null ? null : (a) => setState(() {
+        title: _AgentPicker(agents: _agents, selected: _agent, model: _agentAi?['effective'] == null ? null : (_agentAi!['effective'] as Map)['model'] as String?, onPick: _runId != null ? null : (a) => setState(() {
               _agent = a;
               _newChat();
             })),
@@ -337,7 +341,16 @@ class _LiveState extends ConsumerState<_Live> {
             ]),
           ),
           if (_loading) const LinearProgressIndicator(minHeight: 2),
-          if (!_loading && (_loadError != null || !aiOk)) _AiBanner(error: _loadError, ai: _ai, onRetry: _init),
+          if (!_loading && (_loadError != null || !aiOk)) _AiBanner(
+                error: _loadError,
+                ai: _ai,
+                agentAi: _agentAi,
+                onRetry: _init,
+                onSetup: () async {
+                  await push(context, const AiProvidersScreen());
+                  if (mounted) await _init();
+                },
+              ),
           Expanded(
             child: !hasChat
                 ? _Starters(agent: _agent, onPick: aiOk ? _send : null)
@@ -364,19 +377,23 @@ class _LiveState extends ConsumerState<_Live> {
 }
 
 class _AiBanner extends StatelessWidget {
-  const _AiBanner({required this.error, required this.ai, required this.onRetry});
+  const _AiBanner({required this.error, required this.ai, required this.agentAi, required this.onRetry, required this.onSetup});
   final String? error;
   final Map<String, dynamic>? ai;
+  final Map<String, dynamic>? agentAi;
   final VoidCallback onRetry;
+  final VoidCallback onSetup;
   @override
   Widget build(BuildContext context) {
     final q = context.q;
     final status = ai?['status'] as String?;
+    final eff = agentAi?['effective'] as Map?;
     final msg = error ??
         switch (status) {
-          'paid_plan_required' => 'AI answers are off: the AI gateway for this server needs prepaid credits. Everything else works. Messages you send will be saved, but no answer will be generated.',
-          'not_configured' => 'AI is not configured on this server. Messages will be saved without an answer.',
-          _ => (ai?['detail'] as String?) ?? 'AI is unavailable right now.',
+          'not_configured' => 'No AI provider is connected yet. Add a key for any of the five providers to get answers. Messages are saved either way.',
+          'no_default' when eff == null => 'Pick a default model in AI providers, or give this agent its own model.',
+          'unavailable' => (ai?['detail'] as String?) ?? 'Could not check AI status.',
+          _ => eff == null ? 'This agent has no model yet.' : 'This agent uses ${modelLabel(eff, items(ai, 'providers'))}, which isn\'t connected. Pick another model or add that key.',
         };
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -386,14 +403,18 @@ class _AiBanner extends StatelessWidget {
         Icon(Icons.info_outline, size: 18, color: q.warn),
         const SizedBox(width: 10),
         Expanded(child: Text(msg, style: qs(13, c: q.text))),
-        TextButton(onPressed: onRetry, child: Text('Recheck', style: qs(13, w: FontWeight.w600, c: q.text))),
+        if (error == null && status != 'unavailable')
+          TextButton(onPressed: onSetup, child: Text('Set up AI', style: qs(13, w: FontWeight.w600, c: q.text)))
+        else
+          TextButton(onPressed: onRetry, child: Text('Recheck', style: qs(13, w: FontWeight.w600, c: q.text))),
       ]),
     );
   }
 }
 
 class _AgentPicker extends StatelessWidget {
-  const _AgentPicker({required this.agents, required this.selected, required this.onPick});
+  const _AgentPicker({required this.agents, required this.selected, required this.onPick, this.model});
+  final String? model;
   final List<Map<String, dynamic>> agents;
   final Map<String, dynamic>? selected;
   final ValueChanged<Map<String, dynamic>>? onPick;
@@ -418,7 +439,7 @@ class _AgentPicker extends StatelessWidget {
         Flexible(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
             Text(selected?['name'] as String? ?? 'Assistant', overflow: TextOverflow.ellipsis, style: qs(15, w: FontWeight.w600, c: q.text)),
-            Text(AgentStyle.of(selected?['template'] as String?).role, style: qs(11, c: q.text3)),
+            Text(model == null ? AgentStyle.of(selected?['template'] as String?).role : model!, overflow: TextOverflow.ellipsis, style: qs(11, c: q.text3, family: model == null ? ui : mono)),
           ]),
         ),
         Icon(Icons.expand_more, size: 18, color: q.text3),

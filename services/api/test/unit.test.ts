@@ -77,3 +77,22 @@ describe('onboarding rules', () => {
     expect(diff.find((d) => d.path === 'taskStatuses')).toBeTruthy();
   });
 });
+
+describe('API key encryption', () => {
+  it('round-trips, binds to org+provider, and refuses without a data key', async () => {
+    const { seal, open } = await import('../src/core/secrets');
+    const prev = process.env.QLINE_DATA_KEY;
+    process.env.QLINE_DATA_KEY = 'x'.repeat(48);
+    try {
+      const s = seal('sk-secret-value-1234', 'org1:openai');
+      expect(s).not.toContain('secret');
+      expect(open(s, 'org1:openai')).toBe('sk-secret-value-1234');
+      expect(() => open(s, 'org2:openai')).toThrow();
+      delete process.env.QLINE_DATA_KEY;
+      expect(() => seal('a', 'b')).toThrow(/QLINE_DATA_KEY/);
+    } finally {
+      if (prev) process.env.QLINE_DATA_KEY = prev;
+      else delete process.env.QLINE_DATA_KEY;
+    }
+  });
+});

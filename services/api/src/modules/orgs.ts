@@ -26,7 +26,7 @@ export async function seedWorkspace(q: Q, orgId: string, userId: string): Promis
     await q.exec(
       `insert into agent_versions (org_id, agent_id, version, instructions, model, tool_allowlist, created_by)
        values ($1,$2,1,$3,$4,$5,$6)`,
-      [orgId, a!.id, seed.instructions, env.aiModel, seed.allowlist, userId],
+      [orgId, a!.id, seed.instructions, 'default', seed.allowlist, userId],
     );
   }
   return wsId;

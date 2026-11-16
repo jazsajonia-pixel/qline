@@ -1,6 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
-import { createProvider, ProviderError, complete } from '@qline/ai';
 import { verifyAuditChain } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env } from '../core/context';
 import { getPool } from '../core/db';
@@ -29,30 +28,10 @@ export const CATALOGUE = [
 
 export const systemRoutes = new Hono<Env>();
 
-// ---- AI status (cached; reports the provider's real answer) ----------------
-let aiCache: { at: number; value: { status: string; model: string; detail: string } } | null = null;
-export async function aiStatus(force = false) {
-  if (!force && aiCache && Date.now() - aiCache.at < 5 * 60_000) return aiCache.value;
-  const model = env.aiModel;
-  const provider = createProvider(process.env);
-  let value: { status: string; model: string; detail: string };
-  if (!provider) value = { status: 'not_configured', model, detail: 'No AI gateway credentials in this environment.' };
-  else {
-    try {
-      await complete(provider, { model, maxTokens: 5, messages: [{ role: 'user', content: 'Reply with OK.' }] });
-      value = { status: 'available', model, detail: 'AI gateway answered.' };
-    } catch (e) {
-      const pe = e as ProviderError;
-      const paid = (pe as any).detail?.reason === 'paid_plan_required' || /paid_plan_required|current plan|billing/i.test(pe.message ?? '');
-      value = {
-        status: paid ? 'paid_plan_required' : 'unavailable',
-        model,
-        detail: paid ? 'The Neon AI Gateway needs prepaid credits on the Neon organization before it will answer.' : `AI gateway error: ${(pe.message ?? '').slice(0, 160)}`,
-      };
-    }
-  }
-  aiCache = { at: Date.now(), value };
-  return value;
+// ---- AI status --------------------------------------------------------------
+// AI is bring-your-own-key per organization (see modules/ai.ts); the server has no shared key.
+export async function aiStatus(_force = false) {
+  return { status: 'per_organization', model: null, detail: 'Each organization connects its own AI provider keys in Settings → AI providers.' };
 }
 
 systemRoutes.get('/health', (c) => c.json({ status: 'ok', version: env.version, time: new Date().toISOString() }));
