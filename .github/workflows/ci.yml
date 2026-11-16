@@ -7,6 +7,8 @@ on:
 jobs:
   api:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,12 +19,21 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run build:api
-      - uses: actions/upload-artifact@v4
+      # Publish a short-lived deployment handoff branch because this repo's Actions artifact quota is full.
+      - uses: actions/github-script@v7
         with:
-          name: qline-api-function-${{ github.sha }}
-          path: services/api/dist/function.zip
-          if-no-files-found: error
-          retention-days: 7
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = `deploy/api-bundle-${context.sha.slice(0, 8)}`;
+            const encoded = fs.readFileSync('services/api/dist/function.zip').toString('base64');
+            const { data: commitInfo } = await github.rest.git.getCommit({ owner, repo, commit_sha: context.sha });
+            const { data: blob } = await github.rest.git.createBlob({ owner, repo, content: encoded, encoding: 'utf-8' });
+            const { data: tree } = await github.rest.git.createTree({ owner, repo, base_tree: commitInfo.tree.sha, tree: [{ path: 'deploy-artifacts/qline-api-function.zip.b64', mode: '100644', type: 'blob', sha: blob.sha }] });
+            const { data: commit } = await github.rest.git.createCommit({ owner, repo, message: 'build: stage Qline API bundle for Neon deployment', tree: tree.sha, parents: [context.sha] });
+            await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: commit.sha });
+            core.info(`Staged API bundle on ${branch} (commit ${commit.sha}).`);
 
   mobile:
     runs-on: ubuntu-latest
