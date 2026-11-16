@@ -176,28 +176,25 @@ void main() {
     expect(find.byType(Opacity), findsNothing);
   });
 
-  testWidgets('live captions light the spoken word; hands-free bar explains state', (t) async {
+  testWidgets('speaking core shows no captions; hands-free bar explains state', (t) async {
     t.view.physicalSize = const Size(1080, 1400);
     t.view.devicePixelRatio = 2.625;
     addTearDown(t.view.reset);
-    const text = 'You have two new leads this morning, and one of them looks urgent. Dana wants a quote today.';
     await t.pumpWidget(ProviderScope(
       child: MaterialApp(
         theme: buildTheme(false),
         home: Scaffold(
           backgroundColor: const Color(0xFF07060D),
           body: Column(children: [
-            const SizedBox(height: 260, child: EnergyCore(state: CoreState.speaking, level: .7, reduceMotion: true)),
-            const LiveCaption(text: text, word: 6, visible: true, reduceMotion: true),
+            const SizedBox(height: 260, child: EnergyCore(state: CoreState.speaking, level: .7, word: 3, wordWeight: .8, reduceMotion: true)),
             HandsFreeBar(listening: false, speaking: true, onEnd: () {}),
           ]),
         ),
       ),
     ));
     await t.pump(const Duration(milliseconds: 100));
-    final rich = t.widget<Text>(find.byWidgetPredicate((w) => w is Text && w.textSpan != null).first);
-    expect(rich.textSpan!.toPlainText(), contains('morning,'));
+    expect(find.byWidgetPredicate((w) => w is Text && w.textSpan != null && w.textSpan!.toPlainText().contains('morning')), findsNothing);
     expect(find.text('Hands-free · tap the core to interrupt'), findsOneWidget);
-    if (shots) await expectLater(find.byType(MaterialApp), matchesGoldenFile('_shots/live_caption.png'));
+    if (shots) await expectLater(find.byType(MaterialApp), matchesGoldenFile('_shots/live_speaking.png'));
   });
 }

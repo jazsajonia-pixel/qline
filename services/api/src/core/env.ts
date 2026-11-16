@@ -27,7 +27,10 @@ export const env = {
   get minClientBuild() {
     return Number(process.env.QLINE_MIN_CLIENT_BUILD ?? '0');
   },
+  /** The release this bundle was built from. QLINE_VERSION is only a fallback for local runs. */
   get version() {
-    return process.env.QLINE_VERSION ?? 'dev';
+    return API_VERSION || process.env.QLINE_VERSION || 'dev';
   },
 };
+
+export const API_VERSION = '1.3.0';

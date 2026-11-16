@@ -6,6 +6,7 @@ import 'core/session.dart';
 import 'screens/auth.dart';
 import 'screens/shell.dart';
 import 'ui/core_painter.dart';
+import 'ui/launch.dart';
 import 'ui/theme.dart';
 
 void main() {
@@ -33,13 +34,29 @@ class QlineApp extends ConsumerWidget {
   }
 }
 
-class Root extends ConsumerWidget {
-  const Root({super.key});
+class Root extends ConsumerStatefulWidget {
+  const Root({super.key, this.launch = launchDuration});
+  final Duration launch;
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<Root> createState() => _RootState();
+}
+
+class _RootState extends ConsumerState<Root> {
+  late final LaunchGate _gate = LaunchGate(widget.launch)..listen(() => mounted ? setState(() {}) : null);
+
+  @override
+  void dispose() {
+    _gate.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final s = ref.watch(sessionProvider);
     final Widget child;
-    if (s.loading) {
+    if (!_gate.done) {
+      child = LaunchScreen(duration: widget.launch);
+    } else if (s.loading) {
       child = const Splash();
     } else if (!s.signedIn) {
       child = const WelcomeScreen();
@@ -48,7 +65,7 @@ class Root extends ConsumerWidget {
     } else {
       child = const Shell();
     }
-    return AnimatedSwitcher(duration: const Duration(milliseconds: 220), child: KeyedSubtree(key: ValueKey(child.runtimeType), child: child));
+    return AnimatedSwitcher(duration: const Duration(milliseconds: 380), child: KeyedSubtree(key: ValueKey(child.runtimeType), child: child));
   }
 }
 

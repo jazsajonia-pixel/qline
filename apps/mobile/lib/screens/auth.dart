@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api.dart';
 import '../core/session.dart';
@@ -13,9 +18,88 @@ class WelcomeScreen extends ConsumerStatefulWidget {
   ConsumerState<WelcomeScreen> createState() => _WelcomeState();
 }
 
-class _WelcomeState extends ConsumerState<WelcomeScreen> {
+class _WelcomeState extends ConsumerState<WelcomeScreen> with WidgetsBindingObserver {
   bool _signUp = false;
   bool _busy = false;
+  bool _google = false;
+  String? _nonce;
+  Timer? _poll;
+  DateTime? _pollUntil;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    // Coming back from the browser: check right away instead of waiting for the next poll.
+    if (s == AppLifecycleState.resumed && _nonce != null) _checkGoogle();
+  }
+
+  Future<void> _startGoogle() async {
+    setState(() {
+      _google = true;
+      _error = null;
+    });
+    final rnd = Random.secure();
+    final nonce = base64Url.encode(List<int>.generate(32, (_) => rnd.nextInt(256))).replaceAll('=', '');
+    try {
+      final r = await ref.read(sessionProvider.notifier).api.post('/google-signin/start', {'nonce': nonce}) as Map;
+      _nonce = nonce;
+      _pollUntil = DateTime.now().add(const Duration(minutes: 5));
+      final ok = await launchUrl(Uri.parse(r['url'] as String), mode: LaunchMode.externalApplication);
+      if (!ok) throw ApiException(0, 'LAUNCH', 'Could not open the browser');
+      _poll?.cancel();
+      _poll = Timer.periodic(const Duration(seconds: 2), (_) => _checkGoogle());
+    } on ApiException catch (e) {
+      _stopGoogle(e.detail ?? e.message);
+    } catch (_) {
+      _stopGoogle('Google sign-in could not start. Try again.');
+    }
+  }
+
+  bool _checking = false;
+  Future<void> _checkGoogle() async {
+    final nonce = _nonce;
+    if (nonce == null || _checking) return;
+    if (_pollUntil != null && DateTime.now().isAfter(_pollUntil!)) return _stopGoogle('Google sign-in timed out. Try again.');
+    _checking = true;
+    final s = ref.read(sessionProvider.notifier);
+    try {
+      final r = await s.api.post('/google-signin/finish', {'nonce': nonce});
+      if (r is Map && r['token'] is String) {
+        _poll?.cancel();
+        _nonce = null;
+        await s.signInWithToken(r['token'] as String);
+        if (mounted) setState(() => _google = false);
+      }
+    } on ApiException catch (e) {
+      if (e.status != 0) _stopGoogle(e.detail ?? e.message);
+    } finally {
+      _checking = false;
+    }
+  }
+
+  void _stopGoogle([String? error]) {
+    _poll?.cancel();
+    _nonce = null;
+    if (mounted) {
+      setState(() {
+        _google = false;
+        _error = error;
+      });
+    }
+  }
+
   bool _hide = true;
   String? _error;
   final _form = GlobalKey<FormState>();
@@ -96,10 +180,12 @@ class _WelcomeState extends ConsumerState<WelcomeScreen> {
                   const SizedBox(height: 20),
                   QButton(_signUp ? 'Create account' : 'Sign in', kind: QBtn.halo, expand: true, busy: _busy, onPressed: _submit),
                   const SizedBox(height: 10),
-                  Tooltip(
-                    message: 'Google sign-in needs OAuth credentials that are not configured on this server yet.',
-                    child: QButton('Continue with Google — not configured', icon: Icons.block, expand: true, onPressed: null),
-                  ),
+                  QButton('Continue with Google', icon: Icons.account_circle_outlined, expand: true, busy: _google, onPressed: _busy || _google ? null : _startGoogle),
+                  if (_google) ...[
+                    const SizedBox(height: 8),
+                    Text('Finish in your browser, then come back here.', textAlign: TextAlign.center, style: qs(13, c: q.text2)),
+                    TextButton(onPressed: () => _stopGoogle(), child: Text('Cancel', style: qs(13, w: FontWeight.w600, c: q.text))),
+                  ],
                   const SizedBox(height: 12),
                   TextButton(
                     onPressed: () => setState(() {

@@ -3,6 +3,7 @@ import type { ToolSpec } from '@qline/ai';
 import type { Q } from '../core/db';
 import { audit } from '../core/audit';
 import { createTask, updateTask } from '../modules/work';
+import { appTools } from './tools-apps';
 
 export interface ToolCtx {
   orgId: string;
@@ -19,7 +20,7 @@ export interface ToolResult {
   data?: unknown;
 }
 
-interface ToolDef<S extends z.ZodTypeAny> {
+export interface ToolDef<S extends z.ZodTypeAny> {
   description: string;
   schema: S;
   execute(q: Q, ctx: ToolCtx, args: z.infer<S>): Promise<ToolResult>;
@@ -199,6 +200,8 @@ const defs = {
     },
     preview: (a) => ({ title: `Draft email: ${a.subject}`, lines: [`To: ${a.to}`, a.body.slice(0, 200)] }),
   } satisfies ToolDef<any>,
+
+  ...appTools,
 };
 
 export type ToolName = keyof typeof defs;

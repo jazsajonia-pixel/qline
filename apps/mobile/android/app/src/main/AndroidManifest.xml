@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="Qline"
         android:allowBackup="false"
@@ -35,6 +36,8 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="qline" android:host="integrations"/>
+                <!-- Sign in with Google returns here (qline://auth); the app finishes sign-in on resume. -->
+                <data android:scheme="qline" android:host="auth"/>
             </intent-filter>
             <meta-data android:name="flutter_deeplinking_enabled" android:value="false"/>
         </activity>

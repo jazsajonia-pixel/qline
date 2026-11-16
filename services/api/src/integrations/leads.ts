@@ -31,6 +31,8 @@ export const rulesSchema = z.object({
   ignoreDomains: list.default([]),
   notifyOn: z.enum(['all', 'urgent', 'none']).default('all'),
   slackOn: z.enum(['all', 'urgent', 'none']).default('urgent'),
+  /** Notify about emails that are not leads but need attention (bills, client issues, deadlines). */
+  notifyImportant: z.boolean().default(true),
 });
 export type LeadRules = z.infer<typeof rulesSchema>;
 
@@ -54,6 +56,8 @@ export interface Classified {
   company: string | null;
   phone: string | null;
   by: 'rules' | 'ai';
+  /** Needs the owner's attention even if it is not a lead. */
+  important?: boolean;
 }
 
 interface Item {
@@ -80,11 +84,12 @@ export function classifyByRules(it: Item, r: LeadRules): Classified {
   const lk = hit(hay, r.leadKeywords);
   const uk = hit(hay, r.urgentKeywords);
   const isLead = vip || !!lk;
+  const important = !!uk || vip;
   let urgency: Urgency = isLead ? 'normal' : 'low';
   if (vip) urgency = 'high';
   if (uk && isLead) urgency = 'urgent';
   const reason = [vip ? `VIP domain ${dom}` : null, lk ? `mentions “${lk}”` : null, uk ? `urgent word “${uk}”` : null].filter(Boolean).join(', ') || 'No lead signals';
-  return { ...base, isLead, urgency, score: isLead ? (urgency === 'urgent' ? 85 : vip ? 75 : 60) : 10, summary: it.subject, reason };
+  return { ...base, isLead, important, urgency, score: isLead ? (urgency === 'urgent' ? 85 : vip ? 75 : 60) : 10, summary: it.subject, reason };
 }
 
 const aiOut = z.object({
@@ -96,6 +101,7 @@ const aiOut = z.object({
   name: z.string().max(200).nullable().optional(),
   company: z.string().max(200).nullable().optional(),
   phone: z.string().max(60).nullable().optional(),
+  important: z.boolean().optional(),
 });
 
 export async function classify(q: Q, orgId: string, it: Item, r: LeadRules, hint?: 'form'): Promise<Classified> {
@@ -109,7 +115,8 @@ export async function classify(q: Q, orgId: string, it: Item, r: LeadRules, hint
   const system =
     'You triage inbound business messages for a small business. Decide if the message is a sales lead (a person or company that may buy, hire, book or partner). ' +
     'Rate urgency: urgent (needs a reply within hours, or explicit deadline/emergency), high (strong buying intent or important sender), normal, low. ' +
-    'Reply with ONLY a JSON object: {"is_lead":bool,"urgency":"low|normal|high|urgent","score":0-100,"summary":"one sentence of what they want","reason":"short why","name":string|null,"company":string|null,"phone":string|null}.' +
+    'Also decide "important": true when the owner should see it soon even if it is not a lead (a bill or payment due, a client complaint or problem, a deadline, a security or account alert from a real service, a personal request from a known contact). Newsletters, promotions and routine notifications are not important. ' +
+    'Reply with ONLY a JSON object: {"is_lead":bool,"important":bool,"urgency":"low|normal|high|urgent","score":0-100,"summary":"one sentence of what they want","reason":"short why","name":string|null,"company":string|null,"phone":string|null}.' +
     (r.instructions ? `\nBusiness rules from the owner (follow them):\n${r.instructions}` : '') +
     (r.urgentKeywords.length ? `\nTreat these words as urgent signals: ${r.urgentKeywords.join(', ')}.` : '') +
     (r.vipDomains.length ? `\nVIP sender domains (at least high): ${r.vipDomains.join(', ')}.` : '');
@@ -130,6 +137,7 @@ export async function classify(q: Q, orgId: string, it: Item, r: LeadRules, hint
       name: o.name ?? it.fromName,
       company: o.company ?? null,
       phone: o.phone ?? rules.phone,
+      important: !!o.important || o.is_lead || (rules.important && !it.bulk),
       by: 'ai',
     };
   } catch (e) {
@@ -161,6 +169,7 @@ export interface Processed {
   subject: string;
   source: Source;
   isNew: boolean;
+  important?: boolean;
 }
 
 export async function processInbound(
@@ -212,6 +221,15 @@ export async function processInbound(
       `update lead_inbox set is_lead=$2, urgency=$3, score=$4, summary=$5, reason=$6, classified_by=$7, contact_id=$8, status=$9 where id=$1`,
       [ins.id, cl.isLead, cl.urgency, cl.score, cl.summary, cl.reason, cl.by, contactId, cl.isLead ? 'lead' : 'ignored'],
     );
+    const importantMail = !cl.isLead && !!cl.important && !it.bulk && (source === 'gmail' || source === 'outlook');
+    if (importantMail && rules.notifyImportant) {
+      await notify(q, c.orgId, c.userId, {
+        category: 'email_important',
+        title: `Important email: ${it.subject.slice(0, 90)}`,
+        body: `${it.fromName ?? it.fromEmail ?? 'Someone'}: ${cl.summary}`.slice(0, 500),
+        ref: { type: 'lead_inbox', id: ins.id },
+      });
+    }
     if (cl.isLead) {
       const urgent = rank(cl.urgency) >= rank('high');
       if (rules.notifyOn === 'all' || (rules.notifyOn === 'urgent' && urgent)) {
@@ -225,15 +243,21 @@ export async function processInbound(
         }
       }
     }
-    return { inboxId: ins.id, isLead: cl.isLead, urgency: cl.urgency, contactId, name, email: it.fromEmail, summary: cl.summary, subject: it.subject, source, isNew };
+    return { inboxId: ins.id, isLead: cl.isLead, urgency: cl.urgency, contactId, name, email: it.fromEmail, summary: cl.summary, subject: it.subject, source, isNew, important: importantMail };
   });
 }
 
 /** After commit: workflow events + Slack alerts. */
 export async function afterProcessed(c: SyncCtx, items: Processed[]) {
   const leads = items.filter((x) => x.isLead);
-  if (!leads.length) return;
   const events: DomainEvent[] = [];
+  for (const m of items.filter((x) => x.important)) {
+    events.push({ type: 'email.important', id: `email-important:${m.inboxId}`, data: { subject: m.subject, from: m.email ?? m.name, summary: m.summary, source: m.source } });
+  }
+  if (!leads.length) {
+    if (events.length) await dispatch({ orgId: c.orgId, workspaceId: c.workspaceId, userId: c.userId, email: '', name: '', sessionId: 'system', human: true, role: 'owner', correlationId: 'sync' } as any, events);
+    return;
+  }
   for (const l of leads) {
     const data = { id: l.contactId, name: l.name, email: l.email, urgency: l.urgency, summary: l.summary, subject: l.subject, source: l.source };
     if (l.isNew) events.push({ type: 'lead.created', id: `lead:${l.inboxId}`, data });
