@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   api:
@@ -20,7 +21,8 @@ jobs:
       - run: npm run test:unit
       - run: npm run build:api
       # Publish a short-lived deployment handoff branch because this repo's Actions artifact quota is full.
-      - uses: actions/github-script@v7
+      - if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
@@ -54,3 +56,23 @@ jobs:
       - run: flutter test
       # Unsigned-by-upload-key build (falls back to debug keys) — proves the release build compiles.
       - run: flutter build apk --release --dart-define=QLINE_BUILD=${{ github.run_number }}
+
+  production-smoke:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify production API health and v1.2.0 version
+        run: |
+          node --input-type=module <<'NODE'
+          const url = 'https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/health';
+          const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+          const body = await response.json();
+          if (!response.ok || body.status !== 'ok' || body.version !== '1.2.0') {
+            throw new Error(`Expected healthy Qline API v1.2.0, received HTTP ${response.status}: ${JSON.stringify(body)}`);
+          }
+          console.log(`Qline API healthy: v${body.version}`);
+          NODE
