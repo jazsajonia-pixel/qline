@@ -17,6 +17,12 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run build:api
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qline-api-function-${{ github.sha }}
+          path: services/api/dist/function.zip
+          if-no-files-found: error
+          retention-days: 7
 
   mobile:
     runs-on: ubuntu-latest
