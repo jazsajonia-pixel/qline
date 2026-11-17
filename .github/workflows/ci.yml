@@ -38,10 +38,12 @@ jobs:
           APP_DB_PASSWORD="$(openssl rand -hex 24)"
           AUTH_SECRET="$(openssl rand -hex 32)"
           DATA_KEY="$(openssl rand -hex 32)"
+          CRON_KEY="$(openssl rand -hex 32)"
           {
             echo "APP_DATABASE_URL=postgresql://qline_app:${APP_DB_PASSWORD}@127.0.0.1:5432/qline_test"
             echo "BETTER_AUTH_SECRET=${AUTH_SECRET}"
             echo "QLINE_DATA_KEY=${DATA_KEY}"
+            echo "QLINE_CRON_KEY=${CRON_KEY}"
             echo "NODE_ENV=test"
           } > .qline-test.env
           echo "DATABASE_URL_OWNER=postgresql://postgres@127.0.0.1:5432/qline_test" >> "$GITHUB_ENV"
