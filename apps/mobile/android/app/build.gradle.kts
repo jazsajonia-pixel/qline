@@ -52,9 +52,10 @@ android {
 
     buildTypes {
         release {
-            // Release builds are signed with the Qline upload key when android/key.properties exists
-            // (kept outside git). Without it they fall back to debug keys for local runs only.
-            signingConfig = if (keystorePropertiesFile.exists()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            // QA-only application id keeps the debug-signed test build beside the installed production app.
+            applicationIdSuffix = ".qa"
+            // The upload key is intentionally absent from this isolated physical-test build.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 }
