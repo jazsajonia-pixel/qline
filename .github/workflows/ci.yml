@@ -75,7 +75,7 @@ jobs:
             const { data: baseCommit } = await github.rest.git.getCommit({ owner, repo, commit_sha: context.sha });
             const [apkBlob, checksumBlob, readmeBlob] = await Promise.all([
               github.rest.git.createBlob({ owner, repo, content: apk.toString('base64'), encoding: 'base64' }),
-              github.rest.git.createBlob({ owner, repo, content: `${apkSha256}  qline-pr10-physical-test.apk\\n`, encoding: 'utf-8' }),
+              github.rest.git.createBlob({ owner, repo, content: `${apkSha256}  qline-pr10-physical-test.apk\n`, encoding: 'utf-8' }),
               github.rest.git.createBlob({
                 owner, repo,
                 content: [
@@ -87,7 +87,7 @@ jobs:
                   '- Signing: CI debug key; this is a QA-only build, not a release APK.',
                   `- SHA-256: ${apkSha256}`,
                   ''
-                ].join('\\n'),
+                ].join('\n'),
                 encoding: 'utf-8'
               })
             ]);
