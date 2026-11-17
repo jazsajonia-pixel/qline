@@ -623,7 +623,11 @@ missionRoutes.get('/missions', async (c) => {
       [t.workspaceId, p.status ?? null, p.limit],
     ),
   );
-  return c.json({ items });
+  const controls = await tx(t, (q) => getControls(q, t.workspaceId));
+  return c.json({
+    items,
+    controls: { ...controlsOut(controls), canPause: can(t.role, 'workflows.manage'), canStop: can(t.role, 'approvals.decide:medium'), canRelease: can(t.role, 'agents.manage') },
+  });
 });
 
 async function loadMission(q: Q, id: string) {

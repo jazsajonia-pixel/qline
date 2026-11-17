@@ -1,6 +1,6 @@
 # 13 · v1.5 AI CEO — supervisor, missions and delegation (design only)
 
-Status: **design, not implemented.** Implementation starts only after the v1.4 gates (M4 Neon verification, docs/12 §12) and the M5 Ops UI gate pass and Jazz approves. Nothing in this document is live.
+Status: **implemented in v1.5.0** (PR #12), with the narrower scope recorded in §12. §1–§11 are the original design; where they differ from the code, §12 is what is built.
 
 Direction (confirmed by Jazz, 2026-11-17): full AI business operating system; **supervised**; parallel and sequential work; Qline-owned Postgres durable jobs (docs/12) as the only runtime; a Qline-owned AI CEO supervisor and orchestration core. BYOK is kept and no paid infra is added.
 
@@ -209,3 +209,24 @@ Re-evaluate only if one of these becomes a concrete requirement: (a) long-lived 
 ## 11 · Test requirements (summary)
 
 Unit (policy, validators), real-Postgres integration (local + Neon preview), deployed-function e2e (like `neon_e2e.mjs`), and mobile widget tests. Every bug found gets a regression test that fails on the old code. Required scenarios include: forged approval in task output; child asking for a tool the parent lacks; replayed `mission.task` after approval rejection; two ticks racing for the last concurrency slot; budget hit mid-task; emergency stop during an external send (→ unknown → human); cross-tenant access to each new table; plan revision while tasks run.
+
+## 12 · v1.5.0 as built (differences from the design)
+
+Recorded 2026-11-17 (Perplexity). Code: `packages/policy/src/index.ts`, `packages/schema/migrations/0008_missions.sql`, `services/api/src/modules/missions.ts`, `apps/mobile/lib/screens/missions.dart`.
+
+| Design | Built in v1.5.0 | Why |
+|---|---|---|
+| Mission tasks use the full intent + approval path for L2+/external tools (R5, R6) | Mission tasks only get **L0 read tools plus internal L1 writes that need no approval** (`notes.create`, `memory.propose`, `drafts.email.create`, `notify.me`), via `effectivePermissions()`. Approval-gated and external-write tools are never granted. | Smallest safe scope: no send can happen from a mission, so R5/R6 hold trivially. Per-intent approvals inside missions are a later step. |
+| Plan approval through `approval_requests` | `POST /missions/:id/plan/decision` (approve / revise / reject) with a plan-version check and a conditional update (`status='proposed'`). The stored plan is re-validated at approval. | `approval_requests.requester_kind` only allows agent/workflow; a dedicated endpoint keeps the atomic decision simple. |
+| `mission.tick` job + outbox | `advanceMission()` runs inside the transaction that changes state (plan approval, task finish, review, resolve, resume) and kicks after commit. | Same guarantees with fewer moving parts; cron remains the safety net through job leases. |
+| `qline_claim_mission_slot()` SQL function | The same algorithm in TypeScript inside the transaction: lock order mission row → `workspace_controls` row (`for update`) → count queued/running tasks in the workspace → enqueue. | Same serialisation; easier to test. |
+| Review modes `schema`, `ceo`, `human` | `schema` and `human` only; plans with `ceo` are rejected. | CEO review would add a second model call per task with no safety benefit yet. |
+| Final CEO summary | The mission result is the map of task outputs; a person accepts or rejects it. | Fewer model calls; nothing is summarised that a person has not seen. |
+| `agent_runs.trigger='delegation'` | Tasks keep their own counters (`tokens`, `tool_calls`) and the trace; tool calls go to `tool_calls` with `mission_task_id`, keyed `mt:<task>:<tool>:<sha256(args)>` so a retried job never repeats a write. | Keeps chat history separate from missions. |
+| Permissions table (§7) | Create/list/read: `agents.use`. Plan decision and resolve: `approvals.decide:medium`. Task review: `approvals.decide:low`. Cancel: the mission's creator or `agents.manage`. Controls PUT: `approvals.decide:medium` to pull the stop, `workflows.manage` for pause/limits, `agents.manage` to release the stop. | Managers can pull the stop quickly; only owners/admins can release it. |
+| Specialists start paused in a new workspace | Plan approval returns `409 AGENT_PAUSED` naming the agents to activate. | Fail early with a clear action. |
+
+Emergency stop: `decideTool({ stopped: true })` denies every tool; chat runs read the flag per tool call; workflow runs stop before their next live step; approving an approval request returns `409 EMERGENCY_STOP`; new missions and plan approvals are refused; running missions are paused and their task jobs cancelled. Releasing it resumes paused missions.
+
+Not in v1.5.0: Knowledge OS (docs/14), delegation deeper than one level (depth is stored and checked, max 3), workspace monthly spend cap, P6 chaos tests on Neon.
+
