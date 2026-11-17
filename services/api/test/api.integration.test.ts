@@ -401,6 +401,7 @@ d('Qline API (integration)', () => {
       const sync = await call(A, 'POST', '/integrations/google/sync', {});
       expect(sync.status).toBe(200);
       expect(sync.json).toMatchObject({ checked: 3, leads: 1 });
+      await (await import('../src/runtime/jobs')).settleKicks(); // v1.4: event workflows run on background workers
       const inbox = await call(A, 'GET', '/leads/inbox');
       expect(inbox.json.counts).toMatchObject({ leads: 1, urgent: 1, ignored: 2 });
       const dana = inbox.json.items.find((x: any) => x.from_email === 'dana@bigco.test');
@@ -483,7 +484,7 @@ d('Qline API (integration)', () => {
     expect(dr.status).toBe(201);
     expect(dr.json.steps.map((s: any) => s.status)).toEqual(['simulated', 'simulated', 'simulated', 'simulated', 'simulated']);
     const rec = await call(A, 'GET', '/workflow-recipes');
-    expect(rec.json.items.map((r: any) => r.id)).toEqual(['urgent_lead_alert', 'lead_auto_reply', 'lead_follow_up', 'daily_briefing']);
+    expect(rec.json.items.map((r: any) => r.id)).toEqual(['urgent_lead_alert', 'lead_auto_reply', 'lead_follow_up', 'daily_briefing', 'important_email_task', 'overdue_nudge', 'evening_wrap', 'weekly_review']);
     expect(rec.json.items.find((r: any) => r.id === 'urgent_lead_alert').installed).toBe(true);
 
     const vo = await call(A, 'GET', '/voice/options');

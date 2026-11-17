@@ -4,6 +4,7 @@ import { resolveModel } from '../agent/models';
 import { withTenant, type Q } from '../core/db';
 import { dispatch, type DomainEvent } from '../core/events';
 import { createContact, notify } from '../modules/work';
+import { enqueue, registerJob } from '../runtime/jobs';
 import { accessToken, ConnectionExpired, hasScope } from './oauth';
 import {
   formResponses,
@@ -428,18 +429,33 @@ export async function syncConnection(c: SyncCtx, connectionId: string): Promise<
 }
 
 /** Cron tick: sync every connected Google/Microsoft account (bounded per tick). */
+/** Cron tick: enqueue one sync job per due connection (skipped while one is already queued or running). */
 export async function runDueSyncs(limit = 20) {
   const due = await withTenant({ orgId: null, userId: 'system:sync' }, (q) => q.many('select * from qline_due_syncs() limit $1', [limit]));
-  let synced = 0;
-  let leads = 0;
+  let queued = 0;
+  const bucket = new Date(Math.floor(Date.now() / 600_000) * 600_000).toISOString();
   for (const d of due) {
-    try {
-      const r = await syncConnection({ orgId: d.org_id, workspaceId: d.workspace_id, userId: d.connected_by }, d.connection_id);
-      synced += 1;
-      leads += r.leads;
-    } catch (e) {
-      console.error('sync failed', d.connection_id, (e as Error).message);
-    }
+    const created = await withTenant({ orgId: d.org_id, userId: d.connected_by }, async (q) => {
+      const busy = await q.one(`select 1 from jobs where kind='integration.sync' and status in ('queued','running') and payload->>'connectionId'=$1`, [d.connection_id]);
+      if (busy) return false;
+      const j = await enqueue(q, {
+        orgId: d.org_id,
+        kind: 'integration.sync',
+        payload: { connectionId: d.connection_id, workspaceId: d.workspace_id, userId: d.connected_by },
+        idempotencyKey: `sync:${d.connection_id}:${bucket}`,
+        maxAttempts: 3,
+        createdBy: 'system:sync',
+      });
+      return j.created;
+    });
+    if (created) queued += 1;
   }
-  return { synced, leads };
+  return { queued };
 }
+
+registerJob('integration.sync', async ({ job }) => {
+  const p = job.payload;
+  const r = await syncConnection({ orgId: job.org_id, workspaceId: p.workspaceId, userId: p.userId }, p.connectionId);
+  // Partial failures do not fail the job (the next tick syncs again), but they must be visible in /jobs.
+  return { leads: r.leads, checked: r.checked, exported: r.exported, errors: r.errors.slice(0, 5).map((x) => String(x).slice(0, 200)) };
+});

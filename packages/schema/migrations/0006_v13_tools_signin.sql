@@ -10,7 +10,13 @@ create table if not exists signin_requests (
   created_at timestamptz not null default now()
 );
 create index if not exists signin_requests_nonce on signin_requests (nonce_hash);
-grant select, insert, update, delete on signin_requests to qline_app;
+-- Guarded so a fresh database (where 9999_app_role has not created qline_app yet) can migrate.
+-- 9999_app_role re-runs on every migrate and grants all tables anyway.
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'qline_app') then
+    grant select, insert, update, delete on signin_requests to qline_app;
+  end if;
+end $$;
 
 -- Add the new tools to each agent's current version, matching the template defaults in @qline/policy.
 update agent_versions v

@@ -65,3 +65,12 @@ Channels are authorized per subscriber as `org:<org>:user:<user>` and `org:<org>
 | `notification.created` | category, urgency | X3, push |
 
 Every event envelope is `{ id, type, orgId, workspaceId?, occurredAt, correlationId, actor, data }`. Consumers are idempotent on `id`.
+
+## 5. v1.4 runtime endpoints
+
+- `POST /v1/workflow-runs/:id/cancel`: stops at the next step boundary, expires a pending approval.
+- `GET /v1/jobs?status=queued|running|succeeded|failed|dead|cancelled|problem`, `GET /v1/jobs/:id` (with attempts),
+  `POST /v1/jobs/:id/retry` (failed/dead only, +3 attempts, handlers re-check state so approvals cannot be skipped),
+  `POST /v1/jobs/:id/cancel`. All need `workflows.manage`.
+- Events are written to `outbox_events` in the same transaction as the change and delivered at least once as
+  `event.dispatch` jobs; subscribers dedupe by event key.

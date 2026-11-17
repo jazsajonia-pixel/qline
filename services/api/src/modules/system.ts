@@ -10,6 +10,8 @@ import { query, limitParam } from '../core/validate';
 import { z } from 'zod';
 import { storageConfigured, storageReady } from './imports';
 import { runScheduledWorkflows } from './workflows';
+import { drain, runtimeStats, workerId } from '../runtime/jobs';
+import { relayOutbox } from '../runtime/outbox';
 
 // ---------------------------------------------------------------------------
 // Integrations: honest catalogue (docs/09). Nothing is shown as connected
@@ -93,14 +95,21 @@ systemRoutes.get('/exports', requireUser, requireTenant, async (c) => {
 export const internalRoutes = new Hono();
 const tick = async (c: any, key: string | undefined) => {
   if (!env.cronKey || !key || key.length !== env.cronKey.length || !timingSafeEqual(Buffer.from(key), Buffer.from(env.cronKey))) return c.json({ error: 'forbidden' }, 403);
-  const r = await runScheduledWorkflows();
-  let sync: unknown = null;
-  try {
-    sync = await runDueSyncs();
-  } catch (e) {
-    sync = { error: (e as Error).message };
-  }
-  return c.json({ ok: true, ...r, sync });
+  // Every step is idempotent: Neon may deliver the same trigger more than once (docs/12 §2).
+  const step = async <T,>(fn: () => Promise<T>) => {
+    try {
+      return await fn();
+    } catch (e) {
+      console.error('tick step failed', (e as Error).message);
+      return { error: (e as Error).message };
+    }
+  };
+  const relayed = await step(() => relayOutbox(500));
+  const r = await step(() => runScheduledWorkflows());
+  const sync = await step(() => runDueSyncs());
+  const drained = await step(() => drain({ worker: workerId('tick'), budgetMs: 45_000 }));
+  const stats = await step(() => runtimeStats());
+  return c.json({ ok: true, relayed, ...(r as object), sync, drained, stats });
 };
 // Neon trigger paths cannot carry a query string, so the key is a path segment.
 internalRoutes.all('/tick/:key', (c) => tick(c, c.req.param('key')));

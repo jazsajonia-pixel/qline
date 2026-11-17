@@ -42,3 +42,8 @@
 7. Flutter shell: theme tokens from 03, bottom nav, workspace switcher, sign-in screens, secure storage.
 8. Next.js shell: sidebar, sign-in and org switcher.
 9. `/v1/health` endpoints, structured logging with correlation ids.
+
+## 4. v1.4 Durable Automation Runtime
+
+Milestones M0–M5 and the release-gate test map are in [12-DURABLE_RUNTIME_V1_4.md](12-DURABLE_RUNTIME_V1_4.md) §8–§11.
+Run the gates with `QLINE_TEST_ENV=<env> npx vitest run services/api/test`.

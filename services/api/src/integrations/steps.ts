@@ -5,12 +5,23 @@ import type { Q } from '../core/db';
 import { accessToken, hasScope } from './oauth';
 import { createCalendarEvent, gmailSend, outlookSend, slackPost } from './services';
 
+export type StepResult = { ok: boolean; summary: string; skipped?: boolean; text?: string; unknown?: boolean };
+
+/**
+ * After a send request has left Qline, a network error, timeout or 5xx means the provider may or may not
+ * have done it. Those outcomes are "unknown" (a person checks; never retried blindly). A 4xx is a definite refusal.
+ */
+export function isUncertainSendError(e: unknown): boolean {
+  const status = (e as { status?: unknown })?.status;
+  return typeof status !== 'number' || status >= 500;
+}
+
 /** Executes the v1.2 automation step types inside a workflow run. */
 export async function runAutomationStep(
   q: Q,
   ctx: { orgId: string; workspaceId: string; ownerId: string; runId: string },
   s: any,
-): Promise<{ ok: boolean; summary: string; skipped?: boolean; text?: string }> {
+): Promise<StepResult> {
   if (s.type === 'ai') {
     const m = await resolveModel(q, ctx.orgId);
     if (!m.ok) return { ok: false, summary: m.message };
@@ -34,11 +45,18 @@ export async function runAutomationStep(
     const conn = await q.one(`select * from integration_connections where provider='slack' and status='ok'`);
     const ch = conn?.settings?.channel?.id;
     if (!conn || !ch) return { ok: true, skipped: true, summary: 'Skipped: Slack is not connected or no channel is picked' };
+    let token: string;
     try {
-      await slackPost(await accessToken(q, conn), ch, s.text);
-      return { ok: true, summary: `Posted to #${conn.settings.channel.name ?? 'channel'}` };
+      token = await accessToken(q, conn);
     } catch (e) {
       return { ok: false, summary: `Slack: ${(e as Error).message.slice(0, 200)}` };
+    }
+    try {
+      await slackPost(token, ch, s.text);
+      return { ok: true, summary: `Posted to #${conn.settings.channel.name ?? 'channel'}` };
+    } catch (e) {
+      const unknown = isUncertainSendError(e);
+      return { ok: false, unknown, summary: `Slack: ${(e as Error).message.slice(0, 200)}${unknown ? ' (it may or may not have been posted)' : ''}` };
     }
   }
 
@@ -48,14 +66,20 @@ export async function runAutomationStep(
     const conns = await q.many(`select * from integration_connections where provider in ('google','microsoft') and status='ok'`);
     const conn = conns.find((c: any) => hasScope(c, c.provider === 'google' ? 'gmail.send' : 'Mail.Send'));
     if (!conn) return { ok: false, summary: 'No email account that can send is connected (connect Gmail or Outlook).' };
+    let token: string;
     try {
-      const token = await accessToken(q, conn);
+      token = await accessToken(q, conn);
+    } catch (e) {
+      return { ok: false, summary: `Sending failed: ${(e as Error).message.slice(0, 200)}` };
+    }
+    try {
       if (conn.provider === 'google') await gmailSend(token, to, s.subject, s.body);
       else await outlookSend(token, to, s.subject, s.body);
       await audit(q, { orgId: ctx.orgId, actorKind: 'workflow', actorId: ctx.runId, action: 'email.sent', targetRef: `email:${to}`, detail: { subject: s.subject, via: conn.provider } });
       return { ok: true, summary: `Sent "${s.subject}" to ${to} from ${conn.account_email ?? conn.provider}` };
     } catch (e) {
-      return { ok: false, summary: `Sending failed: ${(e as Error).message.slice(0, 200)}` };
+      const unknown = isUncertainSendError(e);
+      return { ok: false, unknown, summary: `Sending failed: ${(e as Error).message.slice(0, 200)}${unknown ? ' (it may or may not have been sent)' : ''}` };
     }
   }
 
@@ -67,11 +91,18 @@ export async function runAutomationStep(
     start.setUTCDate(start.getUTCDate() + s.inDays);
     start.setUTCHours(s.hourUtc, 0, 0, 0);
     if (start.getTime() < Date.now()) start.setUTCDate(start.getUTCDate() + 1);
+    let token: string;
     try {
-      const ev = await createCalendarEvent(conn.provider, await accessToken(q, conn), { title: s.title, start, minutes: s.minutes, description: 'Created by a Qline workflow' });
-      return { ok: true, summary: `Added "${s.title}" to the calendar (${start.toISOString().slice(0, 16).replace('T', ' ')} UTC)${ev.url ? '' : ''}` };
+      token = await accessToken(q, conn);
     } catch (e) {
       return { ok: false, summary: `Calendar: ${(e as Error).message.slice(0, 200)}` };
+    }
+    try {
+      const ev = await createCalendarEvent(conn.provider, token, { title: s.title, start, minutes: s.minutes, description: 'Created by a Qline workflow' });
+      return { ok: true, summary: `Added "${s.title}" to the calendar (${start.toISOString().slice(0, 16).replace('T', ' ')} UTC)${ev.url ? '' : ''}` };
+    } catch (e) {
+      const unknown = isUncertainSendError(e);
+      return { ok: false, unknown, summary: `Calendar: ${(e as Error).message.slice(0, 200)}${unknown ? ' (the event may or may not have been created)' : ''}` };
     }
   }
   return { ok: false, summary: `Unknown step ${s.type}` };
