@@ -430,4 +430,20 @@ d('Durable runtime (integration)', () => {
       await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='slack'`));
     }
   });
+  it('a sync job that cannot use its connection records the error in its result (visible in /jobs)', async () => {
+    await import('../src/integrations/leads');
+    const ws = await asOrg(A, (q) => q.one('select id from workspaces where org_id=$1 limit 1', [A.org]));
+    await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='google'`));
+    const conn = await asOrg(A, (q) =>
+      q.one(`insert into integration_connections (org_id, workspace_id, provider, status, connected_by, token_ciphertext) values ($1,$2,'google','ok',$3,'not-a-sealed-token') returning id`, [A.org, ws.id, A.userId]),
+    );
+    const j = await add(A, 'integration.sync', { connectionId: conn.id, workspaceId: ws.id, userId: A.userId });
+    await drainAll();
+    const row = await job(A, j.id);
+    expect(row.status).toBe('succeeded');
+    expect(row.result.errors.length).toBeGreaterThan(0);
+    const api = await call(A, 'GET', `/jobs/${j.id}`);
+    expect(JSON.stringify(api.json)).toContain('errors');
+    await asOrg(A, (q) => q.exec(`delete from integration_connections where id=$1`, [conn.id]));
+  });
 });

@@ -456,5 +456,6 @@ export async function runDueSyncs(limit = 20) {
 registerJob('integration.sync', async ({ job }) => {
   const p = job.payload;
   const r = await syncConnection({ orgId: job.org_id, workspaceId: p.workspaceId, userId: p.userId }, p.connectionId);
-  return { leads: r.leads };
+  // Partial failures do not fail the job (the next tick syncs again), but they must be visible in /jobs.
+  return { leads: r.leads, checked: r.checked, exported: r.exported, errors: r.errors.slice(0, 5).map((x) => String(x).slice(0, 200)) };
 });
