@@ -121,3 +121,36 @@ No merge to `main`, production deployment, APK publication, or release recommend
 - dependency audit is re-run and findings are accurately classified;
 - PR #10's mobile UI change and physical-device QA are complete;
 - final CI and production smoke pass after explicit release approval.
+
+
+## 8. Follow-up review and recommended session policy (2026-11-17)
+
+### Recommended policy decision
+
+**Recommend Option C as Qline's target policy; do not ship Option A or B as the long-term design.** T12 explicitly requires short-lived access plus refresh rotation. A seven-day fixed bearer session would reduce the current exposure window but would still not provide rotation, while a rolling seven-day bearer session can remain valid indefinitely when used.
+
+Proposed target parameters for owner approval:
+- Access credential: 10 minutes; validate issuer, audience, subject, session/device id, expiry and signing-key id.
+- Refresh credential: opaque, single-use, cryptographically random, 30-day absolute lifetime and 7-day idle lifetime.
+- Persist only a keyed hash of each refresh token; rotate atomically on every refresh.
+- Detect reuse of a consumed token and revoke the entire token family; require sign-in again.
+- Store the refresh credential in Android Keystore-backed secure storage; keep access credentials in memory where practical.
+- Keep account-level session list/revoke and add revoke-all, password-change and compromise invalidation.
+- Require fresh authentication for high-risk actions; rate-limit refresh and record security events without logging credentials.
+- Define safe concurrent refresh behavior (client single-flight plus server-side atomic compare-and-swap); test races, replay, expiry, revocation, logout and recovery.
+
+This is a **technical recommendation, not owner approval**. The current Better Auth 30-day rolling session remains unchanged until the owner approves the migration. Before implementation, spike the exact Better Auth 1.7.25 bearer/session integration and decide whether to retain Better Auth as identity/session registry or introduce a dedicated token-family table and middleware. Do not bolt a second refresh system onto the current bearer token without that design.
+
+### UUID advisory reachability and remediation
+
+The exact ExcelJS 4.4.0 source call site is `lib/xlsx/xform/sheet/cf-ext/cf-rule-ext-xform.js`: it imports `require('uuid').v4` and calls `uuidv4()` with no output buffer or offset. Qline's own XLSX import path only loads workbooks and reads worksheet values. GHSA-w5hq-g745-h8pq affects the separate `v3()`, `v5()` and `v6()` APIs when a caller supplies an output buffer with an invalid size/offset; the inspected ExcelJS path does not invoke those APIs. This makes the specific vulnerable call pattern **not reachable through the inspected Qline/ExcelJS path**, but the old package version still creates an SCA finding.
+
+A narrow compatibility remediation is being tested: npm override scoped to ExcelJS, `uuid@^11.1.1`. UUID 11.1.1 retains a CommonJS `require` export, unlike uuid 14's ESM-only package shape. Qline's existing XLSX parser unit test exercises the ExcelJS import/read path. CI now runs `npm audit --audit-level=moderate`; treat the override as verified only if clean install, audit, unit/integration tests and API build all pass on the resulting commit.
+
+The lockfile also resolves `tmp@0.2.7`. This is above the patched version for CVE-2026-44705 (0.2.6) and CVE-2026-49982 (0.2.7); no tmp override is indicated by those advisories. The CI audit remains the source of truth for the full current dependency tree.
+
+### Physical-device QA boundary
+
+PR #10 (`qa/v1.4-stabilization`) changes the Approvals and Background jobs segmented filters. Its CI run 44039339567 passed Flutter analyze, tests and release APK compilation, but did not publish an APK artifact and is not a physical-device test. PR #11's run 44060012661 also passed the APK build, but it does not contain PR #10's mobile UI changes.
+
+The physical-device gate must use a build of PR #10's exact head, not PR #11 or main. Install on the owner's Redmi Pad 2 (8 GB/256 GB) with a separate QA application id/signature so it does not overwrite the existing production installation. Verify Approvals and Background jobs filters at 320 dp / 200% text, touch/scroll behavior, navigation, light/dark theme, app resume, API loading/error/empty states, and no overflow or clipped labels. Capture device model, Android version, build SHA and screenshots. Do not mark this gate passed from widget tests or an APK compilation alone.
