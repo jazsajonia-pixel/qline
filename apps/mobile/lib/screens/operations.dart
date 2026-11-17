@@ -35,6 +35,10 @@ String toolLabel(String tool) => switch (tool) {
       'slack.post' => 'Slack post',
       'gmail.send' || 'email.send' => 'Email',
       'calendar.create' => 'Calendar event',
+      'sheets.append' => 'Add sheet rows',
+      'companies.create' => 'New company',
+      'projects.create' => 'New project',
+      'tasks.comment' => 'Task comment',
       _ => cap(tool.replaceAll('.', ' ')),
     };
 
