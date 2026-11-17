@@ -107,6 +107,56 @@ d('Qline API (integration)', () => {
     expect((await call(A, 'GET', '/me')).status).toBe(200);
   });
 
+  it('enforces session expiry, repeat and concurrent revocation, self-revocation and id validation', async () => {
+    const { getAuth } = await import('../src/core/auth');
+    const { getPool } = await import('../src/core/db');
+    const signIn = async () => {
+      const r = await call(null, 'POST', '/auth/sign-in/email', { email: A.email!, password: 'correct-horse-battery' });
+      expect(r.status).toBe(200);
+      return r.json.token as string;
+    };
+    const sessionIdFor = async (token: string) => {
+      const list = await getAuth().api.listSessions({ headers: new Headers({ authorization: `Bearer ${token}` }) });
+      return list.find((s) => s.token === token)!.id;
+    };
+
+    // Another account's sessions never appear in the list.
+    const bobId = await sessionIdFor(B.token);
+    const mine = await call(A, 'GET', '/me/sessions');
+    expect(mine.json.items.map((s: any) => s.id)).not.toContain(bobId);
+
+    // An expired session is rejected even though its row still exists.
+    const expiring = await signIn();
+    const expiringId = await sessionIdFor(expiring);
+    await getPool().query(`update "session" set "expiresAt" = now() - interval '1 minute' where id = $1`, [expiringId]);
+    expect((await call({ token: expiring }, 'GET', '/me')).status).toBe(401);
+    expect((await call({ token: expiring }, 'GET', '/me/sessions')).status).toBe(401);
+    const afterExpiry = await call(A, 'GET', '/me/sessions');
+    expect(afterExpiry.json.items.map((s: any) => s.id)).not.toContain(expiringId);
+
+    // Concurrent revocations of one session never error and leave it revoked; a repeat is 404.
+    const victim = await signIn();
+    const victimId = await sessionIdFor(victim);
+    const results = await Promise.all([1, 2, 3].map(() => call(A, 'DELETE', `/me/sessions/${victimId}`)));
+    expect(results.every((r) => r.status === 200 || r.status === 404)).toBe(true);
+    expect(results.some((r) => r.status === 200)).toBe(true);
+    expect((await call({ token: victim }, 'GET', '/me')).status).toBe(401);
+    expect((await call(A, 'DELETE', `/me/sessions/${victimId}`)).status).toBe(404);
+
+    // Malformed or oversized ids are rejected without touching other sessions.
+    expect((await call(A, 'DELETE', `/me/sessions/${'x'.repeat(129)}`)).status).toBe(400);
+    expect((await call(A, 'DELETE', '/me/sessions/does-not-exist')).status).toBe(404);
+    expect((await call(null, 'DELETE', `/me/sessions/${bobId}`)).status).toBe(401);
+    expect((await call(B, 'GET', '/me')).status).toBe(200);
+
+    // A user can revoke the session making the request; it stops working immediately.
+    const self = await signIn();
+    const selfId = await sessionIdFor(self);
+    expect((await call({ token: self }, 'DELETE', `/me/sessions/${selfId}`)).status).toBe(200);
+    expect((await call({ token: self }, 'GET', '/me')).status).toBe(401);
+    expect((await call(A, 'GET', '/me')).status).toBe(200);
+  });
+
   it('isolates tenants: B cannot list, read, update or delete A rows', async () => {
     const t = await call(A, 'POST', '/tasks', { title: 'Secret plan for Acme' });
     expect(t.status).toBe(201);
