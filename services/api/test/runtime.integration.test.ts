@@ -125,11 +125,14 @@ d('Durable runtime (integration)', () => {
   it('retries with backoff, respects run_at, then succeeds', async () => {
     const { id } = await add(A, 'test.flaky');
     flakyFails.set(id, 1);
+    const before = Date.now();
     await drainAll();
     let j = await job(A, id);
     expect(j.status).toBe('queued');
     expect(j.attempts).toBe(1);
-    expect(new Date(j.run_at).getTime()).toBeGreaterThan(Date.now() + 2_000);
+    // First retry waits at least 4 s (5 s base, -20% jitter) after the attempt; measured from before the drain so
+    // network latency to the DB (Neon) cannot make this flaky. run_at is computed from the worker's clock (this process).
+    expect(new Date(j.run_at).getTime()).toBeGreaterThanOrEqual(before + 4_000);
     await drainAll();
     expect((await job(A, id)).attempts).toBe(1); // not due yet
     await dueNow(A, id);
@@ -722,7 +725,7 @@ d('Durable runtime (integration)', () => {
       globalThis.fetch = realFetch;
       await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='slack'`));
     }
-  });
+  }, 600_000); // many DB round trips: ~0.3 s locally, ~200 s against Neon from the sandbox
 
   it('a sync job that cannot use its connection records the error in its result (visible in /jobs)', async () => {
     await import('../src/integrations/leads');
