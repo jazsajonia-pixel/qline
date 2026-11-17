@@ -51,10 +51,20 @@ jobs:
         run: npm run db:migrate
       - name: Verify least-privilege runtime role
         run: |
-          role_flags="$(psql "$DATABASE_URL_OWNER" -AtF '|' -c "select rolsuper, rolbypassrls, rolcreaterole, rolcreatedb from pg_roles where rolname = 'qline_app'")"
-          test "$role_flags" = "f|f|f|f"
-          owned_tables="$(psql "$DATABASE_URL_OWNER" -Atc "select count(*) from pg_tables where schemaname = 'public' and tableowner = 'qline_app'")"
-          test "$owned_tables" = "0"
+          node --input-type=module <<'NODE'
+          import pg from 'pg';
+          const client = new pg.Client({ connectionString: process.env.DATABASE_URL_OWNER });
+          await client.connect();
+          try {
+            const role = await client.query("select rolsuper, rolbypassrls, rolcreaterole, rolcreatedb from pg_roles where rolname = 'qline_app'");
+            if (!role.rows[0] || Object.values(role.rows[0]).some(Boolean)) throw new Error('qline_app must be non-superuser, NOBYPASSRLS, and unable to create roles or databases');
+            const owners = await client.query("select count(*)::int as count from pg_tables where schemaname = 'public' and tableowner = 'qline_app'");
+            if (owners.rows[0].count !== 0) throw new Error('qline_app must not own application tables');
+            console.log('qline_app least-privilege attributes verified');
+          } finally {
+            await client.end();
+          }
+          NODE
       - name: Run API and durable-runtime database integration tests
         run: npm run test:integration -- --testTimeout=180000
       - run: npm run build:api
