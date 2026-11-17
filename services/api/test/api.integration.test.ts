@@ -13,7 +13,7 @@ delete process.env.NEON_AI_GATEWAY_TOKEN;
 
 const d = envFile ? describe : describe.skip;
 
-type Who = { token: string; org?: string };
+type Who = { token: string; email: string; org?: string };
 let app: { fetch: (r: Request) => Promise<Response> };
 let ai: typeof import('@qline/ai');
 
@@ -37,7 +37,7 @@ async function signUp(name: string): Promise<Who> {
   const email = `${name.toLowerCase()}-${randomUUID().slice(0, 8)}@test.qline.dev`;
   const r = await call(null, 'POST', '/auth/sign-up/email', { email, password: 'correct-horse-battery', name });
   expect(r.status).toBe(200);
-  return { token: r.json.token };
+  return { token: r.json.token, email };
 }
 
 d('Qline API (integration)', () => {
@@ -68,6 +68,43 @@ d('Qline API (integration)', () => {
     expect((await call({ token: A.token, org: B.org }, 'GET', '/tasks')).status).toBe(404);
     const me = await call(A, 'GET', '/me');
     expect(me.json.orgs.map((o: any) => o.id)).toContain(A.org);
+  });
+
+  it('lists only the signed-in user sessions and revokes a selected session without exposing tokens', async () => {
+    const second = await call(null, 'POST', '/auth/sign-in/email', {
+      email: A.email,
+      password: 'correct-horse-battery',
+    });
+    expect(second.status).toBe(200);
+    const secondToken = second.json.token as string;
+    expect(secondToken).toBeTruthy();
+
+    const { getAuth } = await import('../src/core/auth');
+    const secondSessions = await getAuth().api.listSessions({
+      headers: new Headers({ authorization: `Bearer ${secondToken}` }),
+    });
+    const target = secondSessions.find((session) => session.token === secondToken);
+    expect(target).toBeTruthy();
+
+    const listed = await call(A, 'GET', '/me/sessions');
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get('cache-control')).toBe('no-store');
+    expect(listed.json.items.length).toBeGreaterThanOrEqual(2);
+    expect(listed.json.items.some((session: any) => session.current)).toBe(true);
+    expect(listed.json.items.every((session: any) => !('token' in session))).toBe(true);
+
+    const bobSessions = await getAuth().api.listSessions({
+      headers: new Headers({ authorization: `Bearer ${B.token}` }),
+    });
+    const bobSession = bobSessions.find((session) => session.token === B.token);
+    expect(bobSession).toBeTruthy();
+    expect((await call(A, 'DELETE', `/me/sessions/${bobSession!.id}`)).status).toBe(404);
+
+    const revoked = await call(A, 'DELETE', `/me/sessions/${target!.id}`);
+    expect(revoked.status).toBe(200);
+    expect(revoked.json).toEqual({ id: target!.id, revoked: true });
+    expect((await call({ token: secondToken }, 'GET', '/me')).status).toBe(401);
+    expect((await call(A, 'GET', '/me')).status).toBe(200);
   });
 
   it('isolates tenants: B cannot list, read, update or delete A rows', async () => {
