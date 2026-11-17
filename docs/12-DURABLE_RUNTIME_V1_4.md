@@ -1,6 +1,6 @@
 # 12 — Architecture spike and v1.4 Durable Automation Runtime
 
-Status: **spike done, design proposed, M1–M3 implemented on `feat/v1.4-durable-runtime` (not merged, not deployed to production).**
+Status: **M1–M5 merged to `main`; M4 deployed to Neon production on 2026-11-17. Post-deploy health/readiness smoke is part of the v1.4.0 release gate.**
 Date: 2026-11-17. Product direction (Sapphire Decisions Log, 2026-11-17): Full AI Business Operating System, supervised execution, parallel and sequential agent collaboration.
 
 ## 1. Question
@@ -126,8 +126,8 @@ Neon cron tick ─► /internal/tick ────────┘      relay outb
 | M1 | `0007` schema, runtime core (enqueue/claim/heartbeat/finish/retry/DLQ/cancel), worker drain, tests | Implemented + verified locally (§11) |
 | M2 | Transactional outbox; events through the relay; approval decision enqueues resume atomically | Implemented + verified locally (§11) |
 | M3 | Workflow runs, schedules, syncs on jobs; external-step intent ledger; cancel endpoint; ops endpoints; tick + kick | Implemented + verified locally (§11); not yet on Neon |
-| M4 | Deploy to a Neon **preview branch**, verify trigger + kick end to end; then production after approval | **Verified on the Neon preview branch** (§12). Production not deployed: needs Jazz's approval (§13). `*/5` not recommended (§12.4) |
-| M5 | Supervised Operations UI (app) + run history/resolve API | Implemented (PR #5); API verified on the Neon preview (§12.3 S11); app verified with widget tests and rendered screens, not on a device |
+| M4 | Deploy to Neon preview, verify trigger + kick, then production after approval | **Preview verified (§12); production migration 0007 and API v1.4.0 deployed 2026-11-17 (§13).** Keep cron `*/15`. |
+| M5 | Supervised Operations UI (app) + run history/resolve API | **Merged to `main` in PR #5; API verified on preview and deployed to production; widget tests/screens verified, not on a physical device.** |
 
 ## 10. v1.5 preparation (design only, nothing built)
 
@@ -252,24 +252,37 @@ The previous full run at `1d4902c` had 52/54. Both failures were test-timing pro
 
 Neither change weakens an assertion. The same fixes are on the PR #3 and PR #4 branches.
 
-## 13. Production deployment runbook (prepared, NOT executed; needs Jazz's approval)
+## 13. Production deployment record (2026-11-17)
 
-Nothing in this section has been run against production. Production is still v1.3.0 (deployment #8, `workflow-tick` at `*/15`).
+Status: **Production database migration 0007 and API v1.4.0 deployment completed.** APK v1.4.0 remains gated on the post-deploy health/readiness CI check and the signed release workflow.
 
-Preconditions:
-1. Jazz approves merging PR #3, PR #4 (Slack approval) and PR #5 (M5) in that order. Squash is not required; the branches are stacked and merge cleanly in order.
-2. CI is green on `main` after the merges.
-3. A Neon snapshot of the production branch `br-muddy-rain-a1uaplxr` is taken first, so `0007` can be rolled back by restoring.
+### Integration and backup
 
-Steps:
-1. **Snapshot:** create a snapshot of `br-muddy-rain-a1uaplxr` (or a backup branch named `pre-v1-4`).
-2. **Migrate:** run `npm run db:migrate` with the production **owner** URL (not `qline_app`). Expected output: applies `0007_durable_runtime.sql` and re-applies `9999_app_role.sql`; nothing else. `0007` adds tables, functions and policies, and widens the `workflow_runs`/`tool_calls` status check constraints (a superset of the old values). Existing rows are untouched.
-3. **Verify the schema:** compare with the preview branch (`neon_compare_database_schema`). Expect no differences in tables, RLS, policies or functions.
-4. **Build:** `npm run build:api` from the merged `main`. Record the `function.zip` SHA-256.
-5. **Deploy:** deploy `function.zip` to function `api` on the production branch with `QLINE_VERSION=1.4.0` (keep every other environment variable).
-6. **CI smoke:** change `.github/workflows/ci.yml` "Verify production API health" from `1.3.0` to `1.4.0` in the same release PR. Until production is deployed, the current `1.3.0` check is correct.
-7. **Smoke-test production:** `/v1/health` (version 1.4.0), `/v1/ready` (db + storage true), one manual `/internal/tick` with the cron key (expect 200, `relayed`/`ran` counts), `GET /v1/jobs` as an owner (expect 200).
-8. **Cron:** keep `workflow-tick` at `*/15`. Do not change it to `*/5` on the Free plan (see §5 and §12.4).
-9. **App:** release APK 1.4.0 only after the API is live. M5 screens call `/workflow-runs`, `/workflow-runs/:id/resolve` and `/jobs`, which do not exist on 1.3.0.
+- PR #1 (public home/privacy/terms), PR #3 (durable runtime), PR #4 (human approval for workflow Slack posts), and PR #5 (M5 Operations UI + run history/resolve API) were merged to `main` in dependency order.
+- Final push CI for main commit `85fac65b5afe9aeca1f967beb1ada898d0bf9995` passed. The API build/typecheck/unit checks passed in the workflow-dispatch build run; the mobile build job was still running when this record was first written.
+- Neon production project: `withered-dew-14160540`; production branch: `br-muddy-rain-a1uaplxr`.
+- Manual pre-deployment snapshot: `snap-weathered-cake-a1bn6msl`, name `pre-v1.4-production-2026-11-17`, created 2026-11-17 06:20:20 UTC.
 
-Rollback: redeploy deployment #8's bundle (v1.3.0). v1.3.0 code does not use the new tables, and the widened status constraints still accept its values, so the schema can stay. Runs already moved to new states (`queued`, `needs_attention`, `cancelled`) would not be advanced by 1.3.0 and need a manual look. Restore the snapshot only if `0007` itself is faulty.
+### Migration and schema verification
+
+- Applied `0007_durable_runtime.sql` transactionally on production and recorded it in `schema_migrations`.
+- Applied the `9999_app_role.sql` grants equivalent to the migration runner's grant/revoke statements. The existing `qline_app` role was retained; it is login-enabled and `BYPASSRLS=false`. No password rotation was performed for this database role.
+- Verified `jobs`, `job_attempts` and `outbox_events` exist; `qline_app` has the required table and function privileges.
+- `neon_compare_database_schema` reported no schema differences between production and the verified `preview-v1-4` branch.
+
+### API deployment and cron
+
+- Built from merged main commit `85fac65b5afe9aeca1f967beb1ada898d0bf9995`; the staged bundle is on branch `deploy/api-bundle-85fac65b` (artifact path `deploy-artifacts/qline-api-function.zip.b64`; Git blob SHA `4f260b61b40898696313c4f470da1c0d72dc3c85`).
+- Neon Function `api` production deployment **#9** completed on 2026-11-17 with `QLINE_VERSION=1.4.0`.
+- Rotated `QLINE_CRON_KEY` and updated the existing `workflow-tick` trigger path. The key is intentionally not recorded here.
+- `workflow-tick` remains enabled at `*/15 * * * *`. Do not use `*/5` on Neon Free (see §5 and §12.4).
+- **Pending verification:** public `/v1/health` and `/v1/health/ready` checks are enforced by the v1.4.0 CI release-gate commit. A manual tick and authenticated owner `GET /v1/jobs` have not yet been run from this deployment session; preview integration coverage remains the evidence for those paths.
+
+### Release gate and rollback
+
+1. Merge the v1.4.0 release-preparation commit only after review of its version, CI smoke check and release notes.
+2. Confirm the main-branch CI health/readiness job passes against production API v1.4.0.
+3. Push tag `v1.4.0` only after that CI pass. The tag workflow runs Flutter analyze/tests, builds the signed APK, checks the known release-certificate SHA-256, and publishes `qline-1.4.0.apk`.
+4. Confirm the published asset and its SHA-256, then report the release URL.
+
+Rollback: redeploy production Function deployment #8 (v1.3.0). The v1.3.0 code does not use the new tables; the widened status constraints remain compatible. Runs already moved to `queued`, `needs_attention` or `cancelled` require manual review. Restore snapshot `snap-weathered-cake-a1bn6msl` only if migration 0007 itself is faulty.

@@ -39,9 +39,14 @@ flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --da
 
 Release signing reads `apps/mobile/android/key.properties`. That file and the keystore are gitignored and are never committed.
 
-## Honest status (v1.2.0)
+## Honest status (v1.4.0)
 
 Working end to end against production: sign-up/sign-in (email and password), organisations, invitations and roles, tasks, projects, comments, contacts, documents and notes, memory confirm/supersede/forget, search, approvals, guided setup with config versions and rollback, CSV/XLSX import with mapping and rollback, workflows (dry run, publish, enable, run), audit log verification, data export.
+
+New in 1.4.0:
+- **Durable automation runtime.** Transactional outbox, leased jobs, retries/backoff, dead-letter handling, cancellation, schedule/event dispatch and recovery are deployed on Neon.
+- **Supervised Operations.** The app includes run history, run details, background-job visibility and permission-checked operations. Unknown external outcomes require human resolution; they are not blindly resent.
+- **Slack workflow posts require human approval.** This is enforced server-side.
 
 New in 1.2.0 (code complete and tested; see the verification notes):
 
