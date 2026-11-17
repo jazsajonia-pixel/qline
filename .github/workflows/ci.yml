@@ -68,15 +68,20 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          ls "$ANDROID_HOME/build-tools"
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          BT="${BT%/}"
+          echo "Using build-tools at $BT"
           APK=build/app/outputs/flutter-apk/app-release.apk
           OUT="$RUNNER_TEMP/qa-artifacts"
           mkdir -p "$OUT"
           cp "$APK" "$OUT/qline-pr10-physical-test.apk"
           (cd "$OUT" && sha256sum qline-pr10-physical-test.apk > qline-pr10-physical-test.apk.sha256)
           APK_SHA="$(cut -d' ' -f1 "$OUT/qline-pr10-physical-test.apk.sha256")"
-          BADGING="$("$BT/aapt2" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|native-code):")"
-          CERTS="$("$BT/apksigner" verify --print-certs "$APK" | grep -E "Signer #1 certificate (DN|SHA-256)")"
+          "$BT/aapt2" dump badging "$APK" > "$RUNNER_TEMP/badging.txt" || { cat "$RUNNER_TEMP/badging.txt"; exit 1; }
+          "$BT/apksigner" verify --print-certs "$APK" > "$RUNNER_TEMP/certs.txt" || { cat "$RUNNER_TEMP/certs.txt"; exit 1; }
+          BADGING="$(grep -E "^(package|sdkVersion|targetSdkVersion|application-label|native-code):" "$RUNNER_TEMP/badging.txt" || true)"
+          CERTS="$(grep -E "certificate (DN|SHA-256)" "$RUNNER_TEMP/certs.txt" || true)"
           echo "$BADGING"; echo "$CERTS"
           grep -q "package: name='app.qline.qline.qa'" <<<"$BADGING" || { echo "QA APK must use app.qline.qline.qa"; exit 1; }
           grep -q "application-label:'Qline QA'" <<<"$BADGING" || { echo "QA APK must be labelled Qline QA"; exit 1; }
