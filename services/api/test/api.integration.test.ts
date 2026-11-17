@@ -110,10 +110,11 @@ d('Qline API (integration)', () => {
   it('enforces session expiry, repeat and concurrent revocation, self-revocation and id validation', async () => {
     const { getAuth } = await import('../src/core/auth');
     const { getPool } = await import('../src/core/db');
+    // Server-side sign-in creates real sessions without consuming the HTTP sign-in rate limit.
     const signIn = async () => {
-      const r = await call(null, 'POST', '/auth/sign-in/email', { email: A.email!, password: 'correct-horse-battery' });
-      expect(r.status).toBe(200);
-      return r.json.token as string;
+      const r = await getAuth().api.signInEmail({ body: { email: A.email!, password: 'correct-horse-battery' } });
+      expect(r.token).toBeTruthy();
+      return r.token as string;
     };
     const sessionIdFor = async (token: string) => {
       const list = await getAuth().api.listSessions({ headers: new Headers({ authorization: `Bearer ${token}` }) });
