@@ -467,11 +467,14 @@ class _JobsScreenState extends State<JobsScreen> {
       body: Column(children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-          child: SegmentedButton<String>(
-            showSelectedIcon: false,
-            segments: const [ButtonSegment(value: 'problem', label: Text('Failed')), ButtonSegment(value: 'active', label: Text('Queued & running'))],
-            selected: {_status},
-            onSelectionChanged: (s) => setState(() => _status = s.first),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: const [ButtonSegment(value: 'problem', label: Text('Failed')), ButtonSegment(value: 'active', label: Text('Queued & running'))],
+              selected: {_status},
+              onSelectionChanged: (s) => setState(() => _status = s.first),
+            ),
           ),
         ),
         Expanded(
