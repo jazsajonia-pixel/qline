@@ -4,7 +4,8 @@ import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import type { Q } from '../core/db';
 import { notFound } from '../core/errors';
-import { dispatch } from '../core/events';
+import { publish } from '../core/events';
+import { relayAndKick } from '../runtime/outbox';
 import { body, query, limitParam } from '../core/validate';
 
 export const workRoutes = new Hono<Env>();
@@ -217,8 +218,12 @@ workRoutes.get('/tasks', async (c) => {
 workRoutes.post('/tasks', async (c) => {
   const t = need(c, 'tasks.write');
   const input = await body(c, taskInput);
-  const row = await tx(t, (q) => createTask(q, t, actorOf(t), input));
-  await dispatch(t, [{ type: 'task.created', id: `task:${row.id}`, data: row }]);
+  const row = await tx(t, async (q) => {
+    const r = await createTask(q, t, actorOf(t), input);
+    await publish(q, t, [{ type: 'task.created', id: `task:${r.id}`, data: r }]);
+    return r;
+  });
+  await relayAndKick();
   return c.json(row, 201);
 });
 
@@ -281,8 +286,12 @@ workRoutes.get('/contacts', async (c) => {
 workRoutes.post('/contacts', async (c) => {
   const t = need(c, 'contacts.write');
   const input = await body(c, contactInput);
-  const row = await tx(t, (q) => createContact(q, t, actorOf(t), input));
-  await dispatch(t, [{ type: 'contact.created', id: `contact:${row.id}`, data: row }]);
+  const row = await tx(t, async (q) => {
+    const r = await createContact(q, t, actorOf(t), input);
+    await publish(q, t, [{ type: 'contact.created', id: `contact:${r.id}`, data: r }]);
+    return r;
+  });
+  await relayAndKick();
   return c.json(row, 201);
 });
 

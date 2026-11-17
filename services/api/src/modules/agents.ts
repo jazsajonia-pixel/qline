@@ -9,7 +9,7 @@ import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, query } from '../core/validate';
 import { executeRun, makeEmitter } from '../agent/runner';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
-import { resumeWorkflowAfterDecision } from './workflows';
+import { applyWorkflowDecision, resumeWorkflowAfterDecision } from './workflows';
 import { notify } from './work';
 
 export const agentRoutes = new Hono<Env>();
@@ -283,12 +283,14 @@ export async function decideApproval(t: TenantCtx, approvalId: string, decision:
       note ?? null,
     ]);
     await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: `approval.${decision === 'approve' ? 'approved' : 'rejected'}`, targetRef: `approval:${a.id}`, detail: { action: a.action, risk: a.risk } });
-    return { a, tc };
+    // Workflow approvals: the run update and its resume job commit with the decision (no lost resumes).
+    const applied = a.requester_kind === 'workflow' ? await applyWorkflowDecision(q, t, a, decision) : null;
+    return { a, tc, applied };
   });
-  const { a, tc } = claimed;
+  const { a, tc, applied } = claimed;
 
   if (a.requester_kind === 'workflow') {
-    const r = await resumeWorkflowAfterDecision(t, a, decision);
+    const r = await resumeWorkflowAfterDecision(t, applied!);
     return { status: r.status, approval: { id: a.id, status: decision === 'approve' ? 'approved' : 'rejected' }, workflowRun: r };
   }
 

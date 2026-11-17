@@ -110,3 +110,10 @@ Vercel is fine for the web app. The API must also host SSE streams and the worke
 - Every job payload carries the `TenantContext` and the **initiating user id**. The worker re-checks authorization when it runs the job.
 - Correlation id: generated at the edge and propagated to logs, agent runs, tool calls, workflow runs and audit events.
 - Configuration changes go through the `CFG` service only, as versioned proposals applied in a transaction.
+
+## 6. v1.4 durable automation runtime
+
+Background work (event workflows, approval resumes, schedules, connector syncs) runs as Postgres jobs with leases,
+retries, a dead-letter state and cancellation. Domain events go through a transactional outbox. Workers are the cron
+tick (`/internal/tick/<key>`) plus a best-effort `waitUntil` drain after requests. No new paid infrastructure.
+Design, trade-offs and verification: [12-DURABLE_RUNTIME_V1_4.md](12-DURABLE_RUNTIME_V1_4.md).

@@ -26,6 +26,7 @@ This pack is the Phase 0 deliverable from the Qline Full App Development Master 
 | 14 | Threat model + privacy plan | [10-SECURITY_THREAT_MODEL.md](10-SECURITY_THREAT_MODEL.md) |
 | 15 | Phased implementation roadmap | [11-ROADMAP_AND_TESTING.md](11-ROADMAP_AND_TESTING.md) |
 | 16 | Test plan + acceptance criteria | [11-ROADMAP_AND_TESTING.md](11-ROADMAP_AND_TESTING.md) |
+| 17 | Architecture spike + v1.4 durable runtime | [12-DURABLE_RUNTIME_V1_4.md](12-DURABLE_RUNTIME_V1_4.md) |
 
 ## Visual references used
 

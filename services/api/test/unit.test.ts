@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { backoffMs } from '../src/runtime/jobs';
 import ExcelJS from 'exceljs';
 import { detectFormat, parseFile, suggestMapping } from '../src/modules/imports';
 import { analyseWithRules, buildProposal } from '../src/modules/onboarding';
@@ -167,5 +168,18 @@ describe('v1.3 assistant tools', () => {
     const c = classifyByRules({ subject: 'URGENT: invoice overdue, account suspended', text: 'Please pay today', fromEmail: 'billing@vendor.com', bulk: false } as any, rules);
     expect(c.important).toBe(true);
     expect(rules.notifyImportant).toBe(true);
+  });
+});
+
+describe('runtime backoff (v1.4)', () => {
+  it('doubles from 5 s, caps at 15 min, jitters within ±20%', () => {
+    const mid = () => 0.5; // no jitter
+    expect(backoffMs(1, undefined, undefined, mid)).toBe(5_000);
+    expect(backoffMs(2, undefined, undefined, mid)).toBe(10_000);
+    expect(backoffMs(4, undefined, undefined, mid)).toBe(40_000);
+    expect(backoffMs(30, undefined, undefined, mid)).toBe(900_000);
+    expect(backoffMs(1, undefined, undefined, () => 0)).toBe(4_000);
+    expect(backoffMs(1, undefined, undefined, () => 0.999999)).toBeLessThanOrEqual(6_000);
+    expect(backoffMs(0, undefined, undefined, mid)).toBe(5_000);
   });
 });

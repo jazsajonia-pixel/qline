@@ -1,15 +1,16 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { decideTool, type Role } from '@qline/policy';
+import { decideTool, TOOL_POLICIES, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
-import { withTenant } from '../core/db';
+import { withTenant, type Q } from '../core/db';
 import { ApiError, badRequest, notFound } from '../core/errors';
 import { onEvents, type DomainEvent } from '../core/events';
 import { body } from '../core/validate';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { notify } from './work';
 import { buildDigest, RECIPES, runAutomationStep } from '../integrations/steps';
+import { enqueue, registerJob, runInline, type JobCtx } from '../runtime/jobs';
 
 // ---------------------------------------------------------------------------
 // Definition schema (docs/08 §3, linear MVP subset)
@@ -66,7 +67,24 @@ interface EngineCtx {
   userId: string; // workflow owner (the human it acts for)
 }
 
-export async function startWorkflowRun(e: EngineCtx, workflowId: string, trigger: { kind: string; dedupeKey?: string; data?: unknown }, dryRun = false) {
+/** Enqueues the job that advances a run (inside the caller's transaction). */
+export async function enqueueAdvance(q: Q, e: EngineCtx, runId: string, reason: string) {
+  return enqueue(q, {
+    orgId: e.orgId,
+    kind: 'workflow.advance',
+    payload: { runId, workspaceId: e.workspaceId, userId: e.userId },
+    idempotencyKey: `run:${runId}:${reason}`,
+    createdBy: e.userId,
+    maxAttempts: 5,
+  });
+}
+
+/**
+ * Creates a run and its advance job in one transaction (durable from that point).
+ * mode 'inline' runs the job in this request (manual runs keep their instant response);
+ * 'queue' leaves it to workers (event/schedule triggers already run inside a worker).
+ */
+export async function startWorkflowRun(e: EngineCtx, workflowId: string, trigger: { kind: string; dedupeKey?: string; data?: unknown }, dryRun = false, mode: 'inline' | 'queue' = 'inline') {
   const created = await withTenant({ orgId: e.orgId, userId: e.userId }, async (q) => {
     const wf = await q.one('select * from workflows where id=$1', [workflowId]);
     if (!wf) throw notFound('Workflow');
@@ -78,12 +96,17 @@ export async function startWorkflowRun(e: EngineCtx, workflowId: string, trigger
        values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (org_id, workflow_id, dedupe_key) do nothing returning id`,
       [e.orgId, wf.id, version, trigger.kind, trigger.dedupeKey ?? null, dryRun, JSON.stringify({ trigger: trigger.data ?? {}, approved: false }), e.userId],
     );
-    if (r) await audit(q, { orgId: e.orgId, actorKind: 'workflow', actorId: wf.id, action: dryRun ? 'workflow.dry_run' : 'workflow.run.started', targetRef: `workflow_run:${r.id}` });
-    return r;
+    if (!r) return null;
+    await audit(q, { orgId: e.orgId, actorKind: 'workflow', actorId: wf.id, action: dryRun ? 'workflow.dry_run' : 'workflow.run.started', targetRef: `workflow_run:${r.id}` });
+    const job = await enqueueAdvance(q, e, r.id, 'start');
+    return { id: r.id as string, jobId: job.id };
   });
   if (!created) return null;
-  return advanceWorkflowRun(e, created.id);
+  if (mode === 'inline') await runInline(created.jobId);
+  return getRunDetail(e, created.id);
 }
+
+const EXTERNAL_TOOL: Record<string, string> = { email: 'email.send', slack: 'slack.post', calendar: 'calendar.create' };
 
 async function loadDefinition(q: any, run: any): Promise<Definition> {
   if (run.dry_run && !run.version) {
@@ -98,9 +121,13 @@ async function loadDefinition(q: any, run: any): Promise<Definition> {
   return v.definition;
 }
 
-export async function advanceWorkflowRun(e: EngineCtx, runId: string): Promise<any> {
+type StepOutcome = { stop: boolean; run?: any; approvalId?: string; external?: { tcId: string; index: number; step: any; ownerId: string; wfName: string } };
+
+/** Runs steps until the run stops. Called only from the `workflow.advance` job (one worker per run at a time). */
+export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobCtx): Promise<any> {
   for (let guard = 0; guard < MAX_STEPS_PER_RUN; guard++) {
-    const done = await withTenant({ orgId: e.orgId, userId: e.userId }, async (q) => {
+    if (job && guard > 0) await job.heartbeat(); // extends the lease; throws when cancelled or fenced out
+    const done: StepOutcome = await withTenant({ orgId: e.orgId, userId: e.userId }, async (q): Promise<StepOutcome> => {
       const run = await q.one('select * from workflow_runs where id=$1 for update', [runId]);
       if (!run || run.status !== 'running') return { stop: true, run };
       const wf = await q.one('select id, name, owner_id from workflows where id=$1', [run.workflow_id]);
@@ -188,6 +215,35 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string): Promise<a
           await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Missing approval step']);
           return { stop: true, run: { ...run, status: 'failed' } };
         }
+        if (s.type !== 'ai') {
+          // External side effect: record the intent and commit BEFORE calling the provider (docs/12 §7).
+          const key = `wf:${runId}:${i}`;
+          const prior = await q.one('select id, status, result_summary from tool_calls where idempotency_key=$1', [key]);
+          if (prior?.status === 'succeeded' || prior?.status === 'failed') {
+            // Result was recorded but the step did not advance (crash in between): reuse it, never resend.
+            await record(prior.status, prior.result_summary ?? `${STEP_LABEL[s.type]} already done`);
+            if (prior.status === 'failed') {
+              await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, prior.result_summary ?? 'External step failed']);
+              return { stop: true, run: { ...run, status: 'failed' } };
+            }
+            await next();
+            return { stop: false };
+          }
+          if (prior?.status === 'executing' || prior?.status === 'unknown') {
+            // A previous attempt may have sent it. Never send twice: a person decides.
+            await q.exec(`update tool_calls set status='unknown', result_summary='Outcome unknown after an interrupted attempt', finished_at=now() where id=$1`, [prior.id]);
+            await record('unknown', `${STEP_LABEL[s.type]}: the previous attempt was interrupted, so it may or may not have happened. Not retried.`);
+            await q.exec(`update workflow_runs set status='needs_attention', error=$2 where id=$1`, [runId, 'Outcome of an external step is unknown']);
+            await notify(q, e.orgId, wf.owner_id, { category: 'workflow', title: `Check workflow "${wf.name}"`, body: `${STEP_LABEL[s.type]} was interrupted. Check whether it happened, then re-run if needed.`, ref: { type: 'workflow_run', id: runId } });
+            return { stop: true, run: { ...run, status: 'needs_attention' } };
+          }
+          const tool = EXTERNAL_TOOL[s.type]!;
+          const tc = await q.one(
+            `insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,$6,$7,'executing') returning id`,
+            [e.orgId, runId, tool, JSON.stringify(s), TOOL_POLICIES[tool]?.risk ?? 'L2', s.type === 'email' ? 'require_approval' : 'allow', key],
+          );
+          return { stop: false, external: { tcId: tc.id, index: i, step: s, ownerId: wf.owner_id, wfName: wf.name } };
+        }
         const r = await runAutomationStep(q, { orgId: e.orgId, workspaceId: e.workspaceId, ownerId: wf.owner_id, runId }, s);
         if (s.type === 'ai' && r.ok && r.text != null) await q.exec(`update workflow_runs set context = context || jsonb_build_object($2::text, $3::text) where id=$1`, [runId, s.saveAs, r.text]);
         await record(r.ok ? (r.skipped ? 'skipped' : 'succeeded') : 'failed', r.summary);
@@ -245,10 +301,36 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string): Promise<a
       await next();
       return { stop: false };
     });
-    if (done.stop) return getRunDetail(e, runId);
+    if (done.external) await finishExternalStep(e, runId, done.external, job);
+    else if (done.stop) return getRunDetail(e, runId);
   }
   await withTenant({ orgId: e.orgId, userId: e.userId }, (q) => q.exec(`update workflow_runs set status='failed', error='Step limit reached', ended_at=now() where id=$1`, [runId]));
   return getRunDetail(e, runId);
+}
+
+/** Calls the provider outside the run lock, then records the result and moves on, all fenced by the job lease. */
+async function finishExternalStep(e: EngineCtx, runId: string, x: NonNullable<StepOutcome['external']>, job?: JobCtx) {
+  const r = await withTenant({ orgId: e.orgId, userId: e.userId }, (q) => runAutomationStep(q, { orgId: e.orgId, workspaceId: e.workspaceId, ownerId: x.ownerId, runId }, x.step));
+  // Always record what happened, even if this worker was fenced out meanwhile (a person may be checking it).
+  await withTenant({ orgId: e.orgId, userId: e.userId }, async (q) => {
+    const run = await q.one('select status, current_step from workflow_runs where id=$1 for update', [runId]);
+    await q.exec(`update tool_calls set status=$2, result_summary=$3, finished_at=now() where id=$1`, [x.tcId, r.ok ? 'succeeded' : 'failed', r.summary]);
+    if (!run || run.status !== 'running' || run.current_step !== x.index) return;
+    await q.exec(`insert into workflow_run_steps (org_id, run_id, step_index, kind, status, summary) values ($1,$2,$3,$4,$5,$6)`, [
+      e.orgId,
+      runId,
+      x.index,
+      x.step.type,
+      r.ok ? (r.skipped ? 'skipped' : 'succeeded') : 'failed',
+      r.summary,
+    ]);
+    if (!r.ok) {
+      await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1 and status='running'`, [runId, r.summary]);
+      await notify(q, e.orgId, x.ownerId, { category: 'workflow', title: `Workflow "${x.wfName}" stopped`, body: r.summary });
+      return;
+    }
+    await q.exec('update workflow_runs set current_step=current_step+1 where id=$1', [runId]);
+  });
 }
 
 async function getRunDetail(e: EngineCtx, runId: string) {
@@ -259,21 +341,67 @@ async function getRunDetail(e: EngineCtx, runId: string) {
   });
 }
 
-export async function resumeWorkflowAfterDecision(t: TenantCtx, approval: any, decision: 'approve' | 'reject') {
+/**
+ * Applies a human decision to a parked run inside the approval transaction (atomic with the decision),
+ * and enqueues the resume job only when approved. A rejected or expired approval never enqueues anything.
+ */
+export async function applyWorkflowDecision(q: Q, t: TenantCtx, approval: any, decision: 'approve' | 'reject') {
   const runId = approval.preview?.runId;
-  const e = { orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId };
-  await withTenant({ orgId: t.orgId, userId: t.userId }, async (q) => {
-    await q.exec(`update tool_calls set status=$2, finished_at=now() where id=$1`, [approval.tool_call_id, decision === 'approve' ? 'succeeded' : 'rejected']);
-    if (decision === 'approve') {
-      await q.exec(`update workflow_runs set status='running', current_step=current_step+1, context = context || '{"approved": true}'::jsonb where id=$1 and status='waiting_approval'`, [runId]);
-      await q.exec(`update approval_requests set status='executed' where id=$1`, [approval.id]);
-    } else {
-      await q.exec(`update workflow_runs set status='rejected', ended_at=now() where id=$1 and status='waiting_approval'`, [runId]);
-    }
-  });
-  if (decision === 'reject') return getRunDetail(e, runId);
-  return advanceWorkflowRun(e, runId);
+  await q.exec(`update tool_calls set status=$2, finished_at=now() where id=$1`, [approval.tool_call_id, decision === 'approve' ? 'succeeded' : 'rejected']);
+  if (decision === 'reject') {
+    await q.exec(`update workflow_runs set status='rejected', ended_at=now() where id=$1 and status='waiting_approval'`, [runId]);
+    return { runId, jobId: null as string | null };
+  }
+  const n = await q.exec(`update workflow_runs set status='running', current_step=current_step+1, context = context || '{"approved": true}'::jsonb where id=$1 and status='waiting_approval'`, [runId]);
+  await q.exec(`update approval_requests set status='executed' where id=$1`, [approval.id]);
+  if (!n) return { runId, jobId: null };
+  const run = await q.one('select initiated_by, workflow_id from workflow_runs where id=$1', [runId]);
+  const wf = await q.one('select owner_id, workspace_id from workflows where id=$1', [run.workflow_id]);
+  const job = await enqueueAdvance(q, { orgId: t.orgId, workspaceId: wf.workspace_id, userId: wf.owner_id }, runId, `approval:${approval.id}`);
+  return { runId, jobId: job.id as string | null };
 }
+
+export async function resumeWorkflowAfterDecision(t: TenantCtx, applied: { runId: string; jobId: string | null }) {
+  if (applied.jobId) await runInline(applied.jobId);
+  return getRunDetail({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId }, applied.runId);
+}
+
+/** Cancels a run: it stops at the next step boundary; steps already done stay done. */
+export async function cancelWorkflowRun(t: TenantCtx, runId: string) {
+  return tx(t, async (q) => {
+    const run = await q.one('select id, status from workflow_runs where id=$1 for update', [runId]);
+    if (!run) throw notFound('Workflow run');
+    if (!['queued', 'running', 'waiting_approval', 'needs_attention'].includes(run.status)) throw new ApiError(409, 'RUN_FINISHED', 'Already finished', `This run is ${run.status}.`);
+    await q.exec(`update workflow_runs set status='cancelled', error='Cancelled by a person', ended_at=now() where id=$1`, [runId]);
+    await q.exec(`update approval_requests set status='expired' where status='pending' and preview->>'runId' = $1`, [runId]);
+    await q.exec(`update jobs set cancel_requested=true, updated_at=now() where kind='workflow.advance' and payload->>'runId'=$1 and status in ('queued','running')`, [runId]);
+    await q.exec(`update jobs set status='cancelled', finished_at=now() where kind='workflow.advance' and payload->>'runId'=$1 and status='queued'`, [runId]);
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'workflow.run.cancelled', targetRef: `workflow_run:${runId}` });
+    return { id: runId, status: 'cancelled' };
+  });
+}
+
+registerJob(
+  'workflow.advance',
+  async (job) => {
+    const p = job.job.payload;
+    const e = { orgId: job.job.org_id, workspaceId: p.workspaceId, userId: p.userId };
+    const r = await advanceWorkflowRun(e, p.runId, job);
+    return { status: r?.status };
+  },
+  {
+    // The job gave up (dead/failed): the run must not look like it is still running.
+    async onGiveUp(job, error) {
+      const p = job.payload;
+      await withTenant({ orgId: job.org_id, userId: p.userId }, async (q) => {
+        const n = await q.exec(`update workflow_runs set status='needs_attention', error=$2 where id=$1 and status in ('queued','running')`, [p.runId, `Automation stopped after retries: ${String(error).slice(0, 300)}`]);
+        if (!n) return;
+        const wf = await q.one('select w.name, w.owner_id from workflow_runs r join workflows w on w.id=r.workflow_id where r.id=$1', [p.runId]);
+        if (wf) await notify(q, job.org_id, wf.owner_id, { category: 'workflow', title: `Workflow "${wf.name}" needs attention`, body: 'It stopped after several retries. Check it, then re-run it.', ref: { type: 'workflow_run', id: p.runId } });
+      });
+    },
+  },
+);
 
 /** Event triggers: run enabled workflows subscribed to these events. */
 onEvents(async (t, events) => {
@@ -286,31 +414,49 @@ onEvents(async (t, events) => {
       ),
     );
     for (const wf of wfs) {
-      await startWorkflowRun({ orgId: t.orgId, workspaceId: t.workspaceId, userId: wf.owner_id }, wf.id, { kind: `event:${ev.type}`, dedupeKey: ev.id, data: ev.data });
+      await startWorkflowRun({ orgId: t.orgId, workspaceId: t.workspaceId, userId: wf.owner_id }, wf.id, { kind: `event:${ev.type}`, dedupeKey: ev.id, data: ev.data }, false, 'queue');
     }
   }
 });
 
-/** Cron tick (Neon Function Trigger). */
+/**
+ * Cron tick (Neon Function Trigger): marks due schedules and enqueues one job per workflow per day,
+ * in the same transaction, so a crash cannot skip the day and a duplicate tick cannot run it twice.
+ */
 export async function runScheduledWorkflows(): Promise<{ started: number }> {
   const due = await withTenant({ orgId: null, userId: 'system:scheduler' }, (q) => q.many('select * from qline_due_schedules()'));
   let started = 0;
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
   for (const d of due) {
-    const ws = await withTenant({ orgId: d.org_id, userId: d.owner_id }, async (q) => {
+    const queued = await withTenant({ orgId: d.org_id, userId: d.owner_id }, async (q) => {
+      const w = await q.one(
+        `select w.workspace_id, v.definition->'trigger' as t from workflows w join workflow_versions v on v.workflow_id=w.id and v.version=w.published_version where w.id=$1`,
+        [d.workflow_id],
+      );
       await q.exec('update workflows set last_scheduled_at=now() where id=$1', [d.workflow_id]);
-      return q.one('select workspace_id from workflows where id=$1', [d.workflow_id]);
+      if (w?.t?.every === 'week' && w.t.weekday != null && now.getUTCDay() !== Number(w.t.weekday)) return false; // not this weekday
+      const j = await enqueue(q, {
+        orgId: d.org_id,
+        kind: 'workflow.scheduled',
+        payload: { workflowId: d.workflow_id, workspaceId: w.workspace_id, ownerId: d.owner_id, day },
+        idempotencyKey: `schedule:${d.workflow_id}:${day}`,
+        createdBy: 'system:scheduler',
+      });
+      return j.created;
     });
-    const day = new Date().toISOString().slice(0, 10);
-    const trig = await withTenant({ orgId: d.org_id, userId: d.owner_id }, (q) =>
-      q.one(`select v.definition->'trigger' as t from workflows w join workflow_versions v on v.workflow_id=w.id and v.version=w.published_version where w.id=$1`, [d.workflow_id]),
-    );
-    if (trig?.t?.every === 'week' && trig.t.weekday != null && new Date().getUTCDay() !== Number(trig.t.weekday)) continue; // not this weekday
-    const digest = await withTenant({ orgId: d.org_id, userId: d.owner_id }, (q) => buildDigest(q));
-    await startWorkflowRun({ orgId: d.org_id, workspaceId: ws.workspace_id, userId: d.owner_id }, d.workflow_id, { kind: 'schedule', dedupeKey: `schedule:${day}`, data: { date: day, ...digest } });
-    started += 1;
+    if (queued) started += 1;
   }
   return { started };
 }
+
+registerJob('workflow.scheduled', async ({ job }) => {
+  const p = job.payload;
+  const e = { orgId: job.org_id, workspaceId: p.workspaceId, userId: p.ownerId };
+  const digest = await withTenant({ orgId: job.org_id, userId: p.ownerId }, (q) => buildDigest(q));
+  const run = await startWorkflowRun(e, p.workflowId, { kind: 'schedule', dedupeKey: `schedule:${p.day}`, data: { date: p.day, ...digest } }, false, 'queue');
+  return { runId: run?.id ?? null };
+});
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -437,6 +583,11 @@ workflowRoutes.get('/workflow-runs/:id', async (c) => {
   const exists = await tx(t, (q) => q.one('select id from workflow_runs where id=$1', [c.req.param('id')]));
   if (!exists) throw notFound('Workflow run');
   return c.json(await getRunDetail({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId }, c.req.param('id')));
+});
+
+workflowRoutes.post('/workflow-runs/:id/cancel', async (c) => {
+  const t = need(c, 'workflows.manage');
+  return c.json(await cancelWorkflowRun(t, c.req.param('id')));
 });
 
 workflowRoutes.get('/workflow-recipes', async (c) => {

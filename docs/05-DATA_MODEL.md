@@ -88,3 +88,10 @@ The master prompt's §8 full entity list is adopted as written. These tables arr
 ## 5. Migration strategy
 
 Drizzle Kit migrations are SQL-reviewed in PRs, and changes are **expand → migrate → contract** so older mobile builds keep working. The API is versioned (`/v1`) and mobile sends `X-Qline-Client` with its build number, so the server can return `426 Upgrade Required` for builds it no longer supports.
+
+## 6. v1.4 runtime tables (migration `0007`)
+
+`jobs`, `job_attempts`, `outbox_events`, all tenant-scoped with RLS. `workflow_runs.status` adds `queued`, `cancelled`,
+`needs_attention`; `tool_calls.status` adds `executing`, `unknown` (external-step intent ledger). Worker access goes
+through SECURITY DEFINER functions (`qline_claim_jobs`, `qline_job_finish`, `qline_relay_outbox`, ...).
+See [12-DURABLE_RUNTIME_V1_4.md](12-DURABLE_RUNTIME_V1_4.md) §6.
