@@ -4,6 +4,7 @@ import type { Q } from '../core/db';
 import { audit } from '../core/audit';
 import { createTask, updateTask } from '../modules/work';
 import { appTools } from './tools-apps';
+import { moreTools } from './tools-more';
 
 export interface ToolCtx {
   orgId: string;
@@ -202,6 +203,7 @@ const defs = {
   } satisfies ToolDef<any>,
 
   ...appTools,
+  ...moreTools,
 };
 
 export type ToolName = keyof typeof defs;

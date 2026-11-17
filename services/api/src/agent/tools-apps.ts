@@ -3,7 +3,8 @@ import { audit } from '../core/audit';
 import type { Q } from '../core/db';
 import { createContact, notify } from '../modules/work';
 import { accessToken, api, hasScope } from '../integrations/oauth';
-import { createCalendarEvent, formCreateCustom, formResponsesReadable, gmailMessage, gmailSearch, gmailSend, outlookSearch, outlookSend, sheetCreateCustom, slackPost, upcomingEvents } from '../integrations/services';
+import { createCalendarEvent, formCreateCustom, formResponsesReadable, gmailMessage, gmailSearch, gmailSend, outlookSearch, outlookSend, sheetCreateCustom, slackChannels, slackPost, upcomingEvents } from '../integrations/services';
+import { slackName } from './tools-more';
 import type { ToolDef } from './tools';
 
 /**
@@ -158,18 +159,23 @@ export const appTools = {
   } satisfies ToolDef<any>,
 
   'slack.post': {
-    description: 'Post a message to the team\'s Slack channel picked in Integrations. Needs approval.',
-    schema: z.object({ text: z.string().trim().min(1).max(4000) }),
+    description: 'Post a message to Slack: the channel picked in Integrations, or another public channel by name (see slack.channels). Needs approval.',
+    schema: z.object({ text: z.string().trim().min(1).max(4000), channel: z.string().trim().max(80).optional().describe('Public channel name, e.g. sales. Omit for the default channel.') }),
     async execute(q, ctx, a) {
       const c = await connection(q, ['slack']);
       if (typeof c === 'string') return fail(c);
-      const ch = c.conn.settings?.channel;
-      if (!ch?.id) return fail('Pick a Slack channel in Settings → Integrations → Slack first.');
+      let ch: { id: string; name?: string } | undefined = c.conn.settings?.channel;
+      if (a.channel) {
+        const want = slackName(a.channel);
+        ch = (await slackChannels(c.token)).find((x: { id: string; name: string }) => x.name === want || x.id === a.channel);
+        if (!ch) return fail(`No public Slack channel named #${want}.`);
+      }
+      if (!ch?.id) return fail('Pick a Slack channel in Settings → Integrations → Slack first, or name a channel.');
       await slackPost(c.token, ch.id, a.text);
       await audit(q, { orgId: ctx.orgId, actorKind: ctx.actor.kind, actorId: ctx.actor.id, action: 'slack.posted', targetRef: `slack:${ch.id}` });
       return { ok: true, summary: `Posted to #${ch.name ?? 'channel'}`, refs: [] };
     },
-    preview: (a) => ({ title: 'Post to Slack', lines: [a.text.slice(0, 400)] }),
+    preview: (a) => ({ title: a.channel ? `Post to Slack #${slackName(a.channel)}` : 'Post to Slack', lines: [a.text.slice(0, 400)] }),
   } satisfies ToolDef<any>,
 
   'leads.list': {

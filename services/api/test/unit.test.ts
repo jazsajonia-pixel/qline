@@ -125,6 +125,50 @@ describe('voice envelope (v1.2)', () => {
   });
 });
 
+describe('v1.5 assistant tools', () => {
+  it('every new tool has a policy, and the 0009 migration only grants known tools to matching templates', async () => {
+    const { moreTools } = await import('../src/agent/tools-more');
+    const { TOOL_POLICIES, defaultAllowlist } = await import('@qline/policy');
+    for (const name of Object.keys(moreTools)) expect(TOOL_POLICIES[name], name).toBeTruthy();
+    const { readFileSync } = await import('node:fs');
+    const sql = readFileSync(new URL('../../../packages/schema/migrations/0009_v15_tools.sql', import.meta.url), 'utf8');
+    const groups = [...sql.matchAll(/array\[([^\]]+)\]\) t order by t\)[\s\S]*?current_version([^;]*);/g)];
+    expect(groups.length).toBe(4);
+    const granted = new Set<string>();
+    const all = ['ceo', 'sales', 'marketing', 'finance', 'operations', 'research'] as const;
+    for (const [, list, where] of groups) {
+      const names = [...list!.matchAll(/'([a-z_.]+)'/g)].map((m) => m[1]!);
+      const templates = where!.includes("<> 'research'") ? all.filter((t) => t !== 'research') : where!.includes('in (') ? [...where!.matchAll(/'(\w+)'/g)].map((m) => m[1]!) : [...all];
+      for (const tool of names) {
+        granted.add(tool);
+        expect(TOOL_POLICIES[tool], tool).toBeTruthy();
+        // Exactly the templates whose defaults carry the tool, so upgraded agents match new ones.
+        expect([...templates].sort(), tool).toEqual([...TOOL_POLICIES[tool]!.templates].sort());
+      }
+    }
+    expect([...granted].sort()).toEqual(Object.keys(moreTools).sort());
+    for (const t of all) for (const name of Object.keys(moreTools)) expect(defaultAllowlist(t).includes(name)).toBe(TOOL_POLICIES[name]!.templates.includes(t));
+  });
+
+  it('new writes keep their approval rules; reads are allowed', async () => {
+    const { TOOL_POLICIES } = await import('@qline/policy');
+    expect(TOOL_POLICIES['companies.create']!.decision).toBe('require_approval');
+    expect(TOOL_POLICIES['projects.create']!.decision).toBe('require_approval');
+    expect(TOOL_POLICIES['sheets.append']!.decision).toBe('require_approval');
+    expect(TOOL_POLICIES['slack.post']!.decision).toBe('require_approval');
+    for (const r of ['time.now', 'documents.read', 'contacts.get', 'projects.list', 'business.snapshot', 'sheets.read', 'slack.channels']) expect(TOOL_POLICIES[r]!.risk, r).toBe('L0');
+  });
+
+  it('parses Google Sheets links and Slack channel names', async () => {
+    const { sheetId, slackName } = await import('../src/agent/tools-more');
+    expect(sheetId('https://docs.google.com/spreadsheets/d/1c2gnCSAyD8dVisRAYwbNPtF3Om1xJiccVoDXAF-x0ns/edit#gid=0')).toBe('1c2gnCSAyD8dVisRAYwbNPtF3Om1xJiccVoDXAF-x0ns');
+    expect(sheetId('1c2gnCSAyD8dVisRAYwbNPtF3Om1xJiccVoDXAF-x0ns')).toBe('1c2gnCSAyD8dVisRAYwbNPtF3Om1xJiccVoDXAF-x0ns');
+    expect(sheetId('../../etc/passwd')).toBeNull();
+    expect(sheetId('https://evil.example/x?id=1c2gnCSAyD8dVisRAYwbNPtF3Om1xJiccVoDXAF-x0ns&y=1')).toBeNull();
+    expect(slackName(' #Sales ')).toBe('sales');
+  });
+});
+
 describe('v1.3 assistant tools', () => {
   it('every app tool has a policy, and the 0006 migration only grants known tools to matching templates', async () => {
     const { appTools } = await import('../src/agent/tools-apps');
