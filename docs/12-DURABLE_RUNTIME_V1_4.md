@@ -1,6 +1,6 @@
 # 12 — Architecture spike and v1.4 Durable Automation Runtime
 
-Status: **M1–M5 merged to `main`; production API v1.4.0 is deployed as Neon Function deployment #10. Main-branch health/readiness smoke is being rerun after the initial RC-version mismatch was fixed.**
+Status: **M1–M5 merged to `main`; production API v1.4.0 is deployed as Neon Function deployment #10; main CI health/readiness passed; signed APK v1.4.0 is published as Latest.**
 Date: 2026-11-17. Product direction (Sapphire Decisions Log, 2026-11-17): Full AI Business Operating System, supervised execution, parallel and sequential agent collaboration.
 
 ## 1. Question
@@ -277,13 +277,24 @@ Status: **Production database migration 0007 and API v1.4.0 deployment completed
 - Rebuilt the API from merged main commit `e26fa2e8135322717e446b00d9f9716599d2c0d6` (staged on `deploy/api-bundle-e26fa2e8`) and deployed production Function **#10**, status `completed`. The deploy updated `QLINE_VERSION=1.4.0` and preserved the already-rotated `QLINE_CRON_KEY`.
 - Rotated `QLINE_CRON_KEY` and updated the existing `workflow-tick` trigger path. The key is intentionally not recorded here.
 - `workflow-tick` remains enabled at `*/15 * * * *`. Do not use `*/5` on Neon Free (see §5 and §12.4).
-- **Pending verification:** the first main push smoke ran before deployment #10 and failed on the previous `1.4.0-rc.1` response. Rerun the failed health/readiness job after deployment #10 and require `/v1/health` to report `1.4.0` plus `/v1/health/ready` to report database and storage ready. A manual tick and authenticated owner `GET /v1/jobs` have not yet been run from this deployment session; preview integration coverage remains the evidence for those paths.
+- Main CI run **44033926124** passed all jobs, including production smoke: `/v1/health` reported version `1.4.0`; `/v1/health/ready` returned ready with database and storage checks true.
+- Neon logs show the scheduled function invocation at **2026-11-17 07:00:00–07:00:06 UTC** after deployment #10. No `tick step failed` log entries were found in the checked 15-minute window. The trigger remains enabled at `*/15` and next run was `07:15 UTC`.
+- **Not verified in this session:** a manual tick response and authenticated owner `GET /v1/jobs`; preview integration coverage remains the evidence for those API paths. Real Gmail/Sheets sync and real Slack posts were not tested with provider accounts. The APK has not been installed on a physical phone.
 
-### Release gate and rollback
+### Published release and rollback
 
-1. Merge the v1.4.0 release-preparation commit only after review of its version, CI smoke check and release notes.
-2. Confirm the main-branch CI health/readiness job passes against production API v1.4.0.
-3. Push tag `v1.4.0` only after that CI pass. The tag workflow runs Flutter analyze/tests, builds the signed APK, checks the known release-certificate SHA-256, and publishes `qline-1.4.0.apk`.
-4. Confirm the published asset and its SHA-256, then report the release URL.
+- Main commit/tag: `1917d3a31a5e9b3b59eadce2b8f6e2c19e9f903f` / `v1.4.0`.
+- GitHub Release: [Qline 1.4.0](https://github.com/jazsajonia-pixel/qline/releases/tag/v1.4.0), marked Latest.
+- APK: `qline-1.4.0.apk`, versionCode 6, 57,302,380 bytes.
+- APK SHA-256: `15de4d21d8f3cd6854c82a6770b64d4a2d116797b133bde2bb832ada01e5f1f7`.
+- Signing certificate SHA-256: `042819cb6c736b743c2134c91fab74beeba2edddbc2bc07e4c9def969ac288c1` (matches the known Qline release certificate used by v1.3.1).
+- Release workflow **44034634383** passed Flutter analyze, tests, signed APK build, signature/checksum verification and publication. Main CI **44033926124** passed API, mobile and production-smoke jobs.
+- The app installs as an update over v1.3.1 because versionCode is higher and the signing certificate matches.
 
 Rollback: redeploy production Function deployment #8 (v1.3.0). The v1.3.0 code does not use the new tables; the widened status constraints remain compatible. Runs already moved to `queued`, `needs_attention` or `cancelled` require manual review. Restore snapshot `snap-weathered-cake-a1bn6msl` only if migration 0007 itself is faulty.
+
+### Remaining product scope
+
+- **Knowledge OS:** `docs/14-KNOWLEDGE_OS.md` is design only. K1–K4 (knowledge framework, chat drawer, graph and automatic capture) are not implemented.
+- **AI CEO v1.5:** design only; no mission supervisor or delegated-agent runtime beyond the v1.4 workflow runtime.
+- **Physical device QA:** outstanding.
