@@ -83,7 +83,7 @@ jobs:
                   '',
                   `- Source commit: ${context.sha}`,
                   `- Workflow run: ${context.runId} (attempt ${context.runAttempt})`,
-                  '- Package id: app.qline.qline.qa',
+                  '- Package id: app.qline.qline.qa (launcher name "Qline QA")',
                   '- Signing: CI debug key; this is a QA-only build, not a release APK.',
                   `- SHA-256: ${apkSha256}`,
                   ''

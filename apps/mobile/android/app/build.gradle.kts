@@ -30,6 +30,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 24
+        manifestPlaceholders["qlineAppLabel"] = "Qline"
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
@@ -54,6 +55,8 @@ android {
         release {
             // QA-only application id keeps the debug-signed test build beside the installed production app.
             applicationIdSuffix = ".qa"
+            // Distinct launcher name so testers never confuse the QA build with the production app.
+            manifestPlaceholders["qlineAppLabel"] = "Qline QA"
             // The upload key is intentionally absent from this isolated physical-test build.
             signingConfig = signingConfigs.getByName("debug")
         }
