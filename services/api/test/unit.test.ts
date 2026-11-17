@@ -183,3 +183,38 @@ describe('runtime backoff (v1.4)', () => {
     expect(backoffMs(0, undefined, undefined, mid)).toBe(5_000);
   });
 });
+
+describe('provider outcome classification (M4)', () => {
+  it('treats network errors, timeouts and 5xx after sending as unknown; 4xx and API refusals as definite', async () => {
+    const { isUncertainSendError } = await import('../src/integrations/steps');
+    expect(isUncertainSendError(new TypeError('fetch failed'))).toBe(true);
+    expect(isUncertainSendError(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }))).toBe(true);
+    expect(isUncertainSendError(Object.assign(new Error('bad gateway'), { status: 502 }))).toBe(true);
+    expect(isUncertainSendError(Object.assign(new Error('invalid_auth'), { status: 401 }))).toBe(false);
+    expect(isUncertainSendError(Object.assign(new Error('channel_not_found'), { status: 200 }))).toBe(false);
+  });
+
+  it('provider calls time out instead of hanging a worker', async () => {
+    const { api } = await import('../src/integrations/oauth');
+    const real = globalThis.fetch;
+    globalThis.fetch = ((_u: any, init?: any) =>
+      new Promise((_r, rej) => init?.signal?.addEventListener('abort', () => rej(init.signal.reason)))) as typeof fetch;
+    try {
+      const t0 = Date.now();
+      await expect(api('t', 'https://slack.com/api/chat.postMessage', { body: { text: 'x' }, timeoutMs: 50 })).rejects.toThrow();
+      expect(Date.now() - t0).toBeLessThan(2000);
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+});
+
+describe('workflow definitions (M4)', () => {
+  it('refuses reserved run-context names for AI outputs', async () => {
+    const { definitionSchema } = await import('../src/modules/workflows');
+    const mk = (saveAs: string) => definitionSchema.safeParse({ trigger: { type: 'manual' }, steps: [{ type: 'ai', saveAs, prompt: 'p' }] }).success;
+    expect(mk('approved')).toBe(false);
+    expect(mk('trigger')).toBe(false);
+    expect(mk('brief')).toBe(true);
+  });
+});

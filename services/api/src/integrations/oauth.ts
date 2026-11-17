@@ -208,8 +208,12 @@ export async function accessToken(q: Q, conn: any): Promise<string> {
 }
 
 /** JSON fetch with a bearer token and readable errors. */
-export async function api(token: string, url: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) {
+/** Provider calls never hang a worker: past this, the request is abandoned (outcome unknown for sends). */
+export const PROVIDER_TIMEOUT_MS = 20_000;
+
+export async function api(token: string, url: string, init: { method?: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {}) {
   const r = await fetch(url, {
+    signal: AbortSignal.timeout(init.timeoutMs ?? PROVIDER_TIMEOUT_MS),
     method: init.method ?? (init.body ? 'POST' : 'GET'),
     headers: { authorization: `Bearer ${token}`, accept: 'application/json', ...(init.body ? { 'content-type': 'application/json; charset=utf-8' } : {}), ...(init.headers ?? {}) },
     body: init.body ? JSON.stringify(init.body) : undefined,

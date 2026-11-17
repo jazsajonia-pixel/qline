@@ -19,13 +19,15 @@ const WORKFLOW_TOOLS = ['tasks.create', 'tasks.update', 'notes.create', 'memory.
 
 /** Optional condition on any step: rendered with the run context; '', '0', 'false' or 'none' skips the step. */
 const when = { when: z.string().max(300).optional() };
+/** Run-context keys the engine owns. An AI step may not overwrite them (e.g. saveAs "approved" would forge an approval). */
+export const RESERVED_CONTEXT_KEYS = new Set(['approved', 'trigger']);
 
 const step = z.discriminatedUnion('type', [
   z.object({ type: z.literal('action'), ...when, tool: z.enum(WORKFLOW_TOOLS), args: z.record(z.string(), z.any()) }),
   z.object({ type: z.literal('approval'), ...when, title: z.string().min(1).max(200) }),
   z.object({ type: z.literal('notify'), ...when, title: z.string().min(1).max(200), body: z.string().max(4000).optional() }),
   // v1.2 automation steps
-  z.object({ type: z.literal('ai'), ...when, prompt: z.string().min(1).max(4000), saveAs: z.string().regex(/^[a-z_]{1,30}$/) }),
+  z.object({ type: z.literal('ai'), ...when, prompt: z.string().min(1).max(4000), saveAs: z.string().regex(/^[a-z_]{1,30}$/).refine((v) => !RESERVED_CONTEXT_KEYS.has(v), 'This name is reserved') }),
   z.object({ type: z.literal('slack'), ...when, text: z.string().min(1).max(4000) }),
   z.object({ type: z.literal('email'), ...when, to: z.string().max(320), subject: z.string().min(1).max(300), body: z.string().min(1).max(20000) }),
   z.object({ type: z.literal('calendar'), ...when, title: z.string().min(1).max(200), inDays: z.number().int().min(0).max(60).default(1), hourUtc: z.number().int().min(0).max(23).default(1), minutes: z.number().int().min(10).max(480).default(30) }),
@@ -210,7 +212,7 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
           await next();
           return { stop: false };
         }
-        if (s.type === 'email' && !ctx.approved) {
+        if (s.type === 'email' && ctx.approved !== true) {
           await record('failed', 'Sending email needs an approval step before it.');
           await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Missing approval step']);
           return { stop: true, run: { ...run, status: 'failed' } };
@@ -277,7 +279,7 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
         await notify(q, e.orgId, wf.owner_id, { category: 'workflow', title: `Workflow "${wf.name}" stopped`, body: decision.reason });
         return { stop: true, run: { ...run, status: 'failed' } };
       }
-      if (decision.decision === 'require_approval' && !ctx.approved) {
+      if (decision.decision === 'require_approval' && ctx.approved !== true) {
         await record('failed', 'This action needs an approval step before it.');
         await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Missing approval step']);
         return { stop: true, run: { ...run, status: 'failed' } };
@@ -314,16 +316,22 @@ async function finishExternalStep(e: EngineCtx, runId: string, x: NonNullable<St
   // Always record what happened, even if this worker was fenced out meanwhile (a person may be checking it).
   await withTenant({ orgId: e.orgId, userId: e.userId }, async (q) => {
     const run = await q.one('select status, current_step from workflow_runs where id=$1 for update', [runId]);
-    await q.exec(`update tool_calls set status=$2, result_summary=$3, finished_at=now() where id=$1`, [x.tcId, r.ok ? 'succeeded' : 'failed', r.summary]);
+    await q.exec(`update tool_calls set status=$2, result_summary=$3, finished_at=now() where id=$1`, [x.tcId, r.ok ? 'succeeded' : r.unknown ? 'unknown' : 'failed', r.summary]);
     if (!run || run.status !== 'running' || run.current_step !== x.index) return;
     await q.exec(`insert into workflow_run_steps (org_id, run_id, step_index, kind, status, summary) values ($1,$2,$3,$4,$5,$6)`, [
       e.orgId,
       runId,
       x.index,
       x.step.type,
-      r.ok ? (r.skipped ? 'skipped' : 'succeeded') : 'failed',
+      r.ok ? (r.skipped ? 'skipped' : 'succeeded') : r.unknown ? 'unknown' : 'failed',
       r.summary,
     ]);
+    if (!r.ok && r.unknown) {
+      // The provider may have done it (timeout, network error, 5xx after sending). A person checks; never resent.
+      await q.exec(`update workflow_runs set status='needs_attention', error=$2 where id=$1 and status='running'`, [runId, r.summary]);
+      await notify(q, e.orgId, x.ownerId, { category: 'workflow', title: `Check workflow "${x.wfName}"`, body: `${r.summary}. Check whether it happened before re-running.`, ref: { type: 'workflow_run', id: runId } });
+      return;
+    }
     if (!r.ok) {
       await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1 and status='running'`, [runId, r.summary]);
       await notify(q, e.orgId, x.ownerId, { category: 'workflow', title: `Workflow "${x.wfName}" stopped`, body: r.summary });
