@@ -230,7 +230,7 @@ d('AI CEO missions (integration)', () => {
     taskBehaviour.set('Task budget_t', 'search_then_submit');
     const m = await missionFor(A, { summary: 'Budget', tasks: [task('budget_t')] });
     await call(A, 'POST', `/missions/${m.id}/plan/decision`, { decision: 'approve', planVersion: 1 });
-    await asOrg(A, (q) => q.exec('update missions set budget_tokens=spent_tokens+10 where id=$1', [m.id]));
+    await asOrg(A, (q) => q.exec('update missions set budget_tokens=1000, spent_tokens=995 where id=$1', [m.id]));
     await drainAll();
     const r = await call(A, 'GET', `/missions/${m.id}`);
     expect(r.json.status).toBe('needs_attention');
