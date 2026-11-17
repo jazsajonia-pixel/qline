@@ -154,3 +154,68 @@ The lockfile also resolves `tmp@0.2.7`. This is above the patched version for CV
 PR #10 (`qa/v1.4-stabilization`) changes the Approvals and Background jobs segmented filters. Its CI run 44039339567 passed Flutter analyze, tests and release APK compilation, but did not publish an APK artifact and is not a physical-device test. PR #11's run 44060012661 also passed the APK build, but it does not contain PR #10's mobile UI changes.
 
 The physical-device gate must use a build of PR #10's exact head, not PR #11 or main. Install on the owner's Redmi Pad 2 (8 GB/256 GB) with a separate QA application id/signature so it does not overwrite the existing production installation. Verify Approvals and Background jobs filters at 320 dp / 200% text, touch/scroll behavior, navigation, light/dark theme, app resume, API loading/error/empty states, and no overflow or clipped labels. Capture device model, Android version, build SHA and screenshots. Do not mark this gate passed from widget tests or an APK compilation alone.
+
+## 9. Verified behavior, Better Auth fit for Option C, and the owner decision (2026-11-17, Perplexity Computer)
+
+### 9.1 Verified current behavior (PR #11)
+
+Covered by `services/api/test/api.integration.test.ts` against disposable PostgreSQL 16 in CI (see the PR for the run ID on the final head):
+
+| Behavior | Result |
+| --- | --- |
+| `GET /v1/me/sessions` lists only the caller's sessions, never the token, `Cache-Control: no-store` | Tested |
+| Another account's session id → 404 on revoke; it never appears in the caller's list | Tested |
+| Unauthenticated revoke → 401 | Tested |
+| Malformed/oversized id (>128 chars) → 400; unknown id → 404 | Tested |
+| Revoked session stops working on the next request (no cookie cache is configured, so every request reads the DB) | Tested |
+| Concurrent revokes of one session → only 200/404, never 5xx; session ends revoked; repeat revoke → 404 | Tested |
+| A user can revoke the session making the request | Tested |
+| Expired session (row still present, `expiresAt` in the past) → 401 and disappears from the list | Tested |
+| Concurrent *refresh* | Not applicable: the current design has no refresh credential. `updateAge` only extends `expiresAt`; the token never changes. |
+
+Remaining limitations of the current design (unchanged by PR #11):
+
+- One opaque bearer credential per device with a 30-day rolling expiry (`expiresIn` 30 d, `updateAge` 1 d). A stolen token stays valid while it keeps being used, until the user revokes it.
+- Better Auth stores `session.token` in plaintext in the `session` table. A database read exposes live credentials. Better Auth 1.7.25 has no option to hash first-party session tokens (only some plugins, such as magic-link, offer hashed storage).
+- No revoke-all endpoint in Qline's API yet (Better Auth's own `/v1/auth/revoke-other-sessions` and `/v1/auth/revoke-sessions` routes exist). No password-reset flow exists yet (no email provider), so `revokeSessionsOnPasswordReset` has nothing to act on.
+- The mobile app has no session-management screen yet; the API is ready for one.
+- `/v1/me/sessions*` is not rate-limited (Better Auth's limiter covers `/v1/auth/*` only). Low risk: the routes need a valid session.
+- The Android client already keeps the token in `flutter_secure_storage` (Keystore-backed), see `apps/mobile/lib/core/session.dart`.
+
+### 9.2 Can Better Auth 1.7.25 deliver Option C cleanly?
+
+Checked against the installed package source (`node_modules/better-auth/dist`):
+
+| Option C requirement | Better Auth 1.7.25 | Gap |
+| --- | --- | --- |
+| Short-lived access credential | `jwt` plugin issues signed JWTs (default 15 m, configurable) from a valid session, with JWKS | Supported, but the JWT is minted *from the long-lived session token*, so the session token remains the real credential. |
+| Single-use rotating refresh credential | Not available for first-party sessions (refresh tokens exist only for OAuth provider accounts) | **Must be built by Qline.** |
+| Refresh-token reuse detection and family revocation | Not available | **Must be built by Qline.** |
+| Hash refresh credential at rest | Not available for sessions | **Must be built by Qline** (keyed hash). |
+| Absolute + idle expiry | `expiresIn` + `updateAge` give rolling idle expiry only; `disableSessionRefresh` gives a fixed expiry | Absolute + idle together needs Qline logic. |
+| Device/session list and revoke | `listSessions`, `revokeSession`, `revokeOtherSessions` | Supported (PR #11). |
+| Secure Android storage | n/a (client) | Already in place. |
+
+**Verdict: APPROVE WITH CONDITIONS — keep Better Auth for identity and sign-in; do not bolt rotation onto Better Auth sessions.** Better Auth cannot provide Option C by configuration. The clean design is:
+
+1. Better Auth keeps password/Google sign-in and the `session` row as the *device record* (what the list/revoke API shows).
+2. A new Qline table `auth_refresh_tokens` (migration `0008_…` or later; note `0008` is reserved for v1.5 missions, so use the next free number) stores `family_id`, `session_id`, keyed `token_hash`, `issued_at`, `last_used_at`, `absolute_expires_at`, `consumed_at`, `revoked_at`.
+3. Sign-in returns a 10-minute signed access token (Better Auth `jwt` plugin or a Qline HMAC token) plus an opaque refresh token. `requireUser` validates the access token and checks the session row is still present (keeps instant revocation).
+4. `POST /v1/auth/refresh` consumes the refresh token with one conditional `UPDATE … WHERE consumed_at IS NULL RETURNING`, issues a new pair in the same transaction, and on reuse of a consumed token revokes the family and the session. A short grace window (for example 10 s, returning the already-issued pair) covers two app requests racing a refresh; the client also single-flights refresh.
+5. Idle expiry 7 d, absolute 30 d; password change, revoke and revoke-all delete the family.
+
+### 9.3 Migration, compatibility and trade-offs
+
+- **Migration:** additive table + new endpoint; no change to Better Auth tables. Existing 30-day tokens must keep working during rollout: accept the old bearer for one release (`QLINE_LEGACY_BEARER_UNTIL`), and have the app exchange it once for a refresh token on first launch. Then turn the legacy path off.
+- **Compatibility:** requires a new APK (the refresh flow lives in `api.dart`/`session.dart`). Old APKs keep working only while the legacy path is on; `QLINE_MIN_CLIENT_BUILD` can force the upgrade afterwards.
+- **Security gain:** a stolen access token is useful for ≤10 minutes; a stolen refresh token is detected on its next use by either party; credentials are hashed at rest.
+- **Cost:** roughly one milestone of work (endpoint, table, middleware, client refresh with single-flight, ~15 integration tests for rotation/replay/race/expiry/revoke), and more moving parts in the auth path. Users who are offline more than 7 days must sign in again.
+- **Cheaper interim (Option A):** `disableSessionRefresh: true` with a fixed expiry. One-line change, but no rotation, and it signs everyone out at the fixed time.
+
+### 9.4 Owner decision required
+
+Choose one (no auth configuration has been changed):
+
+1. **Option C as designed above** (recommended), scheduled as its own milestone after v1.5 P0.
+2. **Option A interim now** (state the fixed lifetime, for example 14 days), with Option C later.
+3. **Keep the current 30-day rolling session** and accept the risk in T12 for now; PR #11's list/revoke still ships.
