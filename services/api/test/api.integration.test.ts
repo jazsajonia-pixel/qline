@@ -13,7 +13,7 @@ delete process.env.NEON_AI_GATEWAY_TOKEN;
 
 const d = envFile ? describe : describe.skip;
 
-type Who = { token: string; email: string; org?: string };
+type Who = { token: string; email?: string; org?: string };
 let app: { fetch: (r: Request) => Promise<Response> };
 let ai: typeof import('@qline/ai');
 
@@ -72,7 +72,7 @@ d('Qline API (integration)', () => {
 
   it('lists only the signed-in user sessions and revokes a selected session without exposing tokens', async () => {
     const second = await call(null, 'POST', '/auth/sign-in/email', {
-      email: A.email,
+      email: A.email!,
       password: 'correct-horse-battery',
     });
     expect(second.status).toBe(200);
