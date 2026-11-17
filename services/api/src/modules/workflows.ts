@@ -11,6 +11,7 @@ import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { notify } from './work';
 import { buildDigest, RECIPES, runAutomationStep } from '../integrations/steps';
 import { enqueue, kick, registerJob, runInline, type JobCtx } from '../runtime/jobs';
+import { isStopped } from '../core/controls';
 
 // ---------------------------------------------------------------------------
 // Definition schema (docs/08 §3, linear MVP subset)
@@ -140,6 +141,14 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
         await q.exec(`update workflow_runs set status='completed', ended_at=now() where id=$1`, [runId]);
         await audit(q, { orgId: e.orgId, actorKind: 'workflow', actorId: wf.id, action: 'workflow.run.completed', targetRef: `workflow_run:${runId}`, detail: { dryRun: run.dry_run } });
         return { stop: true, run: { ...run, status: 'completed' } };
+      }
+      // v1.5 emergency stop: a live run stops before its next step (dry runs only simulate).
+      const stopped = !run.dry_run && (await isStopped(q, e.workspaceId));
+      if (stopped) {
+        await q.exec(`insert into workflow_run_steps (org_id, run_id, step_index, kind, status, summary) values ($1,$2,$3,'stop','failed','Emergency stop is on')`, [e.orgId, runId, i]);
+        await q.exec(`update workflow_runs set status='failed', error='Emergency stop is on', ended_at=now() where id=$1`, [runId]);
+        await audit(q, { orgId: e.orgId, actorKind: 'workflow', actorId: wf.id, action: 'workflow.run.stopped', targetRef: `workflow_run:${runId}`, outcome: 'denied' });
+        return { stop: true, run: { ...run, status: 'failed' } };
       }
       const s = render(def.steps[i], ctx) as Definition['steps'][number];
       const record = (status: string, summary: string, output?: unknown) =>
@@ -295,7 +304,7 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
       // action
       const tool = getTool(s.tool);
       const member = await q.one('select role from organization_members where org_id=$1 and user_id=$2 and status=$3', [e.orgId, wf.owner_id, 'active']);
-      const decision = decideTool({ tool: s.tool, allowlist: IMPLEMENTED_TOOLS as string[], userRole: (member?.role ?? 'viewer') as Role });
+      const decision = decideTool({ tool: s.tool, allowlist: IMPLEMENTED_TOOLS as string[], userRole: (member?.role ?? 'viewer') as Role, stopped });
       const parsed = tool?.schema.safeParse(s.args);
       if (!tool || !parsed?.success) {
         await record('failed', `Invalid step: ${s.tool}`);

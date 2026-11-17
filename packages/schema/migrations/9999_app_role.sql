@@ -16,3 +16,10 @@ grant execute on all functions in schema public to qline_app;
 revoke update, delete, truncate on audit_events from qline_app;
 -- Migrations bookkeeping is owner-only.
 revoke all on schema_migrations from qline_app;
+
+-- v1.5 missions: history is kept; the app may not delete mission rows (docs/13 §6).
+do $$ begin
+  if to_regclass('public.missions') is not null then
+    revoke delete, truncate on workspace_controls, missions, mission_plans, mission_tasks, mission_trace from qline_app;
+  end if;
+end $$;

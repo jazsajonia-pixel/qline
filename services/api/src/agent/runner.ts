@@ -2,6 +2,7 @@ import { ProviderError, type ChatMessage, type ToolCallReq } from '@qline/ai';
 import { decideTool, riskLabel, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { withTenant, type Q } from '../core/db';
+import { isStopped } from '../core/controls';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName } from './tools';
 
@@ -201,7 +202,9 @@ async function handleToolCall(
 ): Promise<{ forModel: unknown; parked?: boolean; refs?: unknown[] }> {
   const db = <T,>(fn: (q: Q) => Promise<T>) => withTenant({ orgId: ctx.orgId, userId: ctx.userId }, fn);
   const tool = getTool(name);
-  const decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened });
+  // v1.5: the emergency stop is read per call, so pulling it mid-run takes effect at the next tool.
+  const stopped = await db((q) => isStopped(q, ctx.workspaceId));
+  const decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened, stopped });
   const idem = `run:${run.id}:${index}`;
   let args: unknown = {};
   try {

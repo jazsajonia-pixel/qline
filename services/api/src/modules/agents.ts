@@ -5,6 +5,7 @@ import { canDecideApproval, can, TOOL_POLICIES, type Risk } from '@qline/policy'
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import { withTenant } from '../core/db';
+import { isStopped } from '../core/controls';
 import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, query } from '../core/validate';
 import { executeRun, makeEmitter } from '../agent/runner';
@@ -265,6 +266,10 @@ agentRoutes.post('/approvals/:id/decision', async (c) => {
 
 export async function decideApproval(t: TenantCtx, approvalId: string, decision: 'approve' | 'reject', note?: string) {
   if (!t.human) throw forbidden('Approval decisions must come from a person.');
+  // v1.5 emergency stop: nothing approved runs while it is on (the request stays pending; rejecting is fine).
+  if (decision === 'approve' && (await tx(t, (q) => isStopped(q, t.workspaceId)))) {
+    throw new ApiError(409, 'EMERGENCY_STOP', 'Emergency stop is on', 'Turn off the emergency stop before approving actions.');
+  }
   // Lock the row so a double tap cannot execute twice.
   const claimed = await tx(t, async (q) => {
     const a = await q.one('select * from approval_requests where id=$1 for update', [approvalId]);

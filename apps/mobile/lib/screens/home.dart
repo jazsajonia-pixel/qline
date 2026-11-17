@@ -5,6 +5,7 @@ import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'approvals.dart';
+import 'missions.dart';
 import 'business.dart';
 import 'integrations.dart';
 import 'leads.dart';
@@ -53,6 +54,22 @@ class HomeScreen extends ConsumerWidget {
                 ]),
               ),
             ],
+            const SizedBox(height: 12),
+            QCard(
+              onTap: () => push(context, const MissionsScreen()),
+              child: Row(children: [
+                Icon(Icons.flag_outlined, color: q.halo),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('AI CEO missions', style: qs(15, w: FontWeight.w600, c: q.text)),
+                    const SizedBox(height: 2),
+                    Text('Give a goal. Approve the plan. Agents do the work.', style: qs(13, c: q.text2)),
+                  ]),
+                ),
+                Icon(Icons.chevron_right, color: q.text3),
+              ]),
+            ),
             const _LeadsToday(),
             if (approvals.isNotEmpty) ...[
               SectionLabel('Waiting for you', trailing: TextButton(onPressed: () => push(context, const ApprovalsScreen()), child: Text('See all', style: qs(13, w: FontWeight.w600, c: q.text2)))),
