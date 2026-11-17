@@ -28,7 +28,7 @@ From each provider, keep the **Client ID** and **Client secret**. Don't paste th
 6. **Clients → Create client**:
    - Type: **Web application**
    - Name: Qline
-   - Authorized redirect URI: `…/v1/integrations/google/callback` (use the full callback base above)
+   - Authorized redirect URI: `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/google/callback`
    - Copy the Client ID and secret.
 
 Google's limits, which Qline can't get around:
@@ -40,7 +40,9 @@ Google's limits, which Qline can't get around:
 
 1. Open https://api.slack.com/apps and choose **Create New App → From scratch**. Name it **Qline** and pick your workspace.
 2. **OAuth & Permissions**:
-   - Redirect URL: `…/v1/integrations/slack/callback`
+   - **Redirect URLs → Add New Redirect URL**, paste exactly
+     `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/slack/callback`,
+     tap **Add**, then **Save URLs** (the URL is not kept until you save). The Settings → Integration setup screen shows the same URL with a copy button.
    - Bot token scopes: `chat:write`, `chat:write.public`, `channels:read`
 3. **Manage Distribution → Activate public distribution**, so other users' workspaces can connect.
 4. **Basic Information**: copy the **Client ID** and **Client Secret**.
@@ -50,7 +52,7 @@ Google's limits, which Qline can't get around:
 1. Open https://entra.microsoft.com and go to **App registrations → New registration**.
    - Name: Qline
    - Supported account types: **Any Entra ID tenant + personal Microsoft accounts**
-   - Redirect URI (Web): `…/v1/integrations/microsoft/callback`
+   - Redirect URI (Web): `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/microsoft/callback`
 2. **Certificates & secrets → New client secret**. Copy the **Value** right away.
 3. **API permissions → Microsoft Graph → Delegated**:
    - `offline_access`, `openid`, `email`, `User.Read`, `Mail.Read`, `Mail.Send`, `Calendars.ReadWrite`
