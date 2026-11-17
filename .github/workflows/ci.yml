@@ -10,6 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: qline_test
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qline_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,6 +33,30 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test:unit
+      - name: Configure isolated PostgreSQL integration environment
+        run: |
+          APP_DB_PASSWORD="$(openssl rand -hex 24)"
+          AUTH_SECRET="$(openssl rand -hex 32)"
+          DATA_KEY="$(openssl rand -hex 32)"
+          {
+            echo "APP_DATABASE_URL=postgresql://qline_app:${APP_DB_PASSWORD}@127.0.0.1:5432/qline_test"
+            echo "BETTER_AUTH_SECRET=${AUTH_SECRET}"
+            echo "QLINE_DATA_KEY=${DATA_KEY}"
+            echo "NODE_ENV=test"
+          } > .qline-test.env
+          echo "DATABASE_URL_OWNER=postgresql://postgres@127.0.0.1:5432/qline_test" >> "$GITHUB_ENV"
+          echo "APP_DB_PASSWORD=${APP_DB_PASSWORD}" >> "$GITHUB_ENV"
+          echo "QLINE_TEST_ENV=$GITHUB_WORKSPACE/.qline-test.env" >> "$GITHUB_ENV"
+      - name: Apply schema migrations to disposable PostgreSQL
+        run: npm run db:migrate
+      - name: Verify least-privilege runtime role
+        run: |
+          role_flags="$(psql "$DATABASE_URL_OWNER" -AtF '|' -c "select rolsuper, rolbypassrls, rolcreaterole, rolcreatedb from pg_roles where rolname = 'qline_app'")"
+          test "$role_flags" = "f|f|f|f"
+          owned_tables="$(psql "$DATABASE_URL_OWNER" -Atc "select count(*) from pg_tables where schemaname = 'public' and tableowner = 'qline_app'")"
+          test "$owned_tables" = "0"
+      - name: Run API and durable-runtime database integration tests
+        run: npm run test:integration -- --testTimeout=180000
       - run: npm run build:api
       # Publish a short-lived deployment handoff branch because this repo's Actions artifact quota is full.
       - if: github.event_name == 'workflow_dispatch'
