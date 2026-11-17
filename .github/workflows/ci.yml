@@ -39,6 +39,8 @@ jobs:
 
   mobile:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: apps/mobile
@@ -56,6 +58,29 @@ jobs:
       - run: flutter test
       # Unsigned-by-upload-key build (falls back to debug keys) — proves the release build compiles.
       - run: flutter build apk --release --dart-define=QLINE_BUILD=${{ github.run_number }}
+      - name: Stage QA APK for physical-device testing
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qa/pr10-physical-device-build'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const apkPath = 'apps/mobile/build/app/outputs/flutter-apk/app-release.apk';
+            const apkBase64 = fs.readFileSync(apkPath).toString('base64');
+            const branch = `qa-artifacts/pr10-${context.sha.slice(0, 8)}`;
+            const { data: baseCommit } = await github.rest.git.getCommit({ owner, repo, commit_sha: context.sha });
+            const { data: blob } = await github.rest.git.createBlob({ owner, repo, content: apkBase64, encoding: 'base64' });
+            const { data: tree } = await github.rest.git.createTree({
+              owner, repo, base_tree: baseCommit.tree.sha,
+              tree: [{ path: 'qa-artifacts/qline-pr10-physical-test.apk', mode: '100644', type: 'blob', sha: blob.sha }]
+            });
+            const { data: commit } = await github.rest.git.createCommit({
+              owner, repo, message: 'build: stage PR10 physical QA APK',
+              tree: tree.sha, parents: [context.sha]
+            });
+            await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: commit.sha });
+            core.info(`Staged QA APK on ${branch} at ${commit.sha}`);
 
   production-smoke:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
