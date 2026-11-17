@@ -104,7 +104,8 @@ void main() {
     final api = mockApi(sent, (r) => mission('running', tasks: tasks));
     await t.pumpWidget(app(api, const MissionDetail(id: 'm1'), textScale: 1.3));
     await t.pumpAndSettle();
-    await t.scrollUntilVisible(find.text('Accept'), 200, scrollable: find.byWidgetPredicate((w) => w is Scrollable && w.axisDirection == AxisDirection.down).first);
+    await t.ensureVisible(find.text('Accept'));
+    await t.pumpAndSettle();
     await t.tap(find.text('Accept'));
     await t.pumpAndSettle();
     expect(sent, contains('POST /v1/mission-tasks/t2/review {"decision":"accept"}'));
