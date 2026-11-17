@@ -7,6 +7,7 @@ import 'package:http/testing.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:qline/core/api.dart';
 import 'package:qline/core/session.dart';
+import 'package:qline/screens/approvals.dart';
 import 'package:qline/screens/operations.dart';
 import 'package:qline/ui/theme.dart';
 import 'package:qline/ui/widgets.dart';
@@ -23,8 +24,17 @@ Api mockApi(Sent sent, Object? Function(http.Request r) reply) => Api(
       }),
     );
 
-Widget app(Api api, Widget home, {bool light = false}) =>
-    ProviderScope(overrides: [apiProvider.overrideWithValue(api)], child: MaterialApp(theme: buildTheme(light), home: home));
+Widget app(Api api, Widget home, {bool light = false, double textScale = 1}) => ProviderScope(
+      overrides: [apiProvider.overrideWithValue(api)],
+      child: MaterialApp(
+        theme: buildTheme(light),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
+        home: home,
+      ),
+    );
 
 Map<String, dynamic> run({String status = 'needs_attention', Map? attention, bool canResolve = true, bool canCancel = true, List jobs = const []}) => {
       'id': 'r1',
@@ -48,6 +58,22 @@ Map<String, dynamic> run({String status = 'needs_attention', Map? attention, boo
     };
 
 void main() {
+  testWidgets('approval and background-job filters stay usable at narrow widths and 200% text', (t) async {
+    await t.binding.setSurfaceSize(const Size(320, 800));
+    addTearDown(() => t.binding.setSurfaceSize(null));
+    final api = mockApi([], (_) => {'items': []});
+
+    await t.pumpWidget(app(api, const JobsScreen(), textScale: 2));
+    await t.pumpAndSettle();
+    expect(t.takeException(), isNull);
+    expect(find.ancestor(of: find.byType(SegmentedButton<String>), matching: find.byType(SingleChildScrollView)), findsOneWidget);
+
+    await t.pumpWidget(app(api, const ApprovalsScreen(), textScale: 2));
+    await t.pumpAndSettle();
+    expect(t.takeException(), isNull);
+    expect(find.ancestor(of: find.byType(SegmentedButton<String>), matching: find.byType(SingleChildScrollView)), findsOneWidget);
+  });
+
   testWidgets('status pill covers every runtime state with a word and an icon', (t) async {
     const states = ['queued', 'running', 'waiting_approval', 'needs_attention', 'completed', 'succeeded', 'failed', 'dead', 'cancelled', 'unknown', 'executing', 'skipped'];
     await t.pumpWidget(MaterialApp(theme: buildTheme(false), home: Scaffold(body: Wrap(children: [for (final s in states) StatusPill(s)]))));

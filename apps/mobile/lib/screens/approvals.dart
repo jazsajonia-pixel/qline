@@ -35,10 +35,13 @@ class _ApprovalsState extends State<ApprovalsScreen> {
       body: Column(children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-          child: SegmentedButton<String>(
-            segments: const [ButtonSegment(value: 'pending', label: Text('Waiting')), ButtonSegment(value: 'all', label: Text('History'))],
-            selected: {_status},
-            onSelectionChanged: (s) => setState(() => _status = s.first),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SegmentedButton<String>(
+              segments: const [ButtonSegment(value: 'pending', label: Text('Waiting')), ButtonSegment(value: 'all', label: Text('History'))],
+              selected: {_status},
+              onSelectionChanged: (s) => setState(() => _status = s.first),
+            ),
           ),
         ),
         Expanded(
