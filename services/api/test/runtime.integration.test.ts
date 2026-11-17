@@ -220,7 +220,7 @@ d('Durable runtime (integration)', () => {
     const { id } = await add(A, 'test.always', {}, { maxAttempts: 1 });
     await drainAll();
     expect((await call(B, 'GET', `/jobs/${id}`)).status).toBe(404);
-    expect((await call(B, 'POST', `/jobs/${id}/retry`)).status).toBe(409);
+    expect((await call(B, 'POST', `/jobs/${id}/retry`)).status).toBe(404);
     expect((await call(B, 'GET', '/jobs')).json.items.map((x: any) => x.id)).not.toContain(id);
     const seenByB = await asOrg(B, (q) => q.one('select count(*)::int n from jobs where org_id=$1', [A.org]));
     expect(seenByB.n).toBe(0);
@@ -306,6 +306,163 @@ d('Durable runtime (integration)', () => {
     expect(r.status).toBe('needs_attention');
     const calls = await asOrg(A, (q) => q.many('select status from tool_calls where workflow_run_id=$1', [run.id]));
     expect(calls.map((c: any) => c.status)).toEqual(['unknown']);
+  });
+
+  // M5: supervised operations API. Every control the mobile Ops UI shows maps to one of these permission-checked calls.
+  it('M5: run history views, run detail (approvals, actions, jobs, attention) and role/tenant checks', async () => {
+    const wf = await call(A, 'POST', '/workflows', { name: 'Ops history', definition: { trigger: { type: 'manual' }, steps: [{ type: 'approval', title: 'Go?' }, { type: 'notify', title: 'done' }] } });
+    expect((await call(A, 'POST', `/workflows/${wf.json.id}/publish`)).status).toBe(200);
+    expect((await call(A, 'POST', `/workflows/${wf.json.id}/enable`)).status).toBe(200);
+    const started = await call(A, 'POST', `/workflows/${wf.json.id}/run`, { data: {} });
+    expect(started.status).toBe(201);
+    await drainAll();
+    const runId = started.json.id;
+    const needs = await call(A, 'GET', '/workflow-runs?view=needs_you');
+    expect(needs.status).toBe(200);
+    const row = needs.json.items.find((x: any) => x.id === runId);
+    expect(row.status).toBe('waiting_approval');
+    expect(row.workflow_name).toBe('Ops history');
+    expect(row.pending_approval_id).toBeTruthy();
+    expect(needs.json.counts.needs_you).toBeGreaterThanOrEqual(1);
+    expect((await call(A, 'GET', '/workflow-runs?view=done')).json.items.map((x: any) => x.id)).not.toContain(runId);
+    expect((await call(A, 'GET', `/workflow-runs?view=all&workflowId=${wf.json.id}`)).json.items.map((x: any) => x.id)).toEqual([runId]);
+    expect((await call(A, 'GET', '/workflow-runs?view=bogus')).status).toBe(400);
+
+    const det = await call(A, 'GET', `/workflow-runs/${runId}`);
+    expect(det.json.workflow.name).toBe('Ops history');
+    expect(det.json.approvals.map((a: any) => a.status)).toEqual(['pending']);
+    expect(det.json.permissions).toEqual({ canCancel: true, canResolve: false });
+    expect(det.json.jobs.length).toBeGreaterThanOrEqual(1);
+    expect(det.json.attention).toBeNull();
+
+    // Tenant isolation: B sees none of it.
+    expect((await call(B, 'GET', `/workflow-runs/${runId}`)).status).toBe(404);
+    expect((await call(B, 'GET', '/workflow-runs?view=all')).json.items.map((x: any) => x.id)).not.toContain(runId);
+    expect((await call(B, 'POST', `/workflow-runs/${runId}/cancel`)).status).toBe(404);
+    expect((await call(B, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'retry' })).status).toBe(404);
+
+    // A viewer may read history but sees no job internals and gets 403 on every control.
+    const inv = await call(A, 'POST', '/invitations', { role: 'viewer' });
+    const V: Who = await signUp('Vic');
+    expect((await call(V, 'POST', '/invitations/accept', { code: inv.json.code })).status).toBe(200);
+    V.org = A.org;
+    const vd = await call(V, 'GET', `/workflow-runs/${runId}`);
+    expect(vd.status).toBe(200);
+    expect(vd.json.jobs).toEqual([]);
+    expect(vd.json.permissions).toEqual({ canCancel: false, canResolve: false });
+    expect((await call(V, 'POST', `/workflow-runs/${runId}/cancel`)).status).toBe(403);
+    expect((await call(V, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'retry' })).status).toBe(403);
+    expect((await call(V, 'GET', '/jobs?status=problem')).status).toBe(403);
+    expect((await call(V, 'POST', `/jobs/${det.json.jobs[0].id}/retry`)).status).toBe(403);
+
+    expect((await call(A, 'POST', `/workflow-runs/${runId}/cancel`)).status).toBe(200);
+    expect((await call(A, 'GET', `/workflow-runs/${runId}`)).json.permissions.canCancel).toBe(false);
+  });
+
+  /** A run parked at an external Slack step whose outcome is unknown (interrupted mid-send). */
+  async function stuckSlackRun(name: string) {
+    const def = { trigger: { type: 'manual' }, steps: [{ type: 'approval', title: 'Post?' }, { type: 'slack', text: 'hello' }, { type: 'notify', title: 'after' }] };
+    const wf = await call(A, 'POST', '/workflows', { name, definition: def });
+    await asOrg(A, (q) => q.exec(`insert into workflow_versions (org_id, workflow_id, version, definition, created_by) values ($1,$2,1,$3,$4)`, [A.org, wf.json.id, JSON.stringify(def), A.userId]));
+    const run = await asOrg(A, (q) =>
+      q.one(`insert into workflow_runs (org_id, workflow_id, version, trigger_kind, context, initiated_by, status, current_step) values ($1,$2,1,'manual','{"approved":true}',$3,'running',1) returning id`, [A.org, wf.json.id, A.userId]),
+    );
+    await asOrg(A, (q) =>
+      q.exec(`insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,'slack.post','{}','L3','require_approval',$3,'executing')`, [A.org, run.id, `wf:${run.id}:1`]),
+    );
+    await asOrg(A, (q) => wfm.enqueueAdvance(q, { orgId: A.org!, workspaceId: wf.json.workspace_id, userId: A.userId! }, run.id, 'start'));
+    await drainAll();
+    expect((await asOrg(A, (q) => q.one('select status from workflow_runs where id=$1', [run.id]))).status).toBe('needs_attention');
+    return { runId: run.id as string, workflowId: wf.json.id as string };
+  }
+
+  it('M5: an unknown-outcome step needs a person: "retry" is refused; "it happened" moves on without resending', async () => {
+    const { runId } = await stuckSlackRun('Unknown happened');
+    const det = await call(A, 'GET', `/workflow-runs/${runId}`);
+    expect(det.json.attention).toMatchObject({ kind: 'unknown_outcome', step: 1, tool: 'slack.post' });
+    expect(det.json.permissions.canResolve).toBe(true);
+    expect((await call(A, 'GET', '/workflow-runs?view=needs_you')).json.items.find((x: any) => x.id === runId).outcome_unknown).toBe(true);
+    // A job retry is not a way around the check either.
+    const advJob = det.json.jobs.find((j: any) => j.kind === 'workflow.advance');
+    await asOrg(A, (q) => q.exec(`update jobs set status='dead', finished_at=now() where id=$1`, [advJob.id]));
+    const listed = (await call(A, 'GET', '/jobs?status=problem')).json.items.find((j: any) => j.id === advJob.id);
+    expect(listed.retry_safe).toBe(false);
+    expect(listed.run_id).toBe(runId);
+    const rj = await call(A, 'POST', `/jobs/${advJob.id}/retry`);
+    expect(rj.status).toBe(409);
+    expect(rj.json.code).toBe('RETRY_UNSAFE');
+    const rr = await call(A, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'retry' });
+    expect(rr.status).toBe(409);
+    expect(rr.json.code).toBe('OUTCOME_UNKNOWN');
+    expect((await call(A, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'maybe' })).status).toBe(400);
+
+    const ok = await call(A, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'happened' });
+    expect(ok.status).toBe(200);
+    await drainAll();
+    const r = await asOrg(A, (q) => q.one('select status from workflow_runs where id=$1', [runId]));
+    expect(r.status).toBe('completed');
+    const calls = await asOrg(A, (q) => q.many(`select status, result_summary from tool_calls where workflow_run_id=$1 and tool='slack.post'`, [runId]));
+    expect(calls).toEqual([{ status: 'succeeded', result_summary: 'Confirmed by a person: it happened' }]);
+    const aud = await asOrg(A, (q) => q.one(`select detail from audit_events where action='workflow.run.resolved' and target_ref=$1`, [`workflow_run:${runId}`]));
+    expect(aud.detail.outcome).toBe('happened');
+    // A second resolve is refused (the run is no longer stuck).
+    expect((await call(A, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'happened' })).status).toBe(409);
+  });
+
+  it('M5: "it did not happen" voids the old intent and re-runs the step through the normal gate', async () => {
+    const { runId } = await stuckSlackRun('Unknown not happened');
+    const res = await call(A, 'POST', `/workflow-runs/${runId}/resolve`, { outcome: 'not_happened' });
+    expect(res.status).toBe(200);
+    await drainAll();
+    const calls = await asOrg(A, (q) => q.many(`select status, idempotency_key from tool_calls where workflow_run_id=$1 and tool='slack.post' order by created_at`, [runId]));
+    expect(calls.length).toBe(2);
+    expect(calls[0].status).toBe('failed');
+    expect(calls[0].idempotency_key).toMatch(new RegExp(`^wf:${runId}:1:void:`));
+    expect(calls[1].idempotency_key).toBe(`wf:${runId}:1`);
+    expect(calls[0].status).toBe('failed');
+    // The step really ran again (a new intent). No Slack connection in tests, so it is recorded as skipped.
+    const second = await asOrg(A, (q) => q.one(`select status, result_summary from tool_calls where idempotency_key=$1`, [`wf:${runId}:1`]));
+    expect(second).toEqual({ status: 'succeeded', result_summary: 'Skipped: Slack is not connected or no channel is picked' });
+    const r = await asOrg(A, (q) => q.one('select status from workflow_runs where id=$1', [runId]));
+    expect(r.status).toBe('completed');
+  });
+
+  it('M5: a stopped run (retries exhausted) resumes via resolve "retry" or a job retry, and never skips its approval', async () => {
+    const wf = await call(A, 'POST', '/workflows', { name: 'Stopped', definition: { trigger: { type: 'manual' }, steps: [{ type: 'approval', title: 'Go?' }, { type: 'notify', title: 'done' }] } });
+    await asOrg(A, (q) =>
+      q.exec(`insert into workflow_versions (org_id, workflow_id, version, definition, created_by) values ($1,$2,1,$3,$4)`, [A.org, wf.json.id, JSON.stringify({ trigger: { type: 'manual' }, steps: [{ type: 'approval', title: 'Go?' }, { type: 'notify', title: 'done' }] }), A.userId]),
+    );
+    const mk = async () => {
+      const run = await asOrg(A, (q) => q.one(`insert into workflow_runs (org_id, workflow_id, version, trigger_kind, context, initiated_by, status) values ($1,$2,1,'manual','{}',$3,'running') returning id`, [A.org, wf.json.id, A.userId]));
+      const { id } = await add(A, 'workflow.advance', { runId: run.id, workspaceId: wf.json.workspace_id, userId: A.userId }, { maxAttempts: 1 });
+      await J.claimById(id, 'doomed');
+      await asOrg(A, (q) => q.exec(`update jobs set lease_until=now() - interval '1 second' where id=$1`, [id]));
+      await J.claim('sweeper', 1);
+      expect((await job(A, id)).status).toBe('dead');
+      return { runId: run.id as string, jobId: id };
+    };
+    // Path 1: resolve "retry". "happened" is refused: there is nothing to confirm.
+    const a = await mk();
+    expect((await call(A, 'GET', `/workflow-runs/${a.runId}`)).json.attention).toEqual({ kind: 'stopped', step: 0 });
+    expect((await call(A, 'POST', `/workflow-runs/${a.runId}/resolve`, { outcome: 'happened' })).json.code).toBe('NOTHING_TO_CONFIRM');
+    expect((await call(A, 'POST', `/workflow-runs/${a.runId}/resolve`, { outcome: 'retry' })).status).toBe(200);
+    await drainAll();
+    expect((await asOrg(A, (q) => q.one('select status from workflow_runs where id=$1', [a.runId]))).status).toBe('waiting_approval');
+    // Path 2 (regression: a dead advance job retry used to be a silent no-op): the job retry resumes the run.
+    const b = await mk();
+    const listed = (await call(A, 'GET', '/jobs?status=problem')).json.items.find((j: any) => j.id === b.jobId);
+    expect(listed.retry_safe).toBe(true);
+    expect((await call(A, 'POST', `/jobs/${b.jobId}/retry`)).status).toBe(200);
+    await drainAll();
+    expect((await asOrg(A, (q) => q.one('select status from workflow_runs where id=$1', [b.runId]))).status).toBe('waiting_approval');
+    expect((await job(A, b.jobId)).status).toBe('succeeded');
+    // Unknown job kinds are labelled unsafe and refused.
+    const u = await add(A, 'no.such.kind', {}, { maxAttempts: 1 });
+    await drainAll();
+    const ul = (await call(A, 'GET', '/jobs?status=problem')).json.items.find((j: any) => j.id === u.id);
+    expect(ul.retry_safe).toBe(false);
+    expect((await call(A, 'POST', `/jobs/${u.id}/retry`)).status).toBe(409);
+    expect((await call(A, 'GET', '/jobs?status=active')).status).toBe(200);
   });
 
   it('cancels a workflow run waiting for approval and expires its approval', async () => {

@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'operations.dart';
 
 /// Ready-made workflow recipes. Every action that changes data is preceded by an
 /// approval step, which the server enforces at publish time.
@@ -142,13 +143,14 @@ class WorkflowsScreen extends ConsumerWidget {
         builder: (context, list, reload) => RefreshIndicator(
           onRefresh: reload,
           child: ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 96), children: [
+            const OpsStrip(),
             _Automations(canManage: canManage),
             SectionLabel('Your workflows${list.isEmpty ? '' : ' (${list.length})'}'),
             if (list.isEmpty)
               EmptyState(
                 icon: Icons.account_tree_outlined,
                 title: 'No workflows yet',
-                body: 'Turn on a ready-made automation above, or start from a recipe. Workflows run on the server every 15 minutes and ask before risky actions.',
+                body: 'Turn on a ready-made automation above, or start from a recipe. Workflows run on the server on their schedule or trigger, and ask before risky actions.',
                 action: canManage ? QButton('Browse recipes', onPressed: () => _pickRecipe(context, ref)) : null,
               )
             else
@@ -263,58 +265,11 @@ class WorkflowDetail extends ConsumerWidget {
                 if (published && manual) QButton('Run now', icon: Icons.play_arrow, onPressed: () => run('run', 'Started')),
               ]),
             ],
-            SectionLabel('Runs (${runs.length})'),
+            SectionLabel('Recent runs', trailing: runs.isEmpty ? null : TextButton(onPressed: () => push(context, RunsScreen(initialView: 'all', workflowId: id)), child: Text('All runs', style: qs(13, w: FontWeight.w600, c: q.text2)))),
             if (runs.isEmpty) Text('No runs yet. Try a dry run first.', style: qs(14, c: q.text3)),
-            for (final r in runs)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                onTap: () => push(context, WorkflowRunDetail(id: r['id'] as String)),
-                leading: StatusPill(r['status'] as String),
-                title: Text('${r['dry_run'] == true ? 'Dry run' : cap(r['trigger_kind'] as String? ?? 'run')} · ${ago(r['started_at'] as String?)}', style: qs(14, c: q.text)),
-                subtitle: r['error'] != null ? Text(r['error'] as String, style: qs(12, c: q.bad)) : null,
-                trailing: Icon(Icons.chevron_right, color: q.text3),
-              ),
+            for (final r in runs.take(5))
+              Padding(padding: const EdgeInsets.only(bottom: 8), child: RunTile(run: r, showWorkflow: false, onReturn: reload)),
           ]);
-        },
-      ),
-    );
-  }
-}
-
-class WorkflowRunDetail extends StatelessWidget {
-  const WorkflowRunDetail({super.key, required this.id});
-  final String id;
-  @override
-  Widget build(BuildContext context) {
-    final q = context.q;
-    return Page2(
-      title: 'Run',
-      body: Load<Map>(
-        fetch: (api) async => await api.get('/workflow-runs/$id') as Map,
-        builder: (context, r, reload) {
-          final steps = items(r, 'steps');
-          return RefreshIndicator(
-            onRefresh: reload,
-            child: ListView(padding: const EdgeInsets.all(16), children: [
-              Row(children: [StatusPill(r['status'] as String), const SizedBox(width: 10), if (r['dry_run'] == true) Text('Dry run — no changes made', style: qs(13, c: q.text2))]),
-              if (r['error'] != null) Padding(padding: const EdgeInsets.only(top: 10), child: Text(r['error'] as String, style: qs(14, c: q.bad))),
-              const SectionLabel('Steps'),
-              if (steps.isEmpty) Text('No steps recorded.', style: qs(14, c: q.text3)),
-              for (final s in steps)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: QCard(
-                    child: Row(children: [
-                      Icon(stepIcon(s['kind'] as String?), size: 18, color: q.text2),
-                      const SizedBox(width: 10),
-                      Expanded(child: Text('${(s['step_index'] as num) + 1}. ${s['summary'] ?? s['kind']}', style: qs(14, c: q.text))),
-                      StatusPill(s['status'] as String),
-                    ]),
-                  ),
-                ),
-              if (r['status'] == 'waiting_approval') Text('Waiting for an approval. Open Approvals from the top bar to continue.', style: qs(13, c: q.text2)),
-            ]),
-          );
         },
       ),
     );

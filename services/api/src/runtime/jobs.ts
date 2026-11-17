@@ -91,6 +91,8 @@ export interface JobOptions {
 }
 const handlers = new Map<string, JobHandler>();
 const options = new Map<string, JobOptions>();
+export const getHandler = (kind: string) => handlers.get(kind);
+
 export function registerJob(kind: string, h: JobHandler, opts: JobOptions = {}) {
   handlers.set(kind, h);
   options.set(kind, opts);

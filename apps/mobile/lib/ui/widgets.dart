@@ -69,10 +69,11 @@ class StatusPill extends StatelessWidget {
     final s = status.toLowerCase();
     final (IconData icon, Color col, String word) = switch (s) {
       'done' || 'completed' || 'succeeded' || 'approved' || 'active' || 'confirmed' || 'ok' || 'published' || 'enabled' || 'applied' => (Icons.check_circle_outline, q.ok, _cap(s)),
-      'pending' || 'awaiting_approval' || 'waiting' || 'draft' || 'proposed' || 'suggested' || 'mapping' || 'uploaded' => (Icons.schedule, q.warn, _cap(s.replaceAll('_', ' '))),
-      'failed' || 'rejected' || 'error' || 'cancelled' || 'canceled' || 'expired' || 'rolled_back' => (Icons.error_outline, q.bad, _cap(s.replaceAll('_', ' '))),
-      'paused' || 'disabled' || 'superseded' || 'archived' || 'not_configured' => (Icons.pause_circle_outline, q.text3, _cap(s.replaceAll('_', ' '))),
-      'running' || 'in_progress' || 'open' || 'todo' => (Icons.radio_button_unchecked, q.info, _cap(s.replaceAll('_', ' '))),
+      'pending' || 'awaiting_approval' || 'waiting_approval' || 'queued' || 'waiting' || 'draft' || 'proposed' || 'suggested' || 'mapping' || 'uploaded' => (Icons.schedule, q.warn, _cap(s.replaceAll('_', ' '))),
+      'failed' || 'dead' || 'rejected' || 'error' || 'cancelled' || 'canceled' || 'expired' || 'rolled_back' => (Icons.error_outline, q.bad, _cap(s.replaceAll('_', ' '))),
+      'needs_attention' || 'unknown' => (Icons.report_outlined, q.warn, s == 'unknown' ? 'Outcome unknown' : 'Needs a check'),
+      'paused' || 'disabled' || 'skipped' || 'superseded' || 'archived' || 'not_configured' => (Icons.pause_circle_outline, q.text3, _cap(s.replaceAll('_', ' '))),
+      'running' || 'executing' || 'in_progress' || 'open' || 'todo' => (Icons.radio_button_unchecked, q.info, _cap(s.replaceAll('_', ' '))),
       _ => (Icons.circle_outlined, q.text2, _cap(s.replaceAll('_', ' '))),
     };
     return Container(
