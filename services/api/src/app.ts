@@ -59,6 +59,14 @@ app.onError((err, c) => {
       { 'content-type': 'application/problem+json' },
     );
   }
+  // Postgres 22P02 = malformed value for its type (e.g. "not-a-uuid" as an id): a client error, not a 500 (M4 Neon e2e).
+  if ((err as { code?: string }).code === '22P02') {
+    return c.json(
+      { type: 'https://qline.app/errors/invalid_input', title: 'Invalid identifier or value', status: 400, code: 'INVALID_INPUT', detail: 'An id or value in this request is not in the expected format.', correlationId },
+      400,
+      { 'content-type': 'application/problem+json' },
+    );
+  }
   console.error(JSON.stringify({ level: 'error', correlationId, path: c.req.path, message: (err as Error).message, stack: (err as Error).stack?.split('\n').slice(0, 4) }));
   return c.json({ type: 'about:blank', title: 'Something went wrong', status: 500, code: 'INTERNAL', correlationId }, 500, { 'content-type': 'application/problem+json' });
 });

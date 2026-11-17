@@ -1,16 +1,16 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { decideTool, TOOL_POLICIES, type Role } from '@qline/policy';
+import { can, decideTool, TOOL_POLICIES, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import { withTenant, type Q } from '../core/db';
 import { ApiError, badRequest, notFound } from '../core/errors';
 import { onEvents, type DomainEvent } from '../core/events';
-import { body } from '../core/validate';
+import { body, limitParam, query } from '../core/validate';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { notify } from './work';
 import { buildDigest, RECIPES, runAutomationStep } from '../integrations/steps';
-import { enqueue, registerJob, runInline, type JobCtx } from '../runtime/jobs';
+import { enqueue, kick, registerJob, runInline, type JobCtx } from '../runtime/jobs';
 
 // ---------------------------------------------------------------------------
 // Definition schema (docs/08 §3, linear MVP subset)
@@ -432,6 +432,46 @@ export async function cancelWorkflowRun(t: TenantCtx, runId: string) {
   });
 }
 
+/**
+ * Lets a person settle a run that needs attention (docs/12 §7, M5):
+ *  - an external step with an unknown outcome: 'happened' records it as done and moves on; 'not_happened'
+ *    voids the old intent so the step runs again (a person decided to resend);
+ *  - a run that stopped for another reason (e.g. retries exhausted): 'retry' resumes it from the same step.
+ * The engine re-checks approval gates on resume; nothing here can approve a step that was not approved.
+ */
+export async function resolveWorkflowRun(t: TenantCtx, runId: string, outcome: 'happened' | 'not_happened' | 'retry') {
+  if (!t.human) throw new ApiError(403, 'FORBIDDEN', 'Only a person can decide this');
+  const out = await tx(t, async (q) => {
+    const run = await q.one('select r.*, w.owner_id, w.workspace_id as wf_workspace from workflow_runs r join workflows w on w.id=r.workflow_id where r.id=$1 for update of r', [runId]);
+    if (!run) throw notFound('Workflow run');
+    if (run.status !== 'needs_attention') throw new ApiError(409, 'RUN_NOT_STUCK', 'Nothing to resolve', `This run is ${run.status.replace('_', ' ')}.`);
+    const key = `wf:${runId}:${run.current_step}`;
+    const tc = await q.one(`select id, tool from tool_calls where idempotency_key=$1 and status in ('unknown','executing')`, [key]);
+    const rec = (status: string, summary: string) =>
+      q.exec(`insert into workflow_run_steps (org_id, run_id, step_index, kind, status, summary) values ($1,$2,$3,'resolution',$4,$5)`, [t.orgId, runId, run.current_step, status, summary]);
+    if (tc) {
+      if (outcome === 'retry') throw new ApiError(409, 'OUTCOME_UNKNOWN', 'Check first', 'This step may already have happened. Say whether it did before continuing.');
+      if (outcome === 'happened') {
+        await q.exec(`update tool_calls set status='succeeded', result_summary='Confirmed by a person: it happened', finished_at=now() where id=$1`, [tc.id]);
+        await rec('succeeded', 'A person confirmed it happened');
+        await q.exec('update workflow_runs set current_step=current_step+1 where id=$1', [runId]);
+      } else {
+        await q.exec(`update tool_calls set status='failed', idempotency_key=idempotency_key || ':void:' || id::text, result_summary='Confirmed by a person: it did not happen', finished_at=now() where id=$1`, [tc.id]);
+        await rec('skipped', 'A person confirmed it did not happen; running the step again');
+      }
+    } else {
+      if (outcome !== 'retry') throw new ApiError(409, 'NOTHING_TO_CONFIRM', 'Nothing to confirm', 'No step is waiting for a check. Use Retry to continue.');
+      await rec('skipped', 'A person asked to continue from this step');
+    }
+    await q.exec(`update workflow_runs set status='running', error=null, ended_at=null where id=$1`, [runId]);
+    const job = await enqueueAdvance(q, { orgId: t.orgId, workspaceId: run.wf_workspace, userId: run.owner_id }, runId, `resolve:${outcome}:${Date.now()}`);
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'workflow.run.resolved', targetRef: `workflow_run:${runId}`, detail: { outcome, tool: tc?.tool ?? null } });
+    return { jobId: job.id as string };
+  });
+  kick();
+  return { id: runId, status: 'running', jobId: out.jobId };
+}
+
 registerJob(
   'workflow.advance',
   async (job) => {
@@ -630,11 +670,74 @@ workflowRoutes.post('/workflows/:id/dry-run', async (c) => {
   return c.json({ ...run, label: 'Dry run — nothing was changed' }, 201);
 });
 
+const RUN_VIEWS: Record<string, string[] | null> = {
+  needs_you: ['waiting_approval', 'needs_attention'],
+  active: ['queued', 'running'],
+  failed: ['failed', 'rejected'],
+  done: ['completed', 'cancelled'],
+  all: null,
+};
+
+/** Execution history across workflows (M5). Read access follows workflows.read; RLS keeps it inside the org. */
+workflowRoutes.get('/workflow-runs', async (c) => {
+  const t = need(c, 'workflows.read');
+  const p = query(
+    c,
+    z.object({ view: z.enum(['needs_you', 'active', 'failed', 'done', 'all']).default('all'), workflowId: z.string().uuid().optional(), before: z.string().datetime().optional(), limit: limitParam }),
+  );
+  const statuses = RUN_VIEWS[p.view];
+  const data = await tx(t, async (q) => {
+    const items = await q.many(
+      `select r.id, r.workflow_id, w.name as workflow_name, r.status, r.trigger_kind, r.dry_run, r.started_at, r.ended_at, r.error, r.current_step,
+              (select a.id from approval_requests a where a.status='pending' and a.preview->>'runId' = r.id::text order by a.created_at desc limit 1) as pending_approval_id,
+              exists(select 1 from tool_calls tc where tc.workflow_run_id=r.id and tc.status in ('unknown','executing')) as outcome_unknown
+         from workflow_runs r join workflows w on w.id = r.workflow_id
+        where ($1::text[] is null or r.status = any($1)) and ($2::uuid is null or r.workflow_id = $2) and ($3::timestamptz is null or r.started_at < $3)
+        order by r.started_at desc limit $4`,
+      [statuses, p.workflowId ?? null, p.before ?? null, p.limit],
+    );
+    const counts = await q.one(
+      `select count(*) filter (where status in ('waiting_approval','needs_attention'))::int as needs_you,
+              count(*) filter (where status in ('queued','running'))::int as active,
+              count(*) filter (where status in ('failed','rejected') and started_at > now() - interval '7 days')::int as failed_7d
+         from workflow_runs where dry_run = false`,
+    );
+    return { items, counts };
+  });
+  return c.json(data);
+});
+
 workflowRoutes.get('/workflow-runs/:id', async (c) => {
   const t = need(c, 'workflows.read');
-  const exists = await tx(t, (q) => q.one('select id from workflow_runs where id=$1', [c.req.param('id')]));
-  if (!exists) throw notFound('Workflow run');
-  return c.json(await getRunDetail({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId }, c.req.param('id')));
+  const id = c.req.param('id');
+  const extra = await tx(t, async (q) => {
+    const run = await q.one('select r.id, r.status, r.current_step, w.id as workflow_id, w.name as workflow_name from workflow_runs r join workflows w on w.id=r.workflow_id where r.id=$1', [id]);
+    if (!run) throw notFound('Workflow run');
+    const approvals = await q.many(
+      `select id, status, risk, preview->>'title' as title, (preview->>'gateStep') is not null as per_step, created_at, decided_at, expires_at from approval_requests where preview->>'runId'=$1 order by created_at`,
+      [id],
+    );
+    const actions = await q.many(
+      `select id, tool, status, policy_decision, result_summary, created_at, finished_at, split_part(idempotency_key, ':', 3)::int as step_index
+         from tool_calls where workflow_run_id=$1 and tool <> 'workflow.approval' order by created_at`,
+      [id],
+    );
+    const manage = can(t.role, 'workflows.manage');
+    const jobs = manage ? await q.many(`select id, kind, status, attempts, max_attempts, last_error, created_at, finished_at from jobs where payload->>'runId'=$1 order by created_at`, [id]) : [];
+    const unknown = actions.find((a: any) => (a.status === 'unknown' || a.status === 'executing') && a.step_index === run.current_step) ?? null;
+    const attention =
+      run.status !== 'needs_attention' ? null : unknown ? { kind: 'unknown_outcome', step: run.current_step, tool: unknown.tool, summary: unknown.result_summary } : { kind: 'stopped', step: run.current_step };
+    const open = ['queued', 'running', 'waiting_approval', 'needs_attention'].includes(run.status);
+    return { workflow: { id: run.workflow_id, name: run.workflow_name }, approvals, actions, jobs, attention, permissions: { canCancel: manage && open, canResolve: manage && t.human && !!attention } };
+  });
+  const detail = await getRunDetail({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId }, id);
+  return c.json({ ...detail, ...extra });
+});
+
+workflowRoutes.post('/workflow-runs/:id/resolve', async (c) => {
+  const t = need(c, 'workflows.manage');
+  const input = await body(c, z.object({ outcome: z.enum(['happened', 'not_happened', 'retry']) }));
+  return c.json(await resolveWorkflowRun(t, c.req.param('id'), input.outcome));
 });
 
 workflowRoutes.post('/workflow-runs/:id/cancel', async (c) => {
