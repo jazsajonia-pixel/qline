@@ -500,4 +500,12 @@ d('Qline API (integration)', () => {
     expect(e.json.data.tasks.length).toBeGreaterThan(0);
     expect(JSON.stringify(e.json)).not.toContain('Beta Co');
   });
+
+  it('regression (M4 Neon e2e): a malformed id in the path is a 400, not a 500', async () => {
+    for (const p of ['/tasks/not-a-uuid', '/jobs/not-a-uuid', '/workflow-runs/not-a-uuid']) {
+      const r = await call(A, 'GET', p);
+      expect(r.status).toBe(400);
+      expect(r.json.code).toBe('INVALID_INPUT');
+    }
+  });
 });
