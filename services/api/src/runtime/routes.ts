@@ -9,7 +9,8 @@ import { getHandler, kick } from './jobs';
 
 /** Runtime ops for owners/admins (failed-jobs view, retry, cancel). RLS keeps every query inside the org. */
 export const runtimeRoutes = new Hono<Env>();
-const COLS = "id, kind, status, attempts, max_attempts, run_at, last_error, cancel_requested, created_by, created_at, updated_at, finished_at, payload->>'runId' as run_id";
+const COLS = "id, kind, status, attempts, max_attempts, run_at, last_error, cancel_requested, created_by, created_at, updated_at, finished_at, case when payload->>'runId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then payload->>'runId' end as run_id";
+// run_id is only exposed (and joined on) when it is a real uuid: one malformed payload must not break the jobs view (M4 Neon e2e S4b).
 
 /**
  * Whether retrying a job is safe (M5). Every registered handler re-reads state and external sends are guarded by

@@ -216,6 +216,20 @@ d('Durable runtime (integration)', () => {
     await asOrg(A, (q) => q.exec(`update jobs set status='cancelled', finished_at=now() where id=$1`, [dead.id]));
   });
 
+  it('regression (Neon e2e S4b): a job whose payload runId is not a uuid does not break the jobs list, detail or retry', async () => {
+    const bad = await add(A, 'workflow.advance', { runId: 'not-a-uuid' }, { maxAttempts: 1 });
+    await asOrg(A, (q) => q.exec(`update jobs set status='dead', attempts=1, finished_at=now(), last_error='bad payload' where id=$1`, [bad.id]));
+    const list = await call(A, 'GET', '/jobs?status=problem');
+    expect(list.status).toBe(200);
+    const item = list.json.items.find((x: any) => x.id === bad.id);
+    expect(item.run_id).toBeNull();
+    expect(typeof item.retry_safe).toBe('boolean');
+    expect((await call(A, 'GET', `/jobs/${bad.id}`)).status).toBe(200);
+    const rt = await call(A, 'POST', `/jobs/${bad.id}/retry`);
+    expect([200, 409]).toContain(rt.status);
+    await asOrg(A, (q) => q.exec(`update jobs set status='cancelled', finished_at=now() where id=$1`, [bad.id]));
+  });
+
   it('isolates tenants: B cannot see or touch A jobs and outbox events', async () => {
     const { id } = await add(A, 'test.always', {}, { maxAttempts: 1 });
     await drainAll();
