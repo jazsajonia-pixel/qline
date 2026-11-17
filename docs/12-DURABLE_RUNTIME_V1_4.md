@@ -1,6 +1,6 @@
 # 12 — Architecture spike and v1.4 Durable Automation Runtime
 
-Status: **M1–M5 merged to `main`; M4 deployed to Neon production on 2026-11-17. Post-deploy health/readiness smoke is part of the v1.4.0 release gate.**
+Status: **M1–M5 merged to `main`; production API v1.4.0 is deployed as Neon Function deployment #10. Main-branch health/readiness smoke is being rerun after the initial RC-version mismatch was fixed.**
 Date: 2026-11-17. Product direction (Sapphire Decisions Log, 2026-11-17): Full AI Business Operating System, supervised execution, parallel and sequential agent collaboration.
 
 ## 1. Question
@@ -273,10 +273,11 @@ Status: **Production database migration 0007 and API v1.4.0 deployment completed
 ### API deployment and cron
 
 - Built from merged main commit `85fac65b5afe9aeca1f967beb1ada898d0bf9995`; the staged bundle is on branch `deploy/api-bundle-85fac65b` (artifact path `deploy-artifacts/qline-api-function.zip.b64`; Git blob SHA `4f260b61b40898696313c4f470da1c0d72dc3c85`).
-- Neon Function `api` production deployment **#9** completed on 2026-11-17. The first health check correctly caught that the bundle's compile-time `API_VERSION` still reported `1.4.0-rc.1`; `QLINE_VERSION` is only a fallback. PR #9 fixes the compile-time release version, after which a new bundle must be deployed and the health/readiness smoke rerun.
+- Neon Function `api` production deployment **#9** initially reported `1.4.0-rc.1`; the health check correctly caught that compile-time `API_VERSION` overrides the `QLINE_VERSION` fallback. PR #9 was merged as commit `e26fa2e8135322717e446b00d9f9716599d2c0d6`, changing the compile-time constant to `1.4.0`.
+- Rebuilt the API from merged main commit `e26fa2e8135322717e446b00d9f9716599d2c0d6` (staged on `deploy/api-bundle-e26fa2e8`) and deployed production Function **#10**, status `completed`. The deploy updated `QLINE_VERSION=1.4.0` and preserved the already-rotated `QLINE_CRON_KEY`.
 - Rotated `QLINE_CRON_KEY` and updated the existing `workflow-tick` trigger path. The key is intentionally not recorded here.
 - `workflow-tick` remains enabled at `*/15 * * * *`. Do not use `*/5` on Neon Free (see §5 and §12.4).
-- **Pending verification:** public `/v1/health` and `/v1/health/ready` checks are enforced by the v1.4.0 CI release-gate commit. A manual tick and authenticated owner `GET /v1/jobs` have not yet been run from this deployment session; preview integration coverage remains the evidence for those paths.
+- **Pending verification:** the first main push smoke ran before deployment #10 and failed on the previous `1.4.0-rc.1` response. Rerun the failed health/readiness job after deployment #10 and require `/v1/health` to report `1.4.0` plus `/v1/health/ready` to report database and storage ready. A manual tick and authenticated owner `GET /v1/jobs` have not yet been run from this deployment session; preview integration coverage remains the evidence for those paths.
 
 ### Release gate and rollback
 
