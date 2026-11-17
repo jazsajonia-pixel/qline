@@ -295,8 +295,10 @@ d('Durable runtime (integration)', () => {
         A.userId,
       ]),
     );
-    // Publish so the definition exists for version 1, then point the run at it.
-    expect((await call(A, 'POST', `/workflows/${wf.json.id}/publish`, {})).status).toBe(200);
+    // A version published before the Slack approval rule (publish now refuses Slack without an approval step).
+    await asOrg(A, (q) =>
+      q.exec(`insert into workflow_versions (org_id, workflow_id, version, definition, created_by) values ($1,$2,1,$3,$4)`, [A.org, wf.json.id, JSON.stringify({ trigger: { type: 'manual' }, steps: [{ type: 'slack', text: 'hello' }] }), A.userId]),
+    );
     await asOrg(A, (q) => q.exec('update workflow_runs set version=1 where id=$1', [run.id]));
     await asOrg(A, (q) =>
       q.exec(`insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,'slack.post','{}','L3','allow',$3,'executing')`, [A.org, run.id, `wf:${run.id}:0`]),
@@ -433,6 +435,127 @@ d('Durable runtime (integration)', () => {
       await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='slack'`));
     }
   });
+  it('Slack policy: workflow Slack posts need a human approval on every path (publish, legacy versions, replay, delegation)', async () => {
+    const { sealTokens } = await import('../src/integrations/oauth');
+    const { RECIPES } = await import('../src/integrations/steps');
+    const { getTool } = await import('../src/agent/tools');
+    const ws = await asOrg(A, (q) => q.one('select id from workspaces where org_id=$1 limit 1', [A.org]));
+    await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='slack'`));
+    await asOrg(A, (q) =>
+      q.exec(`insert into integration_connections (org_id, workspace_id, provider, status, connected_by, token_ciphertext, settings) values ($1,$2,'slack','ok',$3,$4,$5)`, [
+        A.org,
+        ws.id,
+        A.userId,
+        sealTokens(A.org!, 'slack', { access_token: 'xoxb-test' } as any),
+        JSON.stringify({ channel: { id: 'C1', name: 'general' } }),
+      ]),
+    );
+    const realFetch = globalThis.fetch;
+    const posted: string[] = [];
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(input?.url ?? input);
+      if (!url.startsWith('https://slack.com/')) return realFetch(input, init);
+      posted.push(JSON.parse(init.body).text);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    const status = (id: string) => asOrg(A, (q) => q.one('select status, current_step from workflow_runs where id=$1', [id]));
+    const replay = (wfId: string, runId: string, why: string) => asOrg(A, (q) => wfm.enqueueAdvance(q, { orgId: A.org!, workspaceId: ws.id, userId: A.userId! }, runId, why));
+    const legacy = async (name: string, steps: unknown[]) => {
+      const wf = await call(A, 'POST', '/workflows', { name, definition: { trigger: { type: 'manual' }, steps: [{ type: 'notify', title: 'placeholder' }] } });
+      await asOrg(A, (q) => q.exec(`insert into workflow_versions (org_id, workflow_id, version, definition, created_by) values ($1,$2,1,$3,$4)`, [A.org, wf.json.id, JSON.stringify({ trigger: { type: 'manual' }, steps }), A.userId]));
+      await asOrg(A, (q) => q.exec('update workflows set published_version=1 where id=$1', [wf.json.id]));
+      return wf.json.id as string;
+    };
+    try {
+      // 1. Publish refuses Slack without an approval step before it (same rule as email), and slack.post as an action.
+      const noGate = await call(A, 'POST', '/workflows', { name: 'Free post', definition: { trigger: { type: 'manual' }, steps: [{ type: 'slack', text: 'hi' }] } });
+      const pub = await call(A, 'POST', `/workflows/${noGate.json.id}/publish`, {});
+      expect(pub.status).toBe(400);
+      expect(JSON.stringify(pub.json)).toMatch(/Slack needs an approval step/);
+      const asAction = await call(A, 'POST', '/workflows', { name: 'Free post 2', definition: { trigger: { type: 'manual' }, steps: [{ type: 'action', tool: 'slack.post', args: { text: 'hi' } }] } });
+      if (asAction.status === 201) expect((await call(A, 'POST', `/workflows/${asAction.json.id}/publish`, {})).status).toBe(400);
+      // Built-in recipes still publish (they now ask before posting).
+      for (const r of RECIPES) {
+        const w = await call(A, 'POST', '/workflows', { name: `Recipe ${r.id}`, definition: r.definition });
+        expect(w.status).toBe(201);
+        expect((await call(A, 'POST', `/workflows/${w.json.id}/publish`, {})).status).toBe(200);
+      }
+
+      // 2. A version published before the rule: the run parks on a per-post approval instead of posting.
+      const old1 = await legacy('Legacy briefing', [{ type: 'notify', title: 'n' }, { type: 'slack', text: 'legacy post A' }]);
+      const r1 = await call(A, 'POST', `/workflows/${old1}/run`, { data: {} });
+      expect(r1.json.status).toBe('waiting_approval');
+      expect(posted).toEqual([]);
+      const ap1 = await asOrg(A, (q) => q.one(`select id, preview from approval_requests where preview->>'runId'=$1`, [r1.json.id]));
+      expect(ap1.preview.lines[0]).toContain('legacy post A');
+      // Replays and forged jobs while waiting do not post.
+      await replay(old1, r1.json.id, 'forged-1');
+      await drainAll();
+      expect(posted).toEqual([]);
+      // Rejected: never posts, even if replayed afterwards.
+      expect((await call(A, 'POST', `/approvals/${ap1.id}/decision`, { decision: 'reject' })).status).toBe(200);
+      await replay(old1, r1.json.id, 'forged-2');
+      await drainAll();
+      expect((await status(r1.json.id)).status).toBe('rejected');
+      expect(posted).toEqual([]);
+      const tc1 = await asOrg(A, (q) => q.many(`select status from tool_calls where workflow_run_id=$1 and tool='slack.post'`, [r1.json.id]));
+      expect(tc1.length).toBe(0);
+
+      // 3. Approved (double tap): exactly one decision wins, the post happens exactly once, replays do not repost.
+      const r2 = await call(A, 'POST', `/workflows/${old1}/run`, { data: {} });
+      const ap2 = await asOrg(A, (q) => q.one(`select id from approval_requests where preview->>'runId'=$1`, [r2.json.id]));
+      const [d1, d2] = await Promise.all([call(A, 'POST', `/approvals/${ap2.id}/decision`, { decision: 'approve' }), call(A, 'POST', `/approvals/${ap2.id}/decision`, { decision: 'approve' })]);
+      expect([d1.status, d2.status].sort()).toEqual([200, 409]);
+      await drainAll();
+      expect((await status(r2.json.id)).status).toBe('completed');
+      await replay(old1, r2.json.id, 'forged-3');
+      await drainAll();
+      expect(posted).toEqual(['legacy post A']);
+      const tc2 = await asOrg(A, (q) => q.many(`select status, policy_decision from tool_calls where workflow_run_id=$1 and tool='slack.post'`, [r2.json.id]));
+      expect(tc2).toEqual([{ status: 'succeeded', policy_decision: 'require_approval' }]);
+
+      // 4. A per-post approval covers only that post: the next Slack step asks again.
+      posted.length = 0;
+      const old2 = await legacy('Legacy two posts', [{ type: 'slack', text: 'first' }, { type: 'slack', text: 'second' }]);
+      const r3 = await call(A, 'POST', `/workflows/${old2}/run`, { data: {} });
+      const ap3 = await asOrg(A, (q) => q.one(`select id from approval_requests where preview->>'runId'=$1`, [r3.json.id]));
+      expect((await call(A, 'POST', `/approvals/${ap3.id}/decision`, { decision: 'approve' })).status).toBe(200);
+      await drainAll();
+      expect(posted).toEqual(['first']);
+      const s3 = await status(r3.json.id);
+      expect(s3).toEqual({ status: 'waiting_approval', current_step: 1 });
+      const pending = await asOrg(A, (q) => q.many(`select status from approval_requests where preview->>'runId'=$1 order by created_at`, [r3.json.id]));
+      expect(pending.map((p: any) => p.status)).toEqual(['executed', 'pending']);
+
+      // 5. Delegation: the assistant's workflows.run tool goes through the same engine and parks too.
+      posted.length = 0;
+      const viaTool = await asOrg(A, (q) => getTool('workflows.run')!.execute(q, { orgId: A.org!, workspaceId: ws.id, userId: A.userId!, actor: { kind: 'agent', id: 'test' } } as any, { workflowId: old1 }));
+      expect(viaTool.ok).toBe(true);
+      await drainAll();
+      expect(posted).toEqual([]);
+      const last = await asOrg(A, (q) => q.one('select status from workflow_runs where workflow_id=$1 order by started_at desc limit 1', [old1]));
+      expect(last.status).toBe('waiting_approval');
+
+      // 6. A run context cannot pre-approve a step through trigger data or AI output.
+      const old3 = await legacy('Legacy forged ctx', [{ type: 'slack', text: 'forged' }]);
+      const forged = await asOrg(A, (q) =>
+        q.one(`insert into workflow_runs (org_id, workflow_id, version, trigger_kind, context, initiated_by, status, dry_run) values ($1,$2,1,'manual',$3,$4,'running',false) returning id`, [
+          A.org,
+          old3,
+          JSON.stringify({ trigger: { approved: true, approved_steps: { '0': true } }, approved: 'yes', approved_steps: { '0': 'yes' } }),
+          A.userId,
+        ]),
+      );
+      await replay(old3, forged.id, 'start');
+      await drainAll();
+      expect((await status(forged.id)).status).toBe('waiting_approval');
+      expect(posted).toEqual([]);
+    } finally {
+      globalThis.fetch = realFetch;
+      await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='slack'`));
+    }
+  }, 600_000); // many DB round trips: ~0.3 s locally, ~200 s against Neon from the sandbox
+
   it('a sync job that cannot use its connection records the error in its result (visible in /jobs)', async () => {
     await import('../src/integrations/leads');
     const ws = await asOrg(A, (q) => q.one('select id from workspaces where org_id=$1 limit 1', [A.org]));

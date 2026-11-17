@@ -20,7 +20,7 @@ const WORKFLOW_TOOLS = ['tasks.create', 'tasks.update', 'notes.create', 'memory.
 /** Optional condition on any step: rendered with the run context; '', '0', 'false' or 'none' skips the step. */
 const when = { when: z.string().max(300).optional() };
 /** Run-context keys the engine owns. An AI step may not overwrite them (e.g. saveAs "approved" would forge an approval). */
-export const RESERVED_CONTEXT_KEYS = new Set(['approved', 'trigger']);
+export const RESERVED_CONTEXT_KEYS = new Set(['approved', 'approved_steps', 'trigger']);
 
 const step = z.discriminatedUnion('type', [
   z.object({ type: z.literal('action'), ...when, tool: z.enum(WORKFLOW_TOOLS), args: z.record(z.string(), z.any()) }),
@@ -212,6 +212,40 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
           await next();
           return { stop: false };
         }
+        if (s.type === 'slack' && ctx.approved !== true && ctx.approved_steps?.[String(i)] !== true) {
+          // Slack posts need a human decision, like assistant-initiated posts (policy: slack.post is L3 require_approval).
+          // New versions must have an approval step before Slack (checked at publish). Versions published before this
+          // rule get an approval for this exact post instead of posting freely. Idempotent per run+step.
+          const intent = await q.one('select 1 from tool_calls where idempotency_key=$1', [`wf:${runId}:${i}`]);
+          // An intent recorded before this rule falls through: the idempotency logic below reuses or flags it and never posts again.
+          if (!intent) {
+            const gateKey = `wf:${runId}:${i}:gate`;
+            const prior = await q.one(`select tc.id, a.id as approval_id, a.status from tool_calls tc left join approval_requests a on a.tool_call_id = tc.id where tc.idempotency_key=$1`, [gateKey]);
+            if (prior && prior.status !== 'pending') {
+              // Decided or expired without approving this step: never post.
+              await record('failed', 'Posting to Slack was not approved.');
+              await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Slack post not approved']);
+              return { stop: true, run: { ...run, status: 'failed' } };
+            }
+            let approvalId = prior?.approval_id;
+            if (!prior) {
+              const tc = await q.one(
+                `insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,'workflow.approval',$3,'L1','require_approval',$4,'waiting_approval') returning id`,
+                [e.orgId, runId, JSON.stringify({ step: i, gate: 'slack' }), gateKey],
+              );
+              const a = await q.one(
+                `insert into approval_requests (org_id, workspace_id, requester_kind, requester_id, requested_for, tool_call_id, action, preview, risk, reason, expires_at)
+                 values ($1,$2,'workflow',$3,$4,$5,'workflow.continue',$6,'L1','Slack posts need approval', now() + interval '72 hours') returning id`,
+                [e.orgId, e.workspaceId, wf.id, wf.owner_id, tc.id, JSON.stringify({ title: 'Post this to Slack?', lines: [`Post to Slack: ${String(s.text).slice(0, 600)}`], workflow: wf.name, runId, gateStep: i })],
+              );
+              approvalId = a.id;
+              await notify(q, e.orgId, wf.owner_id, { category: 'approval', title: `Approval needed: post to Slack (${wf.name})`, ref: { type: 'approval', id: a.id } });
+            }
+            await q.exec(`update workflow_runs set status='waiting_approval' where id=$1`, [runId]);
+            await record('waiting_approval', 'Waiting for approval to post to Slack', { approvalId });
+            return { stop: true, run: { ...run, status: 'waiting_approval' }, approvalId };
+          }
+        }
         if (s.type === 'email' && ctx.approved !== true) {
           await record('failed', 'Sending email needs an approval step before it.');
           await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Missing approval step']);
@@ -242,7 +276,7 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
           const tool = EXTERNAL_TOOL[s.type]!;
           const tc = await q.one(
             `insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,$6,$7,'executing') returning id`,
-            [e.orgId, runId, tool, JSON.stringify(s), TOOL_POLICIES[tool]?.risk ?? 'L2', s.type === 'email' ? 'require_approval' : 'allow', key],
+            [e.orgId, runId, tool, JSON.stringify(s), TOOL_POLICIES[tool]?.risk ?? 'L2', s.type === 'email' || s.type === 'slack' ? 'require_approval' : 'allow', key],
           );
           return { stop: false, external: { tcId: tc.id, index: i, step: s, ownerId: wf.owner_id, wfName: wf.name } };
         }
@@ -360,7 +394,16 @@ export async function applyWorkflowDecision(q: Q, t: TenantCtx, approval: any, d
     await q.exec(`update workflow_runs set status='rejected', ended_at=now() where id=$1 and status='waiting_approval'`, [runId]);
     return { runId, jobId: null as string | null };
   }
-  const n = await q.exec(`update workflow_runs set status='running', current_step=current_step+1, context = context || '{"approved": true}'::jsonb where id=$1 and status='waiting_approval'`, [runId]);
+  // An approval step approves the steps after it (and moves past itself). A per-step gate (a Slack post in a version
+  // published before the Slack rule) approves only that step, which then runs.
+  const gateStep = approval.preview?.gateStep;
+  const n =
+    gateStep != null
+      ? await q.exec(
+          `update workflow_runs set status='running', context = jsonb_set(context || jsonb_build_object('approved_steps', coalesce(context->'approved_steps', '{}'::jsonb)), array['approved_steps', $2::text], 'true'::jsonb) where id=$1 and status='waiting_approval' and current_step=$3`,
+          [runId, String(gateStep), Number(gateStep)],
+        )
+      : await q.exec(`update workflow_runs set status='running', current_step=current_step+1, context = context || '{"approved": true}'::jsonb where id=$1 and status='waiting_approval'`, [runId]);
   await q.exec(`update approval_requests set status='executed' where id=$1`, [approval.id]);
   if (!n) return { runId, jobId: null };
   const run = await q.one('select initiated_by, workflow_id from workflow_runs where id=$1', [runId]);
@@ -542,6 +585,7 @@ workflowRoutes.post('/workflows/:id/publish', async (c) => {
     for (const s of parsed.data.steps) {
       if (s.type === 'approval') approved = true;
       if (s.type === 'email' && !approved) throw badRequest('Sending email needs an approval step before it.');
+      if (s.type === 'slack' && !approved) throw badRequest('Posting to Slack needs an approval step before it.');
       if (s.type === 'action') {
         const d = decideTool({ tool: s.tool, allowlist: IMPLEMENTED_TOOLS as string[], userRole: t.role });
         if (d.decision === 'deny') throw badRequest(`${s.tool}: ${d.reason}`);

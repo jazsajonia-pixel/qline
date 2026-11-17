@@ -414,7 +414,7 @@ d('Qline API (integration)', () => {
       const notes = await call(A, 'GET', '/notifications');
       expect(JSON.stringify(notes.json)).toContain('Urgent lead: Dana Buyer');
       const pend = await call(A, 'GET', '/approvals?status=pending');
-      expect(JSON.stringify(pend.json)).toContain('Create a reply task for Dana Buyer?');
+      expect(JSON.stringify(pend.json)).toContain('Post Dana Buyer to Slack and create a reply task?');
       // dedupe
       expect((await call(A, 'POST', '/integrations/google/sync', {})).json.leads).toBe(0);
 
@@ -472,8 +472,8 @@ d('Qline API (integration)', () => {
         trigger: { type: 'event', event: 'lead.created' },
         steps: [
           { type: 'ai', prompt: 'Write a reply to {{trigger.name}}', saveAs: 'reply' },
-          { type: 'slack', text: 'New lead {{trigger.name}}' },
           { type: 'approval', title: 'Send?' },
+          { type: 'slack', text: 'New lead {{trigger.name}}' },
           { type: 'email', to: '{{trigger.email}}', subject: 'Re: hi', body: '{{reply}}' },
           { type: 'calendar', title: 'Follow up {{trigger.name}}', inDays: 2 },
         ],
