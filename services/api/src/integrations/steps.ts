@@ -148,14 +148,14 @@ export const RECIPES = [
   {
     id: 'urgent_lead_alert',
     name: 'Urgent lead alert',
-    description: 'When a hot or urgent lead arrives, notify the team and Slack, then offer to create a reply task.',
+    description: 'When a hot or urgent lead arrives, notify you, then (after you approve) post it to Slack and create a reply task.',
     needs: ['Lead inbox (Gmail, Outlook or Forms)', 'Slack (optional)'],
     definition: {
       trigger: { type: 'event', event: 'lead.urgent' },
       steps: [
         { type: 'notify', title: 'Hot lead: {{trigger.name}}', body: '{{trigger.summary}}' },
+        { type: 'approval', title: 'Post {{trigger.name}} to Slack and create a reply task?' },
         { type: 'slack', text: ':rotating_light: Hot lead — *{{trigger.name}}* ({{trigger.email}})\n{{trigger.summary}}' },
-        { type: 'approval', title: 'Create a reply task for {{trigger.name}}?' },
         { type: 'action', tool: 'tasks.create', args: { title: 'Reply to {{trigger.name}}: {{trigger.subject}}', priority: 'urgent', dueInDays: 0 } },
       ],
     },
@@ -192,7 +192,7 @@ export const RECIPES = [
   {
     id: 'daily_briefing',
     name: 'Morning briefing',
-    description: 'Every morning (8:00 Manila time), AI summarises new leads, overdue and due-today tasks into a short briefing in the app and Slack.',
+    description: 'Every morning (8:00 Manila time), AI summarises new leads, overdue and due-today tasks into a short briefing in the app, and posts it to Slack after you approve.',
     needs: ['AI provider', 'Slack (optional)'],
     definition: {
       trigger: { type: 'schedule', every: 'day', hourUtc: 0 },
@@ -204,6 +204,7 @@ export const RECIPES = [
             'Write a morning briefing for a business owner in at most 6 short lines: the most important thing first, then leads, then tasks. Use only this data.\nNew leads (24h, {{trigger.leads_count}}, {{trigger.urgent_count}} hot):\n{{trigger.leads_text}}\nOverdue tasks ({{trigger.overdue_count}}):\n{{trigger.overdue_text}}\nDue in the next 24h:\n{{trigger.due_today_text}}',
         },
         { type: 'notify', title: 'Morning briefing', body: '{{brief}}' },
+        { type: 'approval', title: 'Post the morning briefing to Slack?' },
         { type: 'slack', text: ':sunrise: *Morning briefing*\n{{brief}}' },
       ],
     },
@@ -252,7 +253,7 @@ export const RECIPES = [
   {
     id: 'weekly_review',
     name: 'Weekly review',
-    description: 'Every Monday at 8:00 am Manila time, AI writes a short review of last week (leads, finished tasks, open work) for the app and Slack.',
+    description: 'Every Monday at 8:00 am Manila time, AI writes a short review of last week (leads, finished tasks, open work) for the app, and posts it to Slack after you approve.',
     needs: ['AI provider', 'Slack (optional)'],
     definition: {
       trigger: { type: 'schedule', every: 'week', weekday: 1, hourUtc: 0 },
@@ -264,6 +265,7 @@ export const RECIPES = [
             'Write a weekly review for a small-business owner in at most 7 short lines: the headline, leads, finished work, and the top 3 priorities for this week. Use only this data.\nNew leads last 7 days: {{trigger.week_leads}}\nTasks finished last 7 days: {{trigger.week_done}}\nOpen tasks: {{trigger.open_tasks}}\nOverdue ({{trigger.overdue_count}}):\n{{trigger.overdue_text}}\nRecent leads:\n{{trigger.leads_text}}',
         },
         { type: 'notify', title: 'Weekly review', body: '{{review}}' },
+        { type: 'approval', title: 'Post the weekly review to Slack?' },
         { type: 'slack', text: ':bar_chart: *Weekly review*\n{{review}}' },
       ],
     },
