@@ -47,3 +47,36 @@
 
 Milestones M0–M5 and the release-gate test map are in [12-DURABLE_RUNTIME_V1_4.md](12-DURABLE_RUNTIME_V1_4.md) §8–§11.
 Run the gates with `QLINE_TEST_ENV=<env> npx vitest run services/api/test`.
+
+## 5. Post-v1.4.0 stabilization (status 2026-11-17)
+
+There is no separate "v1.5 stabilization" phase in this roadmap: v1.4.0 is released, and PRs #10 and #11 are its post-release stabilization. v1.5 is the AI CEO phase ([13-AI_CEO_V1_5.md](13-AI_CEO_V1_5.md)).
+
+| Gate | Evidence | Status |
+| --- | --- | --- |
+| Account session list/revoke, cross-account isolation, expiry, concurrent/self revocation | PR #11, `api.integration.test.ts`; CI on the PR head | Passed in CI |
+| PostgreSQL 16 migrations from empty DB, `qline_app` least privilege | PR #11 CI `api` job | Passed in CI |
+| Dependency audit (`npm audit --audit-level=moderate`) incl. ExcelJS → uuid 11.1.1 override (CommonJS) | PR #11 CI | 0 vulnerabilities |
+| API typecheck, unit tests, bundle build; Flutter analyze, tests, release APK compile | PR #11 and PR #10 CI | Passed in CI |
+| Operations/Approvals filters at narrow width and large text | PR #10 widget tests | Passed in CI |
+| Session lifetime policy (Option A / C / keep) | [15 §9](15-SESSION_SECURITY_RECOMMENDATION.md) | **Owner decision** |
+| Physical-device QA on the Redmi Pad 2 | QA APK from `qa/pr10-physical-device-build` | **Pending owner test** |
+| Merge PR #10 and #11, deploy API with the session routes | — | **Owner approval** |
+
+Stabilization is complete when the three owner rows are done. No code work is left in it.
+
+## 6. Next phase: v1.5 AI CEO — prioritized plan
+
+Order from [13 §9](13-AI_CEO_V1_5.md) and [14 §placement](14-KNOWLEDGE_OS.md). Each step is its own PR with green CI; nothing starts before the owner approves v1.5 P0.
+
+1. **P0 — pure policy (no DB, no deploy).** `effectivePermissions()` (child ⊆ parent, depth ≤ 3), plan validator (cycles, forward refs, reserved keys), output-schema validator in `@qline/policy`. Property tests: intersection never widens.
+2. **P1 — migration 0008 + workspace controls + emergency stop.** Tables, RLS, grants, claim-slot function; stop switch enforced in `decideTool` for workflows and agents. Gate: clean and upgrade migration, RLS/grant checks.
+3. **K1 (Knowledge OS) in parallel with P1–P2.** Entries, links, visibility, RLS, `run_kind`. Uses the next free migration number; test both migration orders.
+4. **P2 — missions, plan proposal, plan approval (no execution).** Gate: replayed `mission.plan` cannot bypass approval.
+5. **K2 — retrieval + context record + chat knowledge panel.** Must land before P3.
+6. **P3 — sequential task execution with evidence refs and per-intent approvals.**
+7. **P4 — parallel fan-out/fan-in with slots and budgets.**
+8. **P5 — mobile missions, plan/task review, pause/emergency stop.**
+9. **P6 — chaos hardening on a Neon preview branch.**
+
+Dependencies outside code: v1.4 runtime already in production (done); session Option C, if approved, is a separate auth milestone that can run beside P0–P2 because it touches different files; real provider tests (Gmail/Slack) still need connected test accounts.

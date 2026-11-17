@@ -9,6 +9,7 @@ import { ApiError, badRequest, forbidden, notFound } from '../core/errors';
 import { body } from '../core/validate';
 import { agentSeed, DEFAULT_CONFIG, TEMPLATES } from './templates';
 import { env } from '../core/env';
+import { getAuth } from '../core/auth';
 
 export async function seedWorkspace(q: Q, orgId: string, userId: string): Promise<string> {
   const ws = await q.one<{ id: string }>(
@@ -35,6 +36,47 @@ export async function seedWorkspace(q: Q, orgId: string, userId: string): Promis
 export const orgRoutes = new Hono<Env>();
 
 // --- user-level (no org header) -------------------------------------------
+// Session controls are account-scoped, never organization-scoped. Better Auth
+// resolves the bearer token from the incoming request and only returns the
+// authenticated user's sessions. Never return the bearer/session token itself.
+orgRoutes.get('/me/sessions', requireUser, async (c) => {
+  const sessions = await getAuth().api.listSessions({ headers: c.req.raw.headers });
+  c.header('Cache-Control', 'no-store');
+  return c.json({
+    items: sessions.map((session) => ({
+      id: session.id,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      expiresAt: session.expiresAt,
+      ipAddress: session.ipAddress,
+      userAgent: session.userAgent,
+      current: session.id === c.get('user').sessionId,
+    })),
+  });
+});
+
+orgRoutes.delete('/me/sessions/:id', requireUser, async (c) => {
+  const id = c.req.param('id');
+  if (!id || id.length > 128) {
+    throw new ApiError(400, 'INVALID_SESSION_ID', 'Invalid session id');
+  }
+
+  // Resolve the id only against the authenticated user's own session set.
+  // The raw token stays server-side and is never accepted from the caller.
+  const sessions = await getAuth().api.listSessions({ headers: c.req.raw.headers });
+  const target = sessions.find((session) => session.id === id);
+  if (!target) {
+    throw new ApiError(404, 'SESSION_NOT_FOUND', 'Session not found');
+  }
+
+  await getAuth().api.revokeSession({
+    body: { token: target.token },
+    headers: c.req.raw.headers,
+  });
+  c.header('Cache-Control', 'no-store');
+  return c.json({ id: target.id, revoked: true });
+});
+
 orgRoutes.get('/me', requireUser, async (c) => {
   const u = c.get('user');
   const orgs = await tx({ orgId: null, userId: u.userId }, (q) =>

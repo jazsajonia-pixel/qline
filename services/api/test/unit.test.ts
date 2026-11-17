@@ -38,7 +38,7 @@ describe('parsing and mapping', () => {
     expect(p.columns).toEqual(['name', 'email']);
     await expect(parseFile('json', enc('{"a":1}'))).rejects.toThrow(/array/);
   });
-  it('reads XLSX values only and never evaluates formulas', async () => {
+  it('loads ExcelJS through its CommonJS uuid dependency, reads XLSX values, and never evaluates formulas', async () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Clients');
     ws.addRow(['Name', 'Email', 'Total']);

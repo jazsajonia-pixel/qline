@@ -13,7 +13,7 @@ delete process.env.NEON_AI_GATEWAY_TOKEN;
 
 const d = envFile ? describe : describe.skip;
 
-type Who = { token: string; org?: string };
+type Who = { token: string; email?: string; org?: string };
 let app: { fetch: (r: Request) => Promise<Response> };
 let ai: typeof import('@qline/ai');
 
@@ -37,7 +37,7 @@ async function signUp(name: string): Promise<Who> {
   const email = `${name.toLowerCase()}-${randomUUID().slice(0, 8)}@test.qline.dev`;
   const r = await call(null, 'POST', '/auth/sign-up/email', { email, password: 'correct-horse-battery', name });
   expect(r.status).toBe(200);
-  return { token: r.json.token };
+  return { token: r.json.token, email };
 }
 
 d('Qline API (integration)', () => {
@@ -68,6 +68,94 @@ d('Qline API (integration)', () => {
     expect((await call({ token: A.token, org: B.org }, 'GET', '/tasks')).status).toBe(404);
     const me = await call(A, 'GET', '/me');
     expect(me.json.orgs.map((o: any) => o.id)).toContain(A.org);
+  });
+
+  it('lists only the signed-in user sessions and revokes a selected session without exposing tokens', async () => {
+    const second = await call(null, 'POST', '/auth/sign-in/email', {
+      email: A.email!,
+      password: 'correct-horse-battery',
+    });
+    expect(second.status).toBe(200);
+    const secondToken = second.json.token as string;
+    expect(secondToken).toBeTruthy();
+
+    const { getAuth } = await import('../src/core/auth');
+    const secondSessions = await getAuth().api.listSessions({
+      headers: new Headers({ authorization: `Bearer ${secondToken}` }),
+    });
+    const target = secondSessions.find((session) => session.token === secondToken);
+    expect(target).toBeTruthy();
+
+    const listed = await call(A, 'GET', '/me/sessions');
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get('cache-control')).toBe('no-store');
+    expect(listed.json.items.length).toBeGreaterThanOrEqual(2);
+    expect(listed.json.items.some((session: any) => session.current)).toBe(true);
+    expect(listed.json.items.every((session: any) => !('token' in session))).toBe(true);
+
+    const bobSessions = await getAuth().api.listSessions({
+      headers: new Headers({ authorization: `Bearer ${B.token}` }),
+    });
+    const bobSession = bobSessions.find((session) => session.token === B.token);
+    expect(bobSession).toBeTruthy();
+    expect((await call(A, 'DELETE', `/me/sessions/${bobSession!.id}`)).status).toBe(404);
+
+    const revoked = await call(A, 'DELETE', `/me/sessions/${target!.id}`);
+    expect(revoked.status).toBe(200);
+    expect(revoked.json).toEqual({ id: target!.id, revoked: true });
+    expect((await call({ token: secondToken }, 'GET', '/me')).status).toBe(401);
+    expect((await call(A, 'GET', '/me')).status).toBe(200);
+  });
+
+  it('enforces session expiry, repeat and concurrent revocation, self-revocation and id validation', async () => {
+    const { getAuth } = await import('../src/core/auth');
+    const { getPool } = await import('../src/core/db');
+    // Server-side sign-in creates real sessions without consuming the HTTP sign-in rate limit.
+    const signIn = async () => {
+      const r = await getAuth().api.signInEmail({ body: { email: A.email!, password: 'correct-horse-battery' } });
+      expect(r.token).toBeTruthy();
+      return r.token as string;
+    };
+    const sessionIdFor = async (token: string) => {
+      const list = await getAuth().api.listSessions({ headers: new Headers({ authorization: `Bearer ${token}` }) });
+      return list.find((s) => s.token === token)!.id;
+    };
+
+    // Another account's sessions never appear in the list.
+    const bobId = await sessionIdFor(B.token);
+    const mine = await call(A, 'GET', '/me/sessions');
+    expect(mine.json.items.map((s: any) => s.id)).not.toContain(bobId);
+
+    // An expired session is rejected even though its row still exists.
+    const expiring = await signIn();
+    const expiringId = await sessionIdFor(expiring);
+    await getPool().query(`update "session" set "expiresAt" = now() - interval '1 minute' where id = $1`, [expiringId]);
+    expect((await call({ token: expiring }, 'GET', '/me')).status).toBe(401);
+    expect((await call({ token: expiring }, 'GET', '/me/sessions')).status).toBe(401);
+    const afterExpiry = await call(A, 'GET', '/me/sessions');
+    expect(afterExpiry.json.items.map((s: any) => s.id)).not.toContain(expiringId);
+
+    // Concurrent revocations of one session never error and leave it revoked; a repeat is 404.
+    const victim = await signIn();
+    const victimId = await sessionIdFor(victim);
+    const results = await Promise.all([1, 2, 3].map(() => call(A, 'DELETE', `/me/sessions/${victimId}`)));
+    expect(results.every((r) => r.status === 200 || r.status === 404)).toBe(true);
+    expect(results.some((r) => r.status === 200)).toBe(true);
+    expect((await call({ token: victim }, 'GET', '/me')).status).toBe(401);
+    expect((await call(A, 'DELETE', `/me/sessions/${victimId}`)).status).toBe(404);
+
+    // Malformed or oversized ids are rejected without touching other sessions.
+    expect((await call(A, 'DELETE', `/me/sessions/${'x'.repeat(129)}`)).status).toBe(400);
+    expect((await call(A, 'DELETE', '/me/sessions/does-not-exist')).status).toBe(404);
+    expect((await call(null, 'DELETE', `/me/sessions/${bobId}`)).status).toBe(401);
+    expect((await call(B, 'GET', '/me')).status).toBe(200);
+
+    // A user can revoke the session making the request; it stops working immediately.
+    const self = await signIn();
+    const selfId = await sessionIdFor(self);
+    expect((await call({ token: self }, 'DELETE', `/me/sessions/${selfId}`)).status).toBe(200);
+    expect((await call({ token: self }, 'GET', '/me')).status).toBe(401);
+    expect((await call(A, 'GET', '/me')).status).toBe(200);
   });
 
   it('isolates tenants: B cannot list, read, update or delete A rows', async () => {
