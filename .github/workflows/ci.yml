@@ -21,7 +21,7 @@ jobs:
       - run: npm run test:unit
       - run: npm run build:api
       # Publish a short-lived deployment handoff branch because this repo's Actions artifact quota is full.
-      - if: github.event_name == 'workflow_dispatch'
+      - if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: actions/github-script@v7
         with:
           script: |
@@ -64,23 +64,47 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const crypto = require('crypto');
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const apkPath = 'apps/mobile/build/app/outputs/flutter-apk/app-release.apk';
-            const apkBase64 = fs.readFileSync(apkPath).toString('base64');
-            const branch = `qa-artifacts/pr10-${context.sha.slice(0, 8)}`;
+            const apk = fs.readFileSync(apkPath);
+            const apkSha256 = crypto.createHash('sha256').update(apk).digest('hex');
+            const shortSha = context.sha.slice(0, 8);
+            const branch = `qa-artifacts/pr10-${shortSha}-${context.runId}-${context.runAttempt}`;
             const { data: baseCommit } = await github.rest.git.getCommit({ owner, repo, commit_sha: context.sha });
-            const { data: blob } = await github.rest.git.createBlob({ owner, repo, content: apkBase64, encoding: 'base64' });
+            const [apkBlob, checksumBlob, readmeBlob] = await Promise.all([
+              github.rest.git.createBlob({ owner, repo, content: apk.toString('base64'), encoding: 'base64' }),
+              github.rest.git.createBlob({ owner, repo, content: `${apkSha256}  qline-pr10-physical-test.apk\\n`, encoding: 'utf-8' }),
+              github.rest.git.createBlob({
+                owner, repo,
+                content: [
+                  '# Qline PR #10 physical QA build',
+                  '',
+                  `- Source commit: ${context.sha}`,
+                  `- Workflow run: ${context.runId} (attempt ${context.runAttempt})`,
+                  '- Package id: app.qline.qline.qa',
+                  '- Signing: CI debug key; this is a QA-only build, not a release APK.',
+                  `- SHA-256: ${apkSha256}`,
+                  ''
+                ].join('\\n'),
+                encoding: 'utf-8'
+              })
+            ]);
             const { data: tree } = await github.rest.git.createTree({
               owner, repo, base_tree: baseCommit.tree.sha,
-              tree: [{ path: 'qa-artifacts/qline-pr10-physical-test.apk', mode: '100644', type: 'blob', sha: blob.sha }]
+              tree: [
+                { path: 'qa-artifacts/qline-pr10-physical-test.apk', mode: '100644', type: 'blob', sha: apkBlob.data.sha },
+                { path: 'qa-artifacts/qline-pr10-physical-test.apk.sha256', mode: '100644', type: 'blob', sha: checksumBlob.data.sha },
+                { path: 'qa-artifacts/README.md', mode: '100644', type: 'blob', sha: readmeBlob.data.sha }
+              ]
             });
             const { data: commit } = await github.rest.git.createCommit({
               owner, repo, message: 'build: stage PR10 physical QA APK',
               tree: tree.sha, parents: [context.sha]
             });
             await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: commit.sha });
-            core.info(`Staged QA APK on ${branch} at ${commit.sha}`);
+            core.info(`Staged QA APK on ${branch} at ${commit.sha}; SHA-256 ${apkSha256}`);
 
   production-smoke:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
