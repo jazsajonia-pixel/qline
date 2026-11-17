@@ -34,7 +34,7 @@ npm run build:api
 cd apps/mobile
 flutter pub get
 flutter analyze && flutter test
-flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --dart-define=QLINE_VERSION=1.3.0 --dart-define=QLINE_BUILD=4
+flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --dart-define=QLINE_VERSION=1.3.1 --dart-define=QLINE_BUILD=5
 ```
 
 Release signing reads `apps/mobile/android/key.properties`. That file and the keystore are gitignored and are never committed.
