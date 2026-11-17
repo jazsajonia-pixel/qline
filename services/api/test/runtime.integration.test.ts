@@ -554,7 +554,7 @@ d('Durable runtime (integration)', () => {
       globalThis.fetch = realFetch;
       await asOrg(A, (q) => q.exec(`delete from integration_connections where provider='slack'`));
     }
-  });
+  }, 600_000); // many DB round trips: ~0.3 s locally, ~200 s against Neon from the sandbox
 
   it('a sync job that cannot use its connection records the error in its result (visible in /jobs)', async () => {
     await import('../src/integrations/leads');
