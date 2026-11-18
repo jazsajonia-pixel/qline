@@ -118,25 +118,28 @@ void main() {
         client: MockClient((r) async {
           calls.add('${r.method} ${r.url.path}');
           final p = r.url.path;
-          if (p.endsWith('/agents'))
+          if (p.endsWith('/agents')) {
             return _json({
               'items': [
                 {'id': 'a1', 'template': 'ceo', 'name': 'CEO'},
               ],
             });
-          if (p.endsWith('/ai/overview'))
+          }
+          if (p.endsWith('/ai/overview')) {
             return _json({
               'status': 'ok',
               'agents': [
                 {'id': 'a1', 'ready': true},
               ],
             });
-          if (p.endsWith('/conversations'))
+          }
+          if (p.endsWith('/conversations')) {
             return _json({
               'items': [
                 {'id': 'c2', 'title': 'Latest', 'agent_name': 'CEO', 'template': 'ceo', 'updated_at': DateTime.now().toIso8601String()},
               ],
             });
+          }
           if (p.endsWith('/conversations/c1') && gone) return _json({'code': 'NOT_FOUND', 'title': 'Conversation not found'}, 404);
           if (p.contains('/conversations/c')) {
             final id = p.split('/').last;
