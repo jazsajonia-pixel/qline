@@ -1,6 +1,6 @@
 # Qline
 
-Qline is an AI-assisted business operating system for small teams: tasks, approvals, contacts, documents, memory, workflows and imports, with AI agents that **propose** actions and humans who **approve** them.
+Qline is a personal AI operating system: one assistant that remembers your context across chats, reads the files and apps you connect, and acts for you only within the permissions you set. Teams and businesses are optional scopes on top of the same personal core. Agents **propose** consequential actions and a human **approves** them.
 
 This repository holds the Android app, the API and the shared packages.
 

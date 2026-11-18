@@ -167,8 +167,21 @@ export interface Tokens {
 
 const tokenAad = (orgId: string, p: string) => `oauth:${orgId}:${p}`;
 
+/** Token endpoints never hang a request: past this the call is abandoned and reported as a network failure. */
+export const TOKEN_TIMEOUT_MS = 20_000;
+
 async function postForm(url: string, form: Record<string, string>) {
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' }, body: new URLSearchParams(form) });
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: new URLSearchParams(form),
+    });
+  } catch {
+    return { ok: false, status: 0, body: { error: 'network_error' } as any };
+  }
   const j: any = await r.json().catch(() => ({}));
   return { ok: r.ok && j.ok !== false, status: r.status, body: j };
 }
@@ -183,12 +196,17 @@ const TOKEN_URL: Record<OAuthProvider, string> = {
 
 /** Notion's token endpoint takes JSON with HTTP Basic client authentication. */
 async function postNotion(form: Record<string, string>, app: { clientId: string; clientSecret: string }) {
-  const r = await fetch(TOKEN_URL.notion, {
-    method: 'POST',
-    signal: AbortSignal.timeout(20_000),
-    headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}` },
-    body: JSON.stringify(form),
-  });
+  let r: Response;
+  try {
+    r = await fetch(TOKEN_URL.notion, {
+      method: 'POST',
+      signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
+      headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}` },
+      body: JSON.stringify(form),
+    });
+  } catch {
+    return { ok: false, status: 0, body: { error: 'network_error' } as any };
+  }
   const j: any = await r.json().catch(() => ({}));
   return { ok: r.ok && !j.error, status: r.status, body: j };
 }
@@ -222,12 +240,14 @@ export async function fetchIdentity(p: OAuthProvider, tokens: Tokens, raw: any):
   if (p === 'slack') return { email: null, name: raw.team?.name ?? 'Slack workspace' };
   if (p === 'notion') return { email: raw.owner?.user?.person?.email ?? null, name: raw.workspace_name ?? raw.owner?.user?.name ?? 'Notion workspace' };
   if (p === 'github') {
-    const r = await fetch('https://api.github.com/user', { signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${tokens.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'Qline' } });
-    const j: any = await r.json().catch(() => ({}));
+    const r = await fetch('https://api.github.com/user', { signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${tokens.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'Qline' } }).catch(() => null);
+    const j: any = r && r.ok ? await r.json().catch(() => ({})) : {};
     return { email: j.email ?? null, name: j.login ?? j.name ?? 'GitHub account' };
   }
   const url = p === 'google' ? 'https://openidconnect.googleapis.com/v1/userinfo' : 'https://graph.microsoft.com/v1.0/me';
-  const r = await fetch(url, { headers: { authorization: `Bearer ${tokens.access_token}` } });
+  // Identity is a label only; a slow or failing endpoint must not block or break the connection.
+  const r = await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${tokens.access_token}` } }).catch(() => null);
+  if (!r || !r.ok) return { email: null, name: null };
   const j: any = await r.json().catch(() => ({}));
   if (p === 'google') return { email: j.email ?? null, name: j.name ?? null };
   return { email: j.mail ?? j.userPrincipalName ?? null, name: j.displayName ?? null };
@@ -238,28 +258,65 @@ export function sealTokens(orgId: string, p: string, t: Tokens) {
 }
 
 export class ConnectionExpired extends Error {}
+/** The provider could not be reached or answered with a temporary error: the connection stays usable. */
+export class TokenRefreshUnavailable extends Error {}
 
-/** Returns a valid access token for a connection row, refreshing (and persisting) when needed. */
+/**
+ * Errors that mean the refresh token itself is dead. Only these end a connection; timeouts, 5xx and
+ * rate limits are temporary and must never force the user to reconnect.
+ */
+const DEAD_GRANT = new Set(['invalid_grant', 'invalid_refresh_token', 'bad_refresh_token', 'token_revoked', 'unauthorized_client', 'invalid_client']);
+export function isDeadGrant(status: number, body: any) {
+  const code = String(body?.error ?? '').toLowerCase();
+  if (DEAD_GRANT.has(code)) return true;
+  // Slack answers 200 with ok:false and these codes.
+  return ['token_expired', 'token_revoked', 'invalid_auth', 'account_inactive'].includes(code) && status < 500;
+}
+
+/**
+ * Returns a valid access token for a connection row, refreshing (and persisting) when needed.
+ * Refresh is single-flight: a per-connection transaction-scoped advisory lock serialises refreshes, and
+ * after taking it we re-read the row so a token another worker just refreshed is reused, not refreshed
+ * again (some providers rotate refresh tokens and would invalidate the first one).
+ */
 export async function accessToken(q: Q, conn: any, force = false): Promise<string> {
   const p = conn.provider as OAuthProvider;
-  const t: Tokens = JSON.parse(open(conn.token_ciphertext, tokenAad(conn.org_id, p)));
+  let t: Tokens = JSON.parse(open(conn.token_ciphertext, tokenAad(conn.org_id, p)));
   // Stripe uses a restricted API key: nothing to refresh.
   if ((conn.provider as string) === 'stripe') return t.access_token;
-  if (!force && (!t.expires_at || t.expires_at > Date.now() + 60_000)) return t.access_token;
+  const fresh = (x: Tokens) => !x.expires_at || x.expires_at > Date.now() + 60_000;
+  if (!force && fresh(t)) return t.access_token;
+  if (!t.refresh_token) return t.access_token;
+  await q.exec(`select pg_advisory_xact_lock(hashtextextended('qline.oauth_refresh:' || $1::text, 0))`, [conn.id]);
+  const row = await q.one<{ token_ciphertext: string; status: string }>('select token_ciphertext, status from integration_connections where id=$1', [conn.id]);
+  if (row && row.token_ciphertext !== conn.token_ciphertext) {
+    conn.token_ciphertext = row.token_ciphertext;
+    t = JSON.parse(open(row.token_ciphertext, tokenAad(conn.org_id, p)));
+    if (fresh(t)) return t.access_token; // someone else refreshed while we waited
+  }
+  if (row && row.status === 'expired') throw new ConnectionExpired(`${PROVIDER_META[p].name} needs to be reconnected.`);
   if (!t.refresh_token) return t.access_token;
   const app = await getApp(p);
   if (!app) throw new ConnectionExpired('Integration app is no longer registered');
   const form: Record<string, string> = { client_id: app.clientId, client_secret: app.clientSecret, refresh_token: t.refresh_token, grant_type: 'refresh_token' };
   const r = await tokenRequest(p, app, form);
   if (!r.ok) {
+    if (!isDeadGrant(r.status, r.body)) {
+      throw new TokenRefreshUnavailable(`${PROVIDER_META[p].name} is not answering right now (${r.body?.error ?? `HTTP ${r.status}`}). Try again shortly.`);
+    }
     const testing = p === 'google' ? ' Google ends connections from apps in Testing mode after 7 days.' : '';
     const detail = `${PROVIDER_META[p].name} ended this connection (${r.body.error ?? r.status}).${testing} Reconnect to continue.`;
-    await q.exec(`update integration_connections set status='expired', status_detail=$2, updated_at=now() where id=$1`, [conn.id, detail]);
+    // Recorded in its own transaction: the caller's transaction rolls back when we throw, which used to
+    // silently undo this update and leave a dead connection marked 'ok'.
+    await withTenant({ orgId: conn.org_id, userId: 'system:oauth' }, (q2) =>
+      q2.exec(`update integration_connections set status='expired', status_detail=$2, updated_at=now() where id=$1`, [conn.id, detail]),
+    ).catch(() => {}); // best effort: if no pooled connection is free, the next caller records it
     throw new ConnectionExpired(detail);
   }
   const next: Tokens = { access_token: r.body.access_token, refresh_token: r.body.refresh_token ?? t.refresh_token, expires_at: Date.now() + Number(r.body.expires_in ?? 3600) * 1000 };
-  await q.exec('update integration_connections set token_ciphertext=$2, updated_at=now() where id=$1', [conn.id, sealTokens(conn.org_id, p, next)]);
-  conn.token_ciphertext = sealTokens(conn.org_id, p, next);
+  const sealed = sealTokens(conn.org_id, p, next);
+  await q.exec('update integration_connections set token_ciphertext=$2, updated_at=now() where id=$1', [conn.id, sealed]);
+  conn.token_ciphertext = sealed;
   return next.access_token;
 }
 

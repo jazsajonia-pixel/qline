@@ -22,6 +22,7 @@ import {
   redirectUri,
   saveApp,
   sealTokens,
+  TokenRefreshUnavailable,
   type Feature,
   type OAuthProvider,
 } from '../integrations/oauth';
@@ -261,6 +262,7 @@ async function connOrThrow(t: any, p: OAuthProvider) {
   return conn;
 }
 const tokenFor = (t: any, conn: any) => tx(t, (q) => accessToken(q, conn)).catch((e) => {
+  if (e instanceof TokenRefreshUnavailable) throw new ApiError(503, 'PROVIDER_UNAVAILABLE', `${PROVIDER_META[conn.provider as OAuthProvider].name} is not answering`, (e as Error).message);
   throw new ApiError(409, 'RECONNECT_REQUIRED', 'Reconnect needed', (e as Error).message);
 });
 const upstream = (e: unknown, what: string): never => {
