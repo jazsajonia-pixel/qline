@@ -9,11 +9,11 @@ import { open, seal } from '../core/secrets';
  * once per provider (Settings → Integration setup); after that every organization connects
  * its own account by logging in. Tokens are sealed per org and refreshed on use.
  */
-export type OAuthProvider = 'google' | 'microsoft' | 'slack';
-export const OAUTH_PROVIDERS: OAuthProvider[] = ['google', 'microsoft', 'slack'];
+export type OAuthProvider = 'google' | 'microsoft' | 'slack' | 'notion' | 'github';
+export const OAUTH_PROVIDERS: OAuthProvider[] = ['google', 'microsoft', 'slack', 'notion', 'github'];
 export const isOAuthProvider = (p: string): p is OAuthProvider => (OAUTH_PROVIDERS as string[]).includes(p);
 
-export type Feature = 'gmail' | 'sheets' | 'forms' | 'calendar' | 'outlook' | 'ms_calendar' | 'slack';
+export type Feature = 'gmail' | 'sheets' | 'forms' | 'calendar' | 'drive' | 'outlook' | 'ms_calendar' | 'slack' | 'notion' | 'github';
 
 const G = 'https://www.googleapis.com/auth/';
 export const FEATURE_SCOPES: Record<Feature, { provider: OAuthProvider; scopes: string[] }> = {
@@ -21,21 +21,42 @@ export const FEATURE_SCOPES: Record<Feature, { provider: OAuthProvider; scopes: 
   sheets: { provider: 'google', scopes: [G + 'drive.file'] },
   forms: { provider: 'google', scopes: [G + 'drive.file'] },
   calendar: { provider: 'google', scopes: [G + 'calendar.events'] },
+  // Read any file the account can open; create and edit only files Qline made (drive.file).
+  // drive.readonly is a restricted scope: fine for listed test users in Testing mode, needs Google verification to publish.
+  drive: { provider: 'google', scopes: [G + 'drive.readonly', G + 'drive.file'] },
   outlook: { provider: 'microsoft', scopes: ['Mail.Read', 'Mail.Send'] },
   ms_calendar: { provider: 'microsoft', scopes: ['Calendars.ReadWrite'] },
   slack: { provider: 'slack', scopes: ['chat:write', 'chat:write.public', 'channels:read', 'channels:manage'] },
+  // Notion has no scopes: the person picks which pages Qline may use on the Notion consent screen.
+  notion: { provider: 'notion', scopes: [] },
+  // GitHub App: permissions come from the app's settings (Issues read/write, Pull requests, Contents and Metadata read).
+  github: { provider: 'github', scopes: [] },
 };
 
 const BASE_SCOPES: Record<OAuthProvider, string[]> = {
   google: ['openid', 'email', 'profile'],
   microsoft: ['offline_access', 'openid', 'email', 'User.Read'],
   slack: [],
+  notion: [],
+  github: [],
 };
 
 export const PROVIDER_META: Record<OAuthProvider, { name: string; console: string }> = {
   google: { name: 'Google', console: 'https://console.cloud.google.com/apis/credentials' },
   microsoft: { name: 'Microsoft', console: 'https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps' },
   slack: { name: 'Slack', console: 'https://api.slack.com/apps' },
+  notion: { name: 'Notion', console: 'https://www.notion.so/profile/integrations' },
+  github: { name: 'GitHub', console: 'https://github.com/settings/apps' },
+};
+
+/** Providers whose authorize step does not take PKCE (Slack, Notion). */
+const NO_PKCE = new Set<OAuthProvider>(['slack', 'notion']);
+const AUTH_URL: Record<OAuthProvider, string> = {
+  google: 'https://accounts.google.com/o/oauth2/v2/auth',
+  microsoft: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+  slack: 'https://slack.com/oauth/v2/authorize',
+  notion: 'https://api.notion.com/v1/oauth/authorize',
+  github: 'https://github.com/login/oauth/authorize',
 };
 
 export function redirectUri(p: OAuthProvider) {
@@ -98,7 +119,7 @@ export async function buildAuthUrl(
   const feats = features.filter((f) => FEATURE_SCOPES[f]?.provider === p);
   const scopes = [...new Set([...BASE_SCOPES[p], ...feats.flatMap((f) => FEATURE_SCOPES[f].scopes)])];
   const state = randomBytes(24).toString('base64url');
-  const verifier = p === 'slack' ? null : randomBytes(32).toString('base64url');
+  const verifier = NO_PKCE.has(p) ? null : randomBytes(32).toString('base64url');
   const challenge = verifier ? createHash('sha256').update(verifier).digest('base64url') : null;
   await withTenant({ orgId: t.orgId, userId: t.userId }, async (q) => {
     await q.exec(`delete from oauth_states where created_at < now() - interval '30 minutes'`);
@@ -112,9 +133,7 @@ export async function buildAuthUrl(
       verifier,
     ]);
   });
-  const u = new URL(
-    p === 'google' ? 'https://accounts.google.com/o/oauth2/v2/auth' : p === 'microsoft' ? 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize' : 'https://slack.com/oauth/v2/authorize',
-  );
+  const u = new URL(AUTH_URL[p]);
   u.searchParams.set('client_id', app.clientId);
   u.searchParams.set('redirect_uri', redirectUri(p));
   u.searchParams.set('state', state);
@@ -122,10 +141,13 @@ export async function buildAuthUrl(
     u.searchParams.set('scope', scopes.join(','));
   } else {
     u.searchParams.set('response_type', 'code');
-    u.searchParams.set('scope', scopes.join(' '));
-    u.searchParams.set('code_challenge', challenge!);
-    u.searchParams.set('code_challenge_method', 'S256');
+    if (scopes.length) u.searchParams.set('scope', scopes.join(' '));
+    if (challenge) {
+      u.searchParams.set('code_challenge', challenge);
+      u.searchParams.set('code_challenge_method', 'S256');
+    }
   }
+  if (p === 'notion') u.searchParams.set('owner', 'user');
   if (p === 'google') {
     u.searchParams.set('access_type', 'offline');
     u.searchParams.set('prompt', 'consent');
@@ -154,7 +176,32 @@ const TOKEN_URL: Record<OAuthProvider, string> = {
   google: 'https://oauth2.googleapis.com/token',
   microsoft: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
   slack: 'https://slack.com/api/oauth.v2.access',
+  notion: 'https://api.notion.com/v1/oauth/token',
+  github: 'https://github.com/login/oauth/access_token',
 };
+
+/** Notion's token endpoint takes JSON with HTTP Basic client authentication. */
+async function postNotion(form: Record<string, string>, app: { clientId: string; clientSecret: string }) {
+  const r = await fetch(TOKEN_URL.notion, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20_000),
+    headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}` },
+    body: JSON.stringify(form),
+  });
+  const j: any = await r.json().catch(() => ({}));
+  return { ok: r.ok && !j.error, status: r.status, body: j };
+}
+
+/** Token request for any provider. GitHub answers errors with HTTP 200 and an `error` field. */
+async function tokenRequest(p: OAuthProvider, app: { clientId: string; clientSecret: string }, form: Record<string, string>) {
+  if (p === 'notion') {
+    const { client_id: _a, client_secret: _b, ...rest } = form;
+    return postNotion(rest, app);
+  }
+  const r = await postForm(TOKEN_URL[p], form);
+  if (p === 'github' && r.body?.error) return { ...r, ok: false };
+  return r;
+}
 
 export async function exchangeCode(p: OAuthProvider, code: string, verifier: string | null) {
   const app = await getApp(p);
@@ -162,7 +209,7 @@ export async function exchangeCode(p: OAuthProvider, code: string, verifier: str
   const form: Record<string, string> = { client_id: app.clientId, client_secret: app.clientSecret, code, redirect_uri: redirectUri(p) };
   if (p !== 'slack') form.grant_type = 'authorization_code';
   if (verifier) form.code_verifier = verifier;
-  const r = await postForm(TOKEN_URL[p], form);
+  const r = await tokenRequest(p, app, form);
   if (!r.ok) throw new ApiError(400, 'OAUTH_EXCHANGE_FAILED', 'Login could not be completed', r.body.error_description ?? r.body.error ?? `HTTP ${r.status}`);
   const b = r.body;
   const tokens: Tokens = { access_token: b.access_token, refresh_token: b.refresh_token ?? null, expires_at: b.expires_in ? Date.now() + Number(b.expires_in) * 1000 : null };
@@ -172,6 +219,12 @@ export async function exchangeCode(p: OAuthProvider, code: string, verifier: str
 
 export async function fetchIdentity(p: OAuthProvider, tokens: Tokens, raw: any): Promise<{ email: string | null; name: string | null }> {
   if (p === 'slack') return { email: null, name: raw.team?.name ?? 'Slack workspace' };
+  if (p === 'notion') return { email: raw.owner?.user?.person?.email ?? null, name: raw.workspace_name ?? raw.owner?.user?.name ?? 'Notion workspace' };
+  if (p === 'github') {
+    const r = await fetch('https://api.github.com/user', { signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${tokens.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'Qline' } });
+    const j: any = await r.json().catch(() => ({}));
+    return { email: j.email ?? null, name: j.login ?? j.name ?? 'GitHub account' };
+  }
   const url = p === 'google' ? 'https://openidconnect.googleapis.com/v1/userinfo' : 'https://graph.microsoft.com/v1.0/me';
   const r = await fetch(url, { headers: { authorization: `Bearer ${tokens.access_token}` } });
   const j: any = await r.json().catch(() => ({}));
@@ -186,15 +239,17 @@ export function sealTokens(orgId: string, p: string, t: Tokens) {
 export class ConnectionExpired extends Error {}
 
 /** Returns a valid access token for a connection row, refreshing (and persisting) when needed. */
-export async function accessToken(q: Q, conn: any): Promise<string> {
+export async function accessToken(q: Q, conn: any, force = false): Promise<string> {
   const p = conn.provider as OAuthProvider;
   const t: Tokens = JSON.parse(open(conn.token_ciphertext, tokenAad(conn.org_id, p)));
-  if (!t.expires_at || t.expires_at > Date.now() + 60_000) return t.access_token;
+  // Stripe uses a restricted API key: nothing to refresh.
+  if ((conn.provider as string) === 'stripe') return t.access_token;
+  if (!force && (!t.expires_at || t.expires_at > Date.now() + 60_000)) return t.access_token;
   if (!t.refresh_token) return t.access_token;
   const app = await getApp(p);
   if (!app) throw new ConnectionExpired('Integration app is no longer registered');
   const form: Record<string, string> = { client_id: app.clientId, client_secret: app.clientSecret, refresh_token: t.refresh_token, grant_type: 'refresh_token' };
-  const r = await postForm(TOKEN_URL[p], form);
+  const r = await tokenRequest(p, app, form);
   if (!r.ok) {
     const testing = p === 'google' ? ' Google ends connections from apps in Testing mode after 7 days.' : '';
     const detail = `${PROVIDER_META[p].name} ended this connection (${r.body.error ?? r.status}).${testing} Reconnect to continue.`;

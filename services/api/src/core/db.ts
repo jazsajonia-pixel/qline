@@ -34,9 +34,17 @@ function wrap(client: pg.PoolClient): Q {
   };
 }
 
+/**
+ * What kind of work this transaction serves. Only 'interactive' (a person's own request) can see
+ * that person's private knowledge; jobs, missions, workflows and system loops cannot (docs/14 §5.4).
+ * The default is 'system', so any path that forgets to say fails closed.
+ */
+export type RunKind = 'interactive' | 'job' | 'mission' | 'workflow' | 'system';
+
 export interface DbCtx {
   orgId: string | null;
   userId: string;
+  runKind?: RunKind;
 }
 
 /**
@@ -47,7 +55,11 @@ export async function withTenant<T>(ctx: DbCtx, fn: (q: Q) => Promise<T>): Promi
   const client = await getPool().connect();
   try {
     await client.query('begin');
-    await client.query("select set_config('qline.org_id', $1, true), set_config('qline.user_id', $2, true)", [ctx.orgId ?? '', ctx.userId]);
+    await client.query("select set_config('qline.org_id', $1, true), set_config('qline.user_id', $2, true), set_config('qline.run_kind', $3, true)", [
+      ctx.orgId ?? '',
+      ctx.userId,
+      ctx.runKind ?? 'system',
+    ]);
     const result = await fn(wrap(client));
     await client.query('commit');
     return result;

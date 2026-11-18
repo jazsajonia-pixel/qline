@@ -19,6 +19,7 @@ import { workRoutes } from './modules/work';
 import { integrationRoutes, oauthPublicRoutes } from './modules/integrations';
 import { googleSignInRoutes } from './modules/google-signin';
 import { voiceRoutes } from './modules/voice';
+import { knowledgeRoutes } from './modules/knowledge';
 
 export const app = new Hono<Env>();
 
@@ -120,3 +121,4 @@ app.route('/v1', importRoutes);
 app.route('/v1', fileRoutes);
 app.route('/v1', integrationRoutes);
 app.route('/v1', voiceRoutes);
+app.route('/v1', knowledgeRoutes);

@@ -1,8 +1,25 @@
 # 14 · Knowledge OS (KOS) — architecture (design only)
 
-Version 0.1 · 2026-11-17 · Status: **design proposal for owner review — nothing in this document is implemented.**
+Version 0.2 · 2026-11-18 · Status: **K1 (foundation) and K3 (map) implemented in v1.6 with a reduced scope; K2 (context drawer and automatic injection) and K4 (capture) are still proposals.**
 
-Scope of this document: investigation, architecture and plan only. It does not add migrations, endpoints, jobs or mobile UI. The milestones K1–K4 below need separate approval before any code is written.
+Version 0.1 of this document was design only. The owner asked for the Knowledge OS and the knowledge graph in v1.6 run 3, so part of the plan was built. What was built, and how it differs from the plan, is listed in §0. Everything else below keeps its original label.
+
+## 0. Implementation status (v1.6 run 3)
+
+| Item | Plan | Built | Differences |
+|---|---|---|---|
+| Migration | 0009 (planned number) | `packages/schema/migrations/0012_v16_knowledge_connectors.sql` | 0009–0011 were used by v1.5/v1.6. Entries stay in `memory_records` (new columns), plus `knowledge_categories`, `knowledge_links`, `knowledge_revisions`. No `pg_trgm`; ranking uses a generated `tsvector` column with a GIN index plus an `ilike` fallback. |
+| Visibility | private / workspace via restrictive RLS and `qline.run_kind` | Done. `qline_interactive()` reads `qline.run_kind`; `withTenant` defaults to `'system'` (fail closed); only `tx()` (API requests) and chat runs set `'interactive'`. | Missions, workflows, jobs and approved-tool execution stay `'system'` and never see private entries. |
+| Revisions | per-entry revisions with optimistic concurrency | Done (`ifRevision`, 409 `REVISION_CONFLICT`). | — |
+| Links | typed links, proposed agent links | Done. Agent links are created active and marked "Added by AI" (dashed on the map) instead of waiting as proposals. A shared entry cannot link to a private one (409 `PRIVATE_TARGET`). | Deviation: agent links are not a separate review queue. |
+| Categories | template seeding, `knowledge.organize` | Done (11 defaults incl. Inbox; managers and up can organize; archiving a category moves its entries to Inbox). | — |
+| API | entries, categories, links, targets, graph | `services/api/src/modules/knowledge.ts` | Graph caps 150 nodes / 400 edges with `truncated`. |
+| Agent tools | `knowledge.search` in K2 | `knowledge.search`, `knowledge.propose`, `knowledge.link` (`agent/tools-knowledge.ts`) | Search is a tool the agent calls; there is no automatic context injection yet (K2). Proposals in a chat are private to that person; proposals from background runs are workspace-visible and unconfirmed. |
+| `untrusted()` escape (§2.7 finding 1) | K2 | Fixed: `<data` / `</data` inside a body are neutralised and the source attribute is sanitised (`agent/runner.ts`). | — |
+| Mobile | Library Knowledge list + entry screen; map with painter, list equivalent, inspector | `apps/mobile/lib/screens/knowledge.dart`, `knowledge_graph.dart` | Layout runs on the UI isolate (deterministic seeded force layout, tested at the 150-node cap) instead of a separate isolate. The 60 fps spike on a mid-range Android has **not** been done. |
+| Not built | K2 drawer, context records, citations; K4 capture, secret scanner, embeddings; personal vault (§5.5) | — | Still proposals. |
+
+Tests: `services/api/test/knowledge-connectors.integration.test.ts` covers T1, T2, T3, T5 and graph caps; `apps/mobile/test/v16_knowledge_test.dart` covers layout determinism and the screens in both themes.
 
 How to read the labels:
 
@@ -101,7 +118,7 @@ All paths are on `main` at `766768a` unless marked. Line numbers are from that c
 | Assistant bubbles show tool steps (`summary` + mono tool name) but **do not render `refs`/citations**. | `live.dart:660-712` | [Verified] |
 | Library has Docs, Memory (list with Confirm / Supersede / Delete) and Search. | `apps/mobile/lib/screens/library.dart:10-232` | [Verified] |
 | Shell tabs: Home, Work, (Live AI centre), Business, Library; org switcher in the title. | `apps/mobile/lib/screens/shell.dart:33-113` | [Verified] |
-| Tokens: `QColors` dark (`bg #0A0812`, `halo #5EF2C6`, …) and light (`bg #F6F4FA`, `halo #087A5E`, …); agent hues in `AgentStyle.map`. | `apps/mobile/lib/ui/theme.dart:5-56, 156-168` | [Verified] |
+| Tokens (at `766768a`, since replaced): `QColors` dark (`bg #0A0812`, `halo #5EF2C6`, …) and light (`bg #F6F4FA`, `halo #087A5E`, …); agent hues in `AgentStyle.map`. v1.6 replaced these with "Citrine Signal on Spruce Ink" (dark `bg #07100F`, `halo #F5C451`; light `bg #F3F6F4`, `halo #7A5900`). | `apps/mobile/lib/ui/theme.dart` | [Verified] |
 | No graph, canvas or force-layout package in dependencies. | `apps/mobile/pubspec.yaml:30-46` | [Verified] |
 
 ### 2.6 Mission contracts (PR #5 branch)
@@ -561,7 +578,7 @@ Neither package documents accessibility or large-graph performance, which are ha
 
 ### 9.4 Visual direction (Qline-native)
 
-The graph is the visual signature of KOS. Nodes are small solid dots on the ink background; the selected node gets the `halo` ring (mint `#5EF2C6` dark, `#087A5E` light) and its connections brighten from `lineStrong` to `text2`. Categories are distinguished by position (clusters) and a label, with an optional small hue from the existing `AgentStyle` palette only where the category maps to an agent's domain (Offers → sales hue, etc.). There are no gradients, glass, glow fields or card grids. Typography: Hanken Grotesk for labels, JetBrains Mono only for revision and ids in the inspector. Both themes must be checked: in light, edges use `line`/`lineStrong` on `#F6F4FA` and node labels use `text` (`#15121F`) with a 1 px background knockout for contrast.
+The graph is the visual signature of KOS. Nodes are small solid dots on the ink background; the selected node gets the `halo` ring (citrine `#F5C451` dark, `#7A5900` light) and its connections brighten from `lineStrong` to `text2`. Categories are distinguished by position (clusters) and a label, with an optional small hue from the existing `AgentStyle` palette only where the category maps to an agent's domain (Offers → sales hue, etc.). There are no gradients, glass, glow fields or card grids. Typography: Hanken Grotesk for labels, JetBrains Mono only for revision and ids in the inspector. Both themes must be checked: in light, edges use `line`/`lineStrong` on `#F3F6F4` and node labels use `text` (`#0E1716`) with a 1 px background knockout for contrast.
 
 ---
 

@@ -94,8 +94,35 @@ The palette is now "Citrine Signal on Spruce Ink"; tokens and contrast ratios ar
 
 When `NODE_ENV=test` and no S3 bucket is configured, the imports module uses an in-memory object store, so integration tests can run file flows. Production still requires S3; nothing changed there.
 
+## Run 3: Knowledge OS, knowledge map and connectors
+
+### Knowledge OS (K1) and map (K3)
+
+- Migration `0012_v16_knowledge_connectors.sql` adds the entry columns on `memory_records` (title, body, category, tags, visibility, owner, pinned, revision, soft delete, search vector) plus `knowledge_categories`, `knowledge_links` and `knowledge_revisions`.
+- Private entries are enforced in Postgres: a restrictive RLS policy only returns another person's private entry to nobody, and returns your own private entries only when `qline.run_kind = 'interactive'`. `withTenant` defaults to `'system'`, so background missions, jobs and workflows cannot read private entries even when they run for you.
+- API: `services/api/src/modules/knowledge.ts` (categories, entries with `ifRevision`, share/unshare/confirm, links, link targets, graph with caps 150 nodes / 400 edges).
+- AI tools: `knowledge.search`, `knowledge.propose`, `knowledge.link`. The prompt tells the AI to check knowledge before answering questions about how the business works.
+- Mobile: Library → Knowledge replaces the Memory tab (list, entry screen with history and connections, editor, link picker) and **Knowledge map** (force layout, category clusters, ego view, inspector, list equivalent for screen readers, legend; AI-added links are dashed).
+- Not built: the K2 context drawer, automatic injection and citations; K4 capture. See docs/14 §0.
+
+### Connectors
+
+| Provider | Tools | Auth |
+|---|---|---|
+| Google Drive | `drive.search`, `drive.read`, `drive.save_to_library`, `drive.create`, `drive.update` | Google OAuth, feature "Drive files" (`drive.readonly` + `drive.file`) |
+| Notion | `notion.search`, `notion.read`, `notion.create`, `notion.append` | Notion public integration |
+| GitHub | `github.repos`, `github.issues`, `github.read`, `github.issue.create`, `github.issue.comment` | GitHub App user token |
+| Stripe | `stripe.summary`, `stripe.list`, `stripe.customer.create`, `stripe.invoice.draft` | Restricted key (`rk_`), pasted per workspace |
+
+Risk levels are in docs/09. Owner setup steps are in `docs/integration-setup.md` §1 and §4–6.
+
+### Tests
+
+- API: `services/api/test/knowledge-connectors.integration.test.ts` (12 tests: cross-org, cross-user, run kind, share/unshare, revision conflict, private-target links, graph caps, Stripe key rules, connector errors), plus 4 unit tests.
+- Mobile: `apps/mobile/test/v16_knowledge_test.dart` (9 tests: layout determinism/bounds/cap, map in both themes, inspector and ego view, entry screen share confirmation, editor revision, Stripe key sheet).
+
 ## Deploy order
 
-1. Merge PR #15 (Slack fixes), then PR #16, then the run-2 PR.
-2. Apply migrations `0010_v16_autonomy.sql` and `0011_v16_files_charts.sql` to production.
+1. Merge PR #15 (Slack fixes), then PR #16, then PR #17 (run 2), then the run-3 PR.
+2. Apply migrations `0010_v16_autonomy.sql`, `0011_v16_files_charts.sql` and `0012_v16_knowledge_connectors.sql` to production.
 3. Deploy the API, then release the APK.

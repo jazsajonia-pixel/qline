@@ -11,7 +11,10 @@ import 'leads.dart';
 
 Map<String, dynamic> _m(dynamic v) => (v as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
 
-const _icons = {'google': Icons.mail_outline, 'microsoft': Icons.window_outlined, 'slack': Icons.tag};
+const _icons = {'google': Icons.mail_outline, 'microsoft': Icons.window_outlined, 'slack': Icons.tag, 'notion': Icons.article_outlined, 'github': Icons.code, 'stripe': Icons.payments_outlined};
+
+/// Providers that sync leads on a schedule (the others are used by the AI on demand).
+const syncingProviders = {'google', 'microsoft'};
 
 Future<void> _open(BuildContext context, String? url) async {
   if (url == null) return;
@@ -72,6 +75,14 @@ class _IntegrationsState extends ConsumerState<IntegrationsScreen> with WidgetsB
   Set<String> _connectedIds() => items(_data, 'providers').where((p) => p['connection'] != null).map((p) => p['id'] as String).toSet();
 
   Future<void> _connect(Map<String, dynamic> p, {List<String>? only}) async {
+    if (p['auth'] == 'key') {
+      final ok = await showModalBottomSheet<bool>(context: context, isScrollControlled: true, showDragHandle: true, builder: (_) => const StripeKeySheet());
+      if (ok == true && mounted) {
+        toast(context, 'Stripe connected');
+        await _load();
+      }
+      return;
+    }
     final features = items(p, 'features');
     final picked = only ?? await showModalBottomSheet<List<String>>(context: context, isScrollControlled: true, builder: (_) => _ConnectSheet(provider: p, features: features));
     if (picked == null || !mounted) return;
@@ -127,7 +138,7 @@ class _IntegrationsState extends ConsumerState<IntegrationsScreen> with WidgetsB
                     ),
                   ),
                 if (items(d, 'providers').any((p) => p['id'] == 'google'))
-                  _Note(icon: Icons.info_outline, text: 'Google lets an app in “Testing” mode connect only listed test accounts, and those logins expire after 7 days. Qline will tell you when to reconnect. Gmail reading for everyone needs Google verification.'),
+                  _Note(icon: Icons.info_outline, text: 'Google lets an app in “Testing” mode connect only listed test accounts, and those logins expire after 7 days. Qline will tell you when to reconnect. Gmail reading and Drive reading for everyone need Google verification.'),
                 const SectionLabel('Also in Qline'),
                 for (final o in items(d, 'other'))
                   ListTile(
@@ -316,12 +327,13 @@ class _ConnectionState extends ConsumerState<ConnectionScreen> {
               Row(children: [Expanded(child: Text((_conn['accountEmail'] ?? _conn['accountName'] ?? 'Connected account') as String, style: qs(16, w: FontWeight.w600, c: q.text))), StatusPill(ok ? 'active' : _conn['status'] as String)]),
               const SizedBox(height: 6),
               KV('Connected', dateLabel(_conn['connectedAt'] as String?)),
-              KV('Last sync', _conn['lastSyncAt'] == null ? 'Not yet' : ago(_conn['lastSyncAt'] as String?)),
+              if (syncingProviders.contains(_p)) KV('Last sync', _conn['lastSyncAt'] == null ? 'Not yet' : ago(_conn['lastSyncAt'] as String?)),
+              if (_settings['mode'] == 'test') const KV('Mode', 'Test data'),
               if (_conn['statusDetail'] != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text(_conn['statusDetail'] as String, style: qs(13, c: ok ? q.text2 : q.warn))),
               const SizedBox(height: 12),
               if (!ok)
                 QButton('Reconnect', kind: QBtn.halo, icon: Icons.login, expand: true, onPressed: () => widget.onReconnect(_features.isEmpty ? null : _features))
-              else if (_p != 'slack')
+              else if (syncingProviders.contains(_p))
                 QButton('Sync now', icon: Icons.sync, busy: _syncing, expand: true, onPressed: _sync),
             ]),
           ),
@@ -527,6 +539,79 @@ class _AppKeysSheetState extends ConsumerState<_AppKeysSheet> {
           if (r != null) Navigator.pop(context, true);
         }),
       ]),
+    );
+  }
+}
+
+/// Stripe connects with a restricted key the owner creates, so they choose exactly what Qline may touch.
+class StripeKeySheet extends ConsumerStatefulWidget {
+  const StripeKeySheet({super.key});
+  @override
+  ConsumerState<StripeKeySheet> createState() => _StripeKeySheetState();
+}
+
+class _StripeKeySheetState extends ConsumerState<StripeKeySheet> {
+  final _key = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _key.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final k = _key.text.trim();
+    if (!RegExp(r'^rk_(live|test)_').hasMatch(k)) {
+      setState(() => _error = k.startsWith('sk_') ? 'That is a full secret key. Create a restricted key (rk_…) instead.' : 'A restricted key starts with rk_live_ or rk_test_.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(apiProvider).post('/integrations/stripe/key', {'key': k});
+      if (mounted) Navigator.pop(context, true);
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    Widget perm(String t) => Padding(padding: const EdgeInsets.only(top: 4), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(Icons.check, size: 15, color: q.text2), const SizedBox(width: 6), Expanded(child: Text(t, style: qs(13, c: q.text2)))]));
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 0, 20, 16 + MediaQuery.viewInsetsOf(context).bottom),
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Connect Stripe', style: qs(20, w: FontWeight.w600, c: q.text)),
+            const SizedBox(height: 6),
+            Text('In the Stripe Dashboard, go to Developers → API keys → Create restricted key, and allow only:', style: qs(14, c: q.text2, h: 1.4)),
+            perm('Read: Balance, Charges, Customers, Invoices, Subscriptions, Products'),
+            perm('Write: Customers, Invoices (for drafts only)'),
+            const SizedBox(height: 8),
+            Text('Qline never sends, finalizes, charges or refunds. Invoices it prepares stay drafts until you send them in Stripe.', style: qs(13, c: q.text3, h: 1.4)),
+            const SizedBox(height: 4),
+            TextButton.icon(onPressed: () => _open(context, 'https://dashboard.stripe.com/apikeys'), icon: const Icon(Icons.open_in_new, size: 16), label: const Text('Open Stripe API keys')),
+            TextField(
+              controller: _key,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(labelText: 'Restricted key', hintText: 'rk_live_…', errorText: _error, errorMaxLines: 3),
+              onSubmitted: (_) => _save(),
+            ),
+            const SizedBox(height: 14),
+            QButton('Connect Stripe', kind: QBtn.halo, icon: Icons.link, expand: true, busy: _busy, onPressed: _save),
+          ]),
+        ),
+      ),
     );
   }
 }

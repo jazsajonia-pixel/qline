@@ -7,6 +7,8 @@ import { appTools } from './tools-apps';
 import { moreTools } from './tools-more';
 import { v16Tools } from './tools-v16';
 import { fileTools } from './tools-files';
+import { knowledgeTools } from './tools-knowledge';
+import { connectorTools } from './tools-connectors';
 
 export interface ToolCtx {
   orgId: string;
@@ -14,6 +16,8 @@ export interface ToolCtx {
   /** Who is acting: the agent (chat) or workflow, on behalf of `userId`. */
   actor: { kind: 'agent' | 'workflow'; id: string };
   userId: string;
+  /** True only for a person's own chat turn. Private knowledge is only reachable then. */
+  interactive?: boolean;
 }
 
 export interface ToolResult {
@@ -154,7 +158,7 @@ const defs = {
     schema: z.object({ query: z.string().max(200).optional() }),
     async execute(q, _ctx, a) {
       const rows = await q.many(
-        `select id, kind, content, source_kind, confidence from memory_records where status='active' and ($1::text is null or content ilike '%' || $1 || '%') order by updated_at desc limit 20`,
+        `select id, kind, content, source_kind, confidence from memory_records where status='active' and deleted_at is null and ($1::text is null or content ilike '%' || $1 || '%') order by updated_at desc limit 20`,
         [a.query ?? null],
       );
       return { ok: true, summary: `${rows.length} memories`, refs: rows.map((r) => ({ type: 'memory', id: r.id })), data: rows };
@@ -224,6 +228,8 @@ const defs = {
   ...moreTools,
   ...v16Tools,
   ...fileTools,
+  ...knowledgeTools,
+  ...connectorTools,
 };
 
 export type ToolName = keyof typeof defs;
