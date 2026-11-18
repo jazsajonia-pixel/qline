@@ -16,11 +16,11 @@ import type { ToolDef } from './tools';
 type Conn = { conn: any; token: string };
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export async function connection(q: Q, providers: ('google' | 'microsoft' | 'slack')[], scope?: (p: string) => string): Promise<Conn | string> {
+export async function connection(q: Q, providers: ('google' | 'microsoft' | 'slack' | 'notion' | 'github' | 'stripe')[], scope?: (p: string) => string): Promise<Conn | string> {
   const rows = await q.many(`select * from integration_connections where provider = any($1) and status='ok' order by provider`, [providers]);
   const conn = rows.find((c: any) => !scope || hasScope(c, scope(c.provider)));
   if (!conn) {
-    const names = providers.map((p) => ({ google: 'Google', microsoft: 'Microsoft', slack: 'Slack' })[p]).join(' or ');
+    const names = providers.map((p) => ({ google: 'Google', microsoft: 'Microsoft', slack: 'Slack', notion: 'Notion', github: 'GitHub', stripe: 'Stripe' })[p]).join(' or ');
     return rows.length
       ? `${names} is connected but without the permission this needs. Reconnect it in Settings → Integrations and allow the requested access.`
       : `${names} is not connected. Connect it in Settings → Integrations first.`;

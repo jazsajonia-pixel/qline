@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { audit } from '../core/audit';
 import { need, tx, type Env } from '../core/context';
 import { withTenant } from '../core/db';
-import { ApiError, notFound } from '../core/errors';
+import { ApiError, badRequest, notFound } from '../core/errors';
 import { body } from '../core/validate';
 import {
   accessToken,
@@ -13,6 +13,7 @@ import {
   exchangeCode,
   FEATURE_SCOPES,
   fetchIdentity,
+  getApp,
   hasScope,
   isOAuthProvider,
   isPlatformAdmin,
@@ -27,6 +28,7 @@ import {
 import { classify, loadRules, rulesSchema, saveRules, syncConnection } from '../integrations/leads';
 import { formCreate, sheetCreate, slackChannels, slackPost, slackRevoke, upcomingEvents } from '../integrations/services';
 import { open } from '../core/secrets';
+import { STRIPE_KEY, stripeVerify } from '../integrations/connectors';
 import { finishGoogleSignIn, SIGNIN_STATE_PREFIX } from './google-signin';
 import { complete } from '@qline/ai';
 import { resolveModel } from '../agent/models';
@@ -37,19 +39,22 @@ const FEATURES: Record<OAuthProvider, { id: Feature; name: string; detail: strin
     { id: 'sheets', name: 'Google Sheets', detail: 'A “Qline Leads” sheet that stays in sync: new leads go in, rows you add come back as leads.' },
     { id: 'forms', name: 'Google Forms', detail: 'A ready-made lead form. Every response becomes a lead automatically.' },
     { id: 'calendar', name: 'Google Calendar', detail: 'See upcoming events and let workflows book follow-ups.' },
+    { id: 'drive', name: 'Google Drive', detail: 'The AI can search and read your Drive files, and create or update files it made (with your approval).' },
   ],
   microsoft: [
     { id: 'outlook', name: 'Outlook lead inbox', detail: 'Reads new Outlook / Microsoft 365 inbox emails, finds leads and rates urgency.' },
     { id: 'ms_calendar', name: 'Outlook Calendar', detail: 'See upcoming events and let workflows book follow-ups.' },
   ],
   slack: [{ id: 'slack', name: 'Slack alerts', detail: 'Posts urgent leads, approvals and workflow messages to a channel.' }],
+  notion: [{ id: 'notion', name: 'Notion pages', detail: 'The AI can search and read the pages you share with Qline, and create or add to pages with your approval.' }],
+  github: [{ id: 'github', name: 'GitHub issues', detail: 'The AI can read repositories, issues and pull requests where the Qline app is installed, and open issues or comment with your approval. It never changes code.' }],
 };
+
+/** Key-based providers (no OAuth app): the organization pastes a restricted key. */
+const STRIPE_FEATURES = [{ id: 'stripe', name: 'Stripe payments', detail: 'The AI can summarize payments, invoices and subscriptions. It can add customers and prepare draft invoices with your approval; it never sends, charges or refunds.' }];
 
 const PLANNED = [
   { id: 'file_import', name: 'File import', category: 'Data', status: 'available', detail: 'CSV, XLSX, JSON, TXT, MD, PDF and DOCX up to 10 MB. Use Import.' },
-  { id: 'notion', name: 'Notion', category: 'Docs', status: 'planned', detail: 'Planned.' },
-  { id: 'github', name: 'GitHub', category: 'Dev', status: 'planned', detail: 'Planned.' },
-  { id: 'stripe', name: 'Stripe', category: 'Payments', status: 'planned', detail: 'Planned: read-only revenue sync.' },
   { id: 'meta', name: 'Meta (Facebook / Instagram)', category: 'Marketing', status: 'planned', detail: 'Needs Meta app review. Planned.' },
 ];
 
@@ -70,7 +75,7 @@ const publicConn = (c: any) =>
     settings: c.settings,
     lastSyncAt: c.last_sync_at,
     connectedAt: c.created_at,
-    features: FEATURES[c.provider as OAuthProvider].filter((f) => FEATURE_SCOPES[f.id].scopes.every((s) => hasScope(c, s))).map((f) => f.id),
+    features: c.provider === 'stripe' ? ['stripe'] : FEATURES[c.provider as OAuthProvider].filter((f) => FEATURE_SCOPES[f.id].scopes.every((s) => hasScope(c, s))).map((f) => f.id),
   };
 
 // ---------------------------------------------------------------------------------------------
@@ -151,7 +156,10 @@ integrationRoutes.get('/integrations', async (c) => {
   const [apps, conns] = await Promise.all([appStatus(), tx(t, (q) => q.many('select * from integration_connections'))]);
   const byP = new Map(conns.map((x: any) => [x.provider, x]));
   return c.json({
-    providers: OAUTH_PROVIDERS.map((p) => ({ id: p, name: PROVIDER_META[p].name, registered: apps[p].configured, connection: publicConn(byP.get(p)) ?? null, features: FEATURES[p] })),
+    providers: [
+      ...OAUTH_PROVIDERS.map((p) => ({ id: p, name: PROVIDER_META[p].name, auth: 'oauth', registered: apps[p].configured, connection: publicConn(byP.get(p)) ?? null, features: FEATURES[p] })),
+      { id: 'stripe', name: 'Stripe', auth: 'key', registered: true, connection: publicConn(byP.get('stripe')) ?? null, features: STRIPE_FEATURES },
+    ],
     other: PLANNED,
     canSetup: isPlatformAdmin(t.email),
     // legacy shape for v1.1 clients
@@ -168,9 +176,35 @@ integrationRoutes.post('/integrations/:provider/connect', async (c) => {
   return c.json({ url: await buildAuthUrl(p, t, features) });
 });
 
+// Stripe: the owner creates a restricted key in the Stripe Dashboard and pastes it here.
+integrationRoutes.post('/integrations/stripe/key', async (c) => {
+  const t = need(c, 'integrations.manage');
+  const input = await body(c, z.object({ key: z.string().trim().min(10).max(300) }));
+  if (/^sk_(live|test)_/.test(input.key)) throw new ApiError(400, 'STRIPE_SECRET_KEY', 'Use a restricted key', 'Full secret keys are not accepted. In Stripe, create a restricted key (rk_…) with only the permissions listed in Qline.');
+  if (!STRIPE_KEY.test(input.key)) throw badRequest('That is not a Stripe restricted key (it starts with rk_live_ or rk_test_).');
+  const who = await stripeVerify(input.key).catch((e) => {
+    throw new ApiError(400, 'STRIPE_KEY_REJECTED', 'Stripe did not accept this key', (e as Error).message);
+  });
+  const mode = input.key.startsWith('rk_test_') ? 'test' : 'live';
+  const row = await tx(t, async (q) => {
+    const r = await q.one(
+      `insert into integration_connections (org_id, workspace_id, provider, account_email, account_name, scopes, token_ciphertext, status, connected_by, settings)
+       values ($1,$2,'stripe',$3,$4,$5,$6,'ok',$7,$8)
+       on conflict (org_id, provider) do update set account_email=excluded.account_email, account_name=excluded.account_name, scopes=excluded.scopes,
+         token_ciphertext=excluded.token_ciphertext, status='ok', status_detail=null, connected_by=excluded.connected_by, settings=excluded.settings, updated_at=now()
+       returning *`,
+      [t.orgId, t.workspaceId, who.email, who.name, ['restricted_key'], sealTokens(t.orgId, 'stripe', { access_token: input.key }), t.userId, JSON.stringify({ mode })],
+    );
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'integration.connected', targetRef: 'integration:stripe', detail: { account: who.name, mode } });
+    return r;
+  });
+  return c.json(publicConn(row), 201);
+});
+
 integrationRoutes.delete('/integrations/:provider', async (c) => {
   const t = need(c, 'integrations.manage');
-  const p = providerParam(c.req.param('provider'));
+  const raw = c.req.param('provider');
+  const p = (raw === 'stripe' ? 'stripe' : providerParam(raw)) as OAuthProvider;
   const conn = await tx(t, (q) => q.one('select * from integration_connections where provider=$1', [p]));
   if (!conn) throw notFound('Connection');
   if (p === 'google' || p === 'slack') {
@@ -178,6 +212,23 @@ integrationRoutes.delete('/integrations/:provider', async (c) => {
       const tok = JSON.parse(open(conn.token_ciphertext, `oauth:${t.orgId}:${p}`));
       if (p === 'google') await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tok.refresh_token ?? tok.access_token)}`, { method: 'POST', signal: AbortSignal.timeout(10_000) });
       else await slackRevoke(tok.access_token);
+    } catch {
+      /* best effort */
+    }
+  }
+  if (p === 'github') {
+    // Revoking a GitHub App user token needs the app's client credentials (best effort).
+    try {
+      const tok = JSON.parse(open(conn.token_ciphertext, `oauth:${t.orgId}:${p}`));
+      const app = await getApp('github');
+      if (app) {
+        await fetch(`https://api.github.com/applications/${encodeURIComponent(app.clientId)}/token`, {
+          method: 'DELETE',
+          signal: AbortSignal.timeout(10_000),
+          headers: { authorization: `Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}`, accept: 'application/vnd.github+json', 'user-agent': 'Qline', 'content-type': 'application/json' },
+          body: JSON.stringify({ access_token: tok.access_token }),
+        });
+      }
     } catch {
       /* best effort */
     }
@@ -220,6 +271,7 @@ const upstream = (e: unknown, what: string): never => {
 integrationRoutes.post('/integrations/:provider/sync', async (c) => {
   const t = need(c, 'integrations.manage');
   const p = providerParam(c.req.param('provider'));
+  if (p !== 'google' && p !== 'microsoft') throw new ApiError(400, 'NOT_SYNCABLE', `${PROVIDER_META[p].name} does not sync`, 'Only Google and Microsoft inboxes sync leads.');
   const conn = await connOrThrow(t, p);
   const r = await syncConnection({ orgId: t.orgId, workspaceId: t.workspaceId, userId: conn.connected_by }, conn.id);
   return c.json(r);

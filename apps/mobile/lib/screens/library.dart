@@ -5,6 +5,7 @@ import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'business.dart';
+import 'knowledge.dart';
 import 'work.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
@@ -25,30 +26,25 @@ class _LibraryState extends ConsumerState<LibraryScreen> {
               backgroundColor: context.q.surface2,
               foregroundColor: context.q.text,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: context.q.lineStrong)),
-              onPressed: () => _view == 'documents' ? push(context, const NoteEditor()) : _addMemory(context),
+              onPressed: () => push(context, _view == 'documents' ? const NoteEditor() : const KnowledgeEditor()),
               icon: const Icon(Icons.add),
-              label: Text(_view == 'documents' ? 'New note' : 'Remember something'),
+              label: Text(_view == 'documents' ? 'New note' : 'New entry'),
             )
           : null,
       body: Column(children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: SegmentedButton<String>(
-            segments: const [ButtonSegment(value: 'documents', label: Text('Documents')), ButtonSegment(value: 'memory', label: Text('Memory'))],
+            segments: const [ButtonSegment(value: 'documents', label: Text('Documents')), ButtonSegment(value: 'knowledge', label: Text('Knowledge'))],
             selected: {_view},
             onSelectionChanged: (s) => setState(() => _view = s.first),
           ),
         ),
         if (_view == 'documents')
           Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: TextField(decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Search documents', isDense: true), onSubmitted: (v) => setState(() => _q = v.trim()))),
-        Expanded(child: _view == 'documents' ? _Docs(key: ValueKey(_q), q: _q) : const _Memory()),
+        Expanded(child: _view == 'documents' ? _Docs(key: ValueKey(_q), q: _q) : const KnowledgeView()),
       ]),
     );
-  }
-
-  Future<void> _addMemory(BuildContext context) async {
-    final v = await promptText(context, title: 'Remember', label: 'A fact, preference or rule for your agents', action: 'Save', maxLines: 4);
-    if (v != null && v.isNotEmpty && context.mounted) await act(context, ref, (api) => api.post('/memory', {'content': v, 'kind': 'fact'}), ok: 'Saved to memory');
   }
 }
 
@@ -163,55 +159,6 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
       );
 }
 
-class _Memory extends ConsumerWidget {
-  const _Memory();
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final q = context.q;
-    final canWrite = ref.watch(sessionProvider.select((s) => s.canWrite));
-    return Load<List<Map<String, dynamic>>>(
-      fetch: (api) async => items(await api.get('/memory')),
-      builder: (context, list, reload) => list.isEmpty
-          ? const EmptyState(icon: Icons.psychology_outlined, title: 'No memories yet', body: 'Things your agents should know — facts, preferences, rules. Agents can propose memories; you confirm them.')
-          : ListView.separated(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
-              itemCount: list.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 6),
-              itemBuilder: (_, i) {
-                final m = list[i];
-                final proposed = m['status'] == 'proposed';
-                return QCard(
-                  accent: proposed ? q.halo.withValues(alpha: .4) : null,
-                  padding: const EdgeInsets.all(14),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Row(children: [StatusPill(m['status'] as String), const SizedBox(width: 8), Text(cap(m['kind'] as String? ?? 'fact'), style: qs(12, c: q.text3)), const Spacer(), SourceTag(m['source_kind'] as String?, asOf: m['created_at'] as String?)]),
-                    const SizedBox(height: 8),
-                    Text(m['content'] as String, style: qs(15, c: m['status'] == 'superseded' ? q.text3 : q.text)),
-                    if (m['confidence'] != null && proposed) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Confidence ${((m['confidence'] as num) * 100).round()}%', style: qs(12, c: q.text3))),
-                    if (canWrite && m['status'] != 'superseded')
-                      Padding(
-                        padding: const EdgeInsets.only(top: 10),
-                        child: Wrap(spacing: 8, runSpacing: 8, children: [
-                          if (proposed) QButton('Confirm', kind: QBtn.halo, onPressed: () => act(context, ref, (api) => api.post('/memory/${m['id']}/confirm'), ok: 'Confirmed')),
-                          QButton('Update', kind: QBtn.ghost, onPressed: () async {
-                            final v = await promptText(context, title: 'Update memory', label: 'New version', initial: m['content'] as String, maxLines: 4);
-                            if (v != null && v.isNotEmpty && context.mounted) await act(context, ref, (api) => api.post('/memory/${m['id']}/supersede', {'content': v}), ok: 'Updated — the old version is kept');
-                          }),
-                          QButton('Forget', kind: QBtn.ghost, onPressed: () async {
-                            if (await confirm(context, title: 'Forget this?', body: 'Agents will stop using it.', action: 'Forget', destructive: true)) {
-                              if (context.mounted) await act(context, ref, (api) => api.delete('/memory/${m['id']}'), ok: 'Forgotten');
-                            }
-                          }),
-                        ]),
-                      ),
-                  ]),
-                );
-              },
-            ),
-    );
-  }
-}
-
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
   @override
@@ -224,7 +171,7 @@ class _SearchState extends State<SearchScreen> {
   Widget build(BuildContext context) {
     final q = context.q;
     return Scaffold(
-      appBar: AppBar(title: TextField(autofocus: true, textInputAction: TextInputAction.search, decoration: const InputDecoration(hintText: 'Search tasks, contacts, library, memory', isDense: true), onSubmitted: (v) => setState(() => _q = v.trim()))),
+      appBar: AppBar(title: TextField(autofocus: true, textInputAction: TextInputAction.search, decoration: const InputDecoration(hintText: 'Search tasks, contacts, library, knowledge', isDense: true), onSubmitted: (v) => setState(() => _q = v.trim()))),
       body: _q.isEmpty
           ? const EmptyState(icon: Icons.search, title: 'Search everything', body: 'Results come from your workspace only.')
           : Load<Map>(
@@ -243,7 +190,7 @@ class _SearchState extends State<SearchScreen> {
                     const SectionLabel('Library'),
                     for (final d in docs) ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.description_outlined), title: Text(d['title'] as String), onTap: () => push(context, DocumentView(id: d['id'] as String))),
                   ],
-                  if (mem.isNotEmpty) ...[const SectionLabel('Memory'), for (final m in mem) Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Text(m['content'] as String, style: qs(14, c: q.text)))],
+                  if (mem.isNotEmpty) ...[const SectionLabel('Knowledge'), for (final m in mem) Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Text(m['content'] as String, style: qs(14, c: q.text)))],
                 ]);
               },
             ),

@@ -22,6 +22,7 @@ From each provider, keep the **Client ID** and **Client secret**. Don't paste th
 5. **Data access → Add or remove scopes**. Paste these:
    - `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile`
    - `https://www.googleapis.com/auth/drive.file` (Sheets, Forms and Drive files Qline creates)
+   - `https://www.googleapis.com/auth/drive.readonly` (v1.6: lets the AI search and read files you already have in Drive; restricted scope, see below)
    - `https://www.googleapis.com/auth/calendar.events`
    - `https://www.googleapis.com/auth/gmail.readonly`
    - `https://www.googleapis.com/auth/gmail.send`
@@ -35,6 +36,7 @@ Google's limits, which Qline can't get around:
 - **Testing status:** only listed test users can connect, and connections expire after 7 days. Users then tap Reconnect.
 - **Going public for Gmail:** Gmail read and send are "restricted" scopes. Publishing needs Google verification plus a yearly third-party security assessment (CASA).
 - **Going public for Calendar:** Calendar is "sensitive" and needs only the free verification. `drive.file` needs only brand verification.
+- **Drive read (v1.6):** `drive.readonly` is restricted like Gmail. It works now for listed test users in Testing mode; publishing it needs verification plus CASA. Existing Google connections must tap **Reconnect** in Qline with **Drive files** ticked to grant it. No new client ID is needed.
 
 ## 2. Slack (notifications to a channel)
 
@@ -59,3 +61,40 @@ Google's limits, which Qline can't get around:
 4. **Overview**: copy the **Application (client) ID**.
 
 Microsoft has no 7-day limit. Users outside your organization may see an "unverified" label until you complete publisher verification, which is free with a Microsoft partner account.
+
+## 4. Notion (v1.6: read and write pages)
+
+1. Open https://www.notion.so/profile/integrations and choose **New integration**.
+   - Type: **Public** (OAuth). Name: **Qline**. Associated workspace: yours.
+   - Fill in the company name, website, privacy policy and terms URLs Notion asks for.
+   - **Redirect URI**: `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/notion/callback`
+   - Capabilities: **Read content**, **Update content**, **Insert content**. User information: **Read user information including email addresses**.
+2. Save, then open the **Configuration** tab and copy the **OAuth client ID** and **OAuth client secret**.
+3. In Qline: **Settings → Integration setup → Notion**, paste both.
+4. Each user taps **Integrations → Notion → Connect** and picks the pages Qline may use. The AI only sees pages picked there.
+
+## 5. GitHub (v1.6: issues and pull requests)
+
+Qline uses a **GitHub App** with user access tokens, so access is limited to the repositories where the app is installed.
+
+1. Open https://github.com/settings/apps → **New GitHub App**.
+   - Name: **Qline** (must be unique on GitHub; add a suffix if taken). Homepage: any URL you own.
+   - **Callback URL**: `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/github/callback`
+   - Keep **Expire user authorization tokens** on. Leave **Request user authorization during installation** off.
+   - Webhook: untick **Active** (Qline does not use GitHub webhooks yet).
+   - Repository permissions: **Issues: Read and write**, **Pull requests: Read-only**, **Contents: Read-only**, **Metadata: Read-only**.
+   - Where can it be installed: **Any account** if other people's repos should connect, otherwise **Only on this account**.
+2. Create the app, then copy the **Client ID** and **Generate a new client secret**.
+3. **Install App** → install it on the repositories Qline may see.
+4. In Qline: **Settings → Integration setup → GitHub**, paste both, then **Integrations → GitHub → Connect**.
+
+## 6. Stripe (v1.6: restricted key, no OAuth app)
+
+Stripe needs no app registration. Each workspace pastes a **restricted key**; Qline refuses full secret keys (`sk_…`).
+
+1. Open https://dashboard.stripe.com/apikeys → **Create restricted key** (use Test mode first).
+2. Permissions:
+   - **Read**: Balance, Charges, Customers, Invoices, Subscriptions, Products.
+   - **Write**: Customers, Invoices (Qline only creates customers and **draft** invoices, always after your approval; it never sends, finalizes, charges or refunds).
+   - Everything else: **None**.
+3. Copy the key (`rk_test_…` or `rk_live_…`), then in Qline: **Integrations → Stripe → Connect Stripe** and paste it. Qline checks it with Stripe and stores it encrypted.

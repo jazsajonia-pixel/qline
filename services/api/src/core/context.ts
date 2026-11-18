@@ -62,6 +62,7 @@ export function need(c: Context<Env>, perm: Permission) {
   return t;
 }
 
+/** A person's own request (HTTP route): may see their private knowledge. */
 export function tx<T>(t: { orgId: string | null; userId: string }, fn: (q: Q) => Promise<T>) {
-  return withTenant({ orgId: t.orgId, userId: t.userId }, fn);
+  return withTenant({ orgId: t.orgId, userId: t.userId, runKind: 'interactive' }, fn);
 }

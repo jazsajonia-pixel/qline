@@ -398,7 +398,7 @@ workRoutes.get('/memory', async (c) => {
   const t = need(c, 'memory.read');
   const p = query(c, z.object({ status: z.string().optional() }));
   const items = await tx(t, (q) =>
-    q.many(`select * from memory_records where ($1::text is null or status=$1) and status <> 'archived' order by created_at desc limit 200`, [p.status ?? null]),
+    q.many(`select * from memory_records where ($1::text is null or status=$1) and status <> 'archived' and deleted_at is null order by created_at desc limit 200`, [p.status ?? null]),
   );
   return c.json({ items });
 });

@@ -31,6 +31,7 @@ export const PERMISSIONS = [
   'export.run',
   'integrations.manage',
   'ai.manage',
+  'knowledge.organize',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -52,6 +53,7 @@ export const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission>> = {
     'approvals.decide:low',
     'approvals.decide:medium',
     'audit.read',
+    'knowledge.organize',
   ]),
   member: new Set<Permission>([
     ...READS,
@@ -162,6 +164,31 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'image.show': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
   'files.save_to_library': { risk: 'L1', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.write' },
   'files.import_records': { risk: 'L2', templates: T('ceo', 'sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'imports.run', relaxable: true },
+  // v1.6 run 3: Knowledge OS (docs/14). Agents search, propose and link; they never edit, share or delete entries.
+  'knowledge.search': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'memory.read' },
+  'knowledge.propose': { risk: 'L1', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'memory.write' },
+  'knowledge.link': { risk: 'L1', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'memory.write' },
+  // v1.6 run 3: Google Drive, Notion, GitHub, Stripe. Reads are L0; writes that stay in the owner's own
+  // workspace (new Drive files, Notion pages) are L2; anything other people see (GitHub) or that bills
+  // customers (Stripe) is L3. No tool moves money, finalizes or sends an invoice, or changes code.
+  'drive.search': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
+  'drive.read': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
+  'drive.save_to_library': { risk: 'L1', templates: NON_RESEARCH, decision: 'allow', requires: 'documents.write' },
+  'drive.create': { risk: 'L2', templates: NON_RESEARCH, decision: 'require_approval', requires: 'documents.write', relaxable: true },
+  'drive.update': { risk: 'L2', templates: NON_RESEARCH, decision: 'require_approval', requires: 'documents.write', relaxable: true },
+  'notion.search': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
+  'notion.read': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
+  'notion.create': { risk: 'L2', templates: NON_RESEARCH, decision: 'require_approval', requires: 'documents.write', relaxable: true },
+  'notion.append': { risk: 'L2', templates: NON_RESEARCH, decision: 'require_approval', requires: 'documents.write', relaxable: true },
+  'github.repos': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.issues': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.read': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.issue.create': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  'github.issue.comment': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  'stripe.summary': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'stripe.list': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'contacts.read' },
+  'stripe.customer.create': { risk: 'L3', templates: T('ceo', 'finance', 'sales'), decision: 'require_approval', requires: 'contacts.write' },
+  'stripe.invoice.draft': { risk: 'L3', templates: T('ceo', 'finance', 'sales'), decision: 'require_approval', requires: 'contacts.write' },
   'calendar.invite.send': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
   'social.publish': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
 };
