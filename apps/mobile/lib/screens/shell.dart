@@ -217,7 +217,7 @@ class _BottomNav extends ConsumerWidget {
                         height: 56,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: const Color(0xFF07060D),
+                          color: QColors.liveInk,
                           border: Border.all(color: q.line),
                         ),
                         clipBehavior: Clip.antiAlias,

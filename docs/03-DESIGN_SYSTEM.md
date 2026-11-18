@@ -13,11 +13,11 @@
 
 ### Qline visual thesis
 
-**"A quiet instrument panel around one living signal."** Qline is where an owner runs a real business, so the chrome is calm, precise and readable for hours. That calm makes the single living element, the agent core, feel alive. The core is the only place glow and motion live. Everything else is flat graphite with crisp hairlines and dense, honest data.
+**"A quiet instrument panel around one living signal."** Qline is where an owner runs a real business, so the chrome is calm, precise and readable for hours. That calm makes the single living element, the agent core, feel alive. The core is the only place glow and motion live. Everything else is flat spruce ink with crisp hairlines and dense, honest data.
 
 - **Mood:** observatory at night: technical, composed, warm-touched.
-- **Brand signal:** **Halo**, a warm ivory-gold (`#EBCB8B` family). It is taken from the ring in the reel frames and stands for *human attention and approval*. Halo is used for primary buttons, approval moments and the logo ring. **Agents never use Halo**, so a Halo element always means "you, the human, decide here".
-- **Agent hues** carry identity only inside agent surfaces (core, avatar ring, run tags): violet CEO, cyan Sales, amber Finance, emerald Operations, magenta Marketing, blue Research.
+- **Brand signal:** **Halo**, citrine `#F5C451` since v1.6 (originally ivory-gold `#EBCB8B`, then mint `#5EF2C6` in v1.2). It is taken from the ring in the reel frames and stands for *human attention and approval*. Halo is used for primary buttons, approval moments and the logo ring. **Agents never use Halo**, so a Halo element always means "you, the human, decide here".
+- **Agent hues** carry identity only inside agent surfaces (core, avatar ring, run tags): violet CEO, sky Sales, lime Finance, teal Operations, magenta Marketing, periwinkle Research (v1.6 values in §2).
 - **Density:** medium-high. The data lists use 56 dp rows, and cards are used only for grouping (briefing, approval, proposal diff), not around every element.
 - **Signature details:** (1) the **vertical state rail** (mono, letter-spaced, beside the core) is reused across the app as a thin left "status spine" on running items; (2) the **Q-line mark**: a ring with a short tangent stroke that leaves it at about 4 o'clock, which is the shape of a "Q" and a "line".
 
@@ -25,36 +25,51 @@
 
 ## 2. Tokens
 
+### Colour — "Citrine Signal on Spruce Ink" (v1.6)
+
+v1.6 replaces "Mint Signal on Violet Ink" (v1.2), which itself replaced the original graphite + gold. Surfaces are deep spruce, a blue-green ink, and the one signal colour is citrine. The palette is deliberately distinct from Jazz's other products: FlowPilot "Cobalt Graphite", Chrono "Ember on Ink" and Sapphire's blue. The source of truth is `QColors` in `apps/mobile/lib/ui/theme.dart`. The ratios below were computed with the WCAG 2.x relative-luminance formula.
+
 ### Colour — dark (default)
 
-| Token | Value | Use | Contrast on `bg` (computed, WCAG formula) |
+| Token | Value | Use | Contrast on `bg` |
 | --- | --- | --- | --- |
-| `bg` | `#07090D` | App background (ink, not pure black) | — |
-| `surface-1` | `#0E1218` | Grouped sections, sheets | — |
-| `surface-2` | `#151B23` | Inputs, raised rows, chips | — |
-| `line` | `#222B36` | Hairlines, dividers | 1.4:1 (decorative only) |
-| `line-strong` | `#586878` | Input and control borders | 3.5:1 (3.0:1 on `surface-2`) |
-| `text` | `#E8ECF1` | Primary text | 16.8:1 |
-| `text-2` | `#A3AFBC` | Secondary text | 8.9:1 |
-| `text-3` | `#7D8996` | Meta, timestamps (≥ 12 px) | 5.6:1 (4.9:1 on `surface-2`) |
-| `halo` | `#EBCB8B` | Primary action fill, approvals, brand | 12.8:1 |
-| `on-halo` | `#1A1408` | Text on Halo | 11.7:1 on halo |
-| `ok` | `#5BD69A` | Success (always with ✓ icon + word) | 10.9:1 |
-| `warn` | `#F0B45A` | Needs attention (with ! icon) | 10.8:1 |
-| `bad` | `#F2777A` | Errors, blocked (with × icon) | 7.3:1 |
-| `info` | `#7FB2F0` | Neutral info | 9.0:1 |
+| `bg` | `#07100F` | App background (ink, not pure black) | — |
+| `surface-1` | `#0D1816` | Grouped sections, sheets, chart frames | — |
+| `surface-2` | `#14221F` | Inputs, raised rows, chips | — |
+| `line` | `#22332F` | Hairlines, dividers, chart grid | decorative only |
+| `line-strong` | `#56716A` | Input and control borders | 3.6:1 (3.1:1 on `surface-2`) |
+| `text` | `#ECF3EF` | Primary text | 17.1:1 |
+| `text-2` | `#AABBB5` | Secondary text | 9.6:1 |
+| `text-3` | `#879A93` | Meta, timestamps (≥ 11 px) | 6.5:1 (5.5:1 on `surface-2`) |
+| `halo` | `#F5C451` (citrine) | Primary action fill, approvals, brand mark | 11.8:1 |
+| `on-halo` | `#1C1500` | Text on Halo | 11.2:1 on halo |
+| `ok` | `#7EDC8A` | Success (always with ✓ icon + word) | 11.5:1 |
+| `warn` | `#FF9F4A` | Needs attention (with ! icon); orange, so it never reads as Halo | 9.5:1 |
+| `bad` | `#FF6F80` | Errors, blocked (with × icon) | 7.2:1 |
+| `info` | `#8FB4FF` | Neutral info | 9.3:1 |
+| `liveInk` | `#050C0B` | Live AI, launch screen, Android window background | — |
 
 ### Colour — light
 
 | Token | Value |
 | --- | --- |
-| `bg` | `#F6F4EF` (warm paper) |
+| `bg` | `#F3F6F4` (pale spruce paper) |
 | `surface-1` | `#FFFFFF` |
-| `surface-2` | `#EEEBE4` |
-| `line` / `line-strong` | `#E1DDD3` (decorative) / `#857E70` (controls, 3.7:1) |
-| `text` / `text-2` / `text-3` | `#14171C` (16.3:1) / `#47505B` (7.4:1) / `#626B76` (4.9:1 on bg) |
-| `halo` | `#8A6516` fills on light; `on-halo` `#FFFFFF` (5.3:1) |
-| `ok` / `warn` / `bad` | `#1D7A4E` (4.8:1) / `#8F5A0A` (5.3:1) / `#B4262B` (5.9:1) |
+| `surface-2` | `#E5ECE9` |
+| `line` / `line-strong` | `#D1DCD8` (decorative) / `#6C7F79` (controls, 3.9:1) |
+| `text` / `text-2` / `text-3` | `#0E1716` (16.7:1) / `#3C4B47` (8.4:1) / `#55645F` (5.7:1 on bg, 5.2:1 on `surface-2`) |
+| `halo` | `#7A5900` (deep citrine) for fills and text on light (5.9:1); `on-halo` `#FFFFFF` (6.4:1) |
+| `ok` / `warn` / `bad` / `info` | `#2D7333` (5.3:1) / `#9A4A00` (5.8:1) / `#B3263E` (5.9:1) / `#2C52B5` (6.5:1) |
+
+### Charts in chat (v1.6)
+
+Data uses flat, solid colours: `#8FB4FF`, `#7EDC8A`, `#FF9F4A`, `#F07AC0`, `#B08CFF` and `#36CDBE` (`chartColors` in `lib/ui/chat_artifacts.dart`). Citrine is never a series colour, because it means "you decide". Every chart shows:
+
+- its title;
+- a legend when there are several series;
+- a source line: "Computed by Qline from your data" for server-computed charts, or "From: … · provided by the AI".
+
+Screen readers get the values as text. Reduce motion skips the grow-in animation.
 
 The Live AI screen stays dark in both themes. It is an immersive surface, the same way camera viewfinders stay dark, and its text still uses the dark tokens.
 
@@ -62,12 +77,12 @@ The Live AI screen stays dark in both themes. It is an immersive surface, the sa
 
 | Agent | Core hue | Ring (idle) | Character of motion |
 | --- | --- | --- | --- |
-| AI CEO / Chief of Staff | Violet `#A58BFA` | ivory | Slow, wide orbit; strands sweep like a horizon (strategic) |
-| Sales | Cyan `#2ED3EA` | ivory | Quicker pulse; strands lean forward (responsive) |
-| Finance | Amber `#F2B544` | ivory | Tight, evenly spaced rings; minimal wobble (precise) |
-| Operations | Emerald `#3FD39A` | ivory | Steady metronome rotation (steady) |
+| AI CEO / Chief of Staff | Violet `#B08CFF` | ivory | Slow, wide orbit; strands sweep like a horizon (strategic) |
+| Sales | Sky `#3DB8FF` | ivory | Quicker pulse; strands lean forward (responsive) |
+| Finance | Lime `#B9E25A` (amber was retired in v1.6 because it was too close to citrine Halo) | ivory | Tight, evenly spaced rings; minimal wobble (precise) |
+| Operations | Teal `#36CDBE` | ivory | Steady metronome rotation (steady) |
 | Marketing | Magenta `#F07AC0` | ivory | Ribbons with more curl (expressive) |
-| Research | Blue `#6FA8FF` | ivory | Particles drift in layers like scan lines (analytical) |
+| Research | Periwinkle `#8EA2FF` | ivory | Particles drift in layers like scan lines (analytical) |
 | Custom | User-chosen from a 12-hue wheel that is contrast-checked and excludes Halo | ivory | Default motion |
 
 The agent's name and role are always shown as text. Colour is never the only cue, which matters for colour-blind users.
@@ -99,7 +114,21 @@ The agent's name and role are always shown as text. Colour is never the only cue
 
 ## 3. Logo — the Q-line mark
 
-A 2-px-weight ring with a short tangent stroke leaving the ring at about 4 o'clock and extending outward, which reads as a "Q" and as a "line". It is drawn in `currentColor`, so it is Halo on dark and ink on light. The launcher icon puts the Halo mark on `#07090D`, and the Android adaptive icon has a monochrome layer. The wordmark is "qline", lowercase, in Hanken Grotesk 600 with tight tracking.
+The mark is an open ring whose tail starts inside the ring and leaves it at about 4 o'clock, which reads as a "Q" and as a "line". It is drawn by `QMark` (`lib/ui/core_painter.dart`) in `currentColor`: Halo on dark, ink on light. Its exact geometry, in a unit square:
+
+- **Ring:** centre (.46, .46), radius .36, stroke .10, an arc from 0.9 rad sweeping 5.6 rad.
+- **Tail:** from the centre + (.35r, .35r) to (.92, .92).
+- **Caps:** round.
+
+Since v1.6 the launcher icon uses the same geometry. Earlier icons showed a closed ring with a centre dot, which did not match the app. `apps/mobile/tool/make_icons.py` draws a citrine mark with a soft static glow on a spruce-ink background that lifts slightly at the centre, and writes:
+
+- the legacy icons at every density;
+- the adaptive foreground and background layers, with the mark inside the 66 dp safe zone;
+- a monochrome layer for themed icons;
+- a 512 px store icon;
+- the SVG source, `tool/brand/qmark.svg`.
+
+The website and favicon (`apps/site`) use the same path. The wordmark is "Qline" in Hanken Grotesk 700 with tight tracking.
 
 ## 4. Layout patterns
 

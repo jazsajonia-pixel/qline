@@ -48,7 +48,7 @@ class _LaunchScreenState extends State<LaunchScreen> with SingleTickerProviderSt
       child: Builder(builder: (context) {
         final q = context.q;
         return Scaffold(
-          backgroundColor: const Color(0xFF07060D),
+          backgroundColor: QColors.liveInk,
           body: AnimatedBuilder(
             animation: _c,
             builder: (context, _) {

@@ -12,6 +12,7 @@ import { executeRun, makeEmitter } from '../agent/runner';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { applyWorkflowDecision, resumeWorkflowAfterDecision } from './workflows';
 import { notify } from './work';
+import { loadAttachments } from './files';
 
 export const agentRoutes = new Hono<Env>();
 
@@ -144,7 +145,19 @@ agentRoutes.get('/conversations/:id', async (c) => {
 
 agentRoutes.post('/conversations/:id/messages', async (c) => {
   const t = need(c, 'agents.use');
-  const { content, agent: pick } = await body(c, z.object({ content: z.string().trim().min(1).max(8000), agent: z.union([z.literal('auto'), z.string().uuid()]).optional() }));
+  const input = await body(
+    c,
+    z
+      .object({
+        content: z.string().trim().max(8000).default(''),
+        agent: z.union([z.literal('auto'), z.string().uuid()]).optional(),
+        // v1.6: files sent with this message (ids from POST /agents/attachments)
+        attachments: z.array(z.string().uuid()).max(5).default([]),
+      })
+      .refine((v) => v.content.length > 0 || v.attachments.length > 0, { message: 'Write a message or attach a file.', path: ['content'] }),
+  );
+  const { agent: pick, attachments: attachmentIds } = input;
+  const content = input.content || 'Please look at the attached file.';
   const out = await tx(t, async (q) => {
     const conv = await q.one(`select c.*, a.current_version, a.status as agent_status from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2`, [c.req.param('id'), t.userId]);
     if (!conv) throw notFound('Conversation');
@@ -167,11 +180,15 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
       `insert into agent_runs (org_id, conversation_id, agent_id, agent_version_id, initiated_by, trigger) values ($1,$2,$3,$4,$5,'chat') returning id`,
       [t.orgId, conv.id, agent.id, v.id, t.userId],
     );
-    const msg = await q.one(`insert into conversation_messages (org_id, conversation_id, role, content, run_id) values ($1,$2,'user',$3,$4) returning id, created_at`, [
+    const files = await loadAttachments(q, attachmentIds);
+    if (files.length !== new Set(attachmentIds).size) throw notFound('Attachment');
+    const meta = files.length ? { attachments: files.map((f) => ({ id: f.id, name: f.name, mime: f.mime, kind: f.extracted?.kind ?? 'document', size: f.size_bytes })) } : {};
+    const msg = await q.one(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, meta) values ($1,$2,'user',$3,$4,$5) returning id, created_at`, [
       t.orgId,
       conv.id,
       content,
       run!.id,
+      JSON.stringify(meta),
     ]);
     if (conv.title === 'New conversation') await q.exec('update conversations set title=$2, updated_at=now() where id=$1', [conv.id, content.slice(0, 60)]);
     return { runId: run!.id, messageId: msg.id, agent: routed };

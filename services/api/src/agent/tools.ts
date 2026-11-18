@@ -6,6 +6,7 @@ import { createTask, updateTask } from '../modules/work';
 import { appTools } from './tools-apps';
 import { moreTools } from './tools-more';
 import { v16Tools } from './tools-v16';
+import { fileTools } from './tools-files';
 
 export interface ToolCtx {
   orgId: string;
@@ -20,7 +21,23 @@ export interface ToolResult {
   summary: string;
   refs: { type: string; id: string; title?: string }[];
   data?: unknown;
+  /** v1.6: things to show in the chat (charts, images). Not sent back to the model. */
+  artifacts?: Artifact[];
 }
+
+/** v1.6 chat artifacts. Charts carry their data and where it came from; images point at a stored file. */
+export type Artifact =
+  | {
+      type: 'chart';
+      chart: 'bar' | 'line' | 'pie';
+      title: string;
+      labels: string[];
+      series: { name: string; values: number[] }[];
+      unit?: string;
+      source: string;
+      computed: boolean;
+    }
+  | { type: 'image'; fileId: string; name: string; caption?: string };
 
 export interface ToolDef<S extends z.ZodTypeAny> {
   description: string;
@@ -206,6 +223,7 @@ const defs = {
   ...appTools,
   ...moreTools,
   ...v16Tools,
+  ...fileTools,
 };
 
 export type ToolName = keyof typeof defs;

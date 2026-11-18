@@ -320,7 +320,7 @@ class AgentOrb extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: RadialGradient(colors: [Colors.white.withValues(alpha: .85), hue.withValues(alpha: .6), const Color(0xFF080A12)], stops: const [0, .35, 1]),
+        gradient: RadialGradient(colors: [Colors.white.withValues(alpha: .85), hue.withValues(alpha: .6), const Color(0xFF06100E)], stops: const [0, .35, 1]),
         border: Border.all(color: hue.withValues(alpha: .8), width: 1.4),
       ),
     );

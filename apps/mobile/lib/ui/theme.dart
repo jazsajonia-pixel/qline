@@ -21,40 +21,45 @@ class QColors extends ThemeExtension<QColors> {
   });
   final Color bg, surface1, surface2, line, lineStrong, text, text2, text3, halo, onHalo, ok, warn, bad, info;
 
-  /// "Mint Signal on Violet Ink" (v1.2): violet-black ink surfaces, one mint signal accent.
-  /// Deliberately distinct from FlowPilot (Cobalt Graphite) and Chrono (Ember on Ink).
+  /// "Citrine Signal on Spruce Ink" (v1.6): deep spruce (blue-green ink) surfaces with one
+  /// citrine signal accent for human actions and approvals. Replaces "Mint Signal on Violet Ink".
+  /// Deliberately distinct from FlowPilot (Cobalt Graphite), Chrono (Ember on Ink) and Sapphire (blue).
+  /// Contrast ratios are listed in docs/03-DESIGN_SYSTEM.md §2.
   static const dark = QColors(
-    bg: Color(0xFF0A0812),
-    surface1: Color(0xFF12101B),
-    surface2: Color(0xFF1B1826),
-    line: Color(0xFF2A2638),
-    lineStrong: Color(0xFF615A75),
-    text: Color(0xFFEFECF6),
-    text2: Color(0xFFB2ACC2),
-    text3: Color(0xFF8D86A0),
-    halo: Color(0xFF5EF2C6),
-    onHalo: Color(0xFF03140E),
-    ok: Color(0xFF9BE36D),
-    warn: Color(0xFFFFC266),
-    bad: Color(0xFFFF7A8A),
-    info: Color(0xFF9DB8FF),
+    bg: Color(0xFF07100F),
+    surface1: Color(0xFF0D1816),
+    surface2: Color(0xFF14221F),
+    line: Color(0xFF22332F),
+    lineStrong: Color(0xFF56716A),
+    text: Color(0xFFECF3EF),
+    text2: Color(0xFFAABBB5),
+    text3: Color(0xFF879A93),
+    halo: Color(0xFFF5C451),
+    onHalo: Color(0xFF1C1500),
+    ok: Color(0xFF7EDC8A),
+    warn: Color(0xFFFF9F4A),
+    bad: Color(0xFFFF6F80),
+    info: Color(0xFF8FB4FF),
   );
   static const light = QColors(
-    bg: Color(0xFFF6F4FA),
+    bg: Color(0xFFF3F6F4),
     surface1: Color(0xFFFFFFFF),
-    surface2: Color(0xFFEDE9F4),
-    line: Color(0xFFDDD7E8),
-    lineStrong: Color(0xFF7D7590),
-    text: Color(0xFF15121F),
-    text2: Color(0xFF4A4459),
-    text3: Color(0xFF625B71),
-    halo: Color(0xFF087A5E),
+    surface2: Color(0xFFE5ECE9),
+    line: Color(0xFFD1DCD8),
+    lineStrong: Color(0xFF6C7F79),
+    text: Color(0xFF0E1716),
+    text2: Color(0xFF3C4B47),
+    text3: Color(0xFF55645F),
+    halo: Color(0xFF7A5900),
     onHalo: Color(0xFFFFFFFF),
-    ok: Color(0xFF2F7420),
-    warn: Color(0xFF8A5A00),
+    ok: Color(0xFF2D7333),
+    warn: Color(0xFF9A4A00),
     bad: Color(0xFFB3263E),
     info: Color(0xFF2C52B5),
   );
+
+  /// Live AI, the launch screen and the shell's Live entry are always this deep ink.
+  static const liveInk = Color(0xFF050C0B);
 
   @override
   QColors copyWith() => this;
@@ -160,12 +165,12 @@ class AgentStyle {
   final double curl;
   final String role;
   static const map = {
-    'ceo': AgentStyle(Color(0xFFA58BFA), .55, 1.0, 'Chief of Staff'),
-    'sales': AgentStyle(Color(0xFF2ED3EA), 1.25, .8, 'Pipeline & follow-ups'),
-    'finance': AgentStyle(Color(0xFFF2B544), .75, .25, 'Cash flow & reports'),
-    'operations': AgentStyle(Color(0xFF3FD39A), .9, .45, 'Projects & SOPs'),
+    'ceo': AgentStyle(Color(0xFFB08CFF), .55, 1.0, 'Chief of Staff'),
+    'sales': AgentStyle(Color(0xFF3DB8FF), 1.25, .8, 'Pipeline & follow-ups'),
+    'finance': AgentStyle(Color(0xFFB9E25A), .75, .25, 'Cash flow & reports'),
+    'operations': AgentStyle(Color(0xFF36CDBE), .9, .45, 'Projects & SOPs'),
     'marketing': AgentStyle(Color(0xFFF07AC0), 1.0, 1.6, 'Campaigns & content'),
-    'research': AgentStyle(Color(0xFF6FA8FF), .7, .7, 'Market & competitors'),
+    'research': AgentStyle(Color(0xFF8EA2FF), .7, .7, 'Market & competitors'),
   };
   static AgentStyle of(String? template) => map[template] ?? map['ceo']!;
 }
