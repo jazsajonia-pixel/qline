@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'needs_checking.dart';
 
 Map<String, dynamic> _preview(Map a) {
   final p = a['preview'];
@@ -33,6 +34,36 @@ class _ApprovalsState extends State<ApprovalsScreen> {
     return Page2(
       title: 'Approvals',
       body: Column(children: [
+        // Run 3: interrupted actions whose outcome is unknown live next to approvals: both need a person.
+        Load<List<Map<String, dynamic>>>(
+          // A hint, not the main list: if it cannot load, the approvals below still work.
+          fetch: (api) async {
+            try {
+              return items(await api.get('/actions/unknown'));
+            } catch (_) {
+              return <Map<String, dynamic>>[];
+            }
+          },
+          skeleton: const SizedBox.shrink(),
+          builder: (context, list, reload) => list.isEmpty
+              ? const SizedBox.shrink()
+              : Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: QCard(
+                    accent: q.warn.withValues(alpha: .5),
+                    onTap: () async {
+                      await push(context, const NeedsCheckingScreen());
+                      await reload();
+                    },
+                    child: Row(children: [
+                      Icon(Icons.help_outline, size: 18, color: q.warn),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(list.length == 1 ? '1 action needs checking' : '${list.length} actions need checking', style: qs(14, w: FontWeight.w600, c: q.text))),
+                      Icon(Icons.chevron_right, color: q.text3),
+                    ]),
+                  ),
+                ),
+        ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: SingleChildScrollView(

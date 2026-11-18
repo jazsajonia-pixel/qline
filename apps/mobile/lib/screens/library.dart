@@ -23,6 +23,7 @@ class _LibraryState extends ConsumerState<LibraryScreen> {
     return Scaffold(
       floatingActionButton: canWrite
           ? FloatingActionButton.extended(
+              heroTag: null,
               backgroundColor: context.q.surface2,
               foregroundColor: context.q.text,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: context.q.lineStrong)),

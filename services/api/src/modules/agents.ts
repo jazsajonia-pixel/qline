@@ -2,7 +2,7 @@ import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { canDecideApproval, can, routeAgent, TOOL_POLICIES, type AgentTemplate, type Risk } from '@qline/policy';
+import { canDecideApproval, can, routeAgent, TOOL_POLICIES, toolLabels, type AgentTemplate, type Risk } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import { withTenant } from '../core/db';
@@ -166,7 +166,9 @@ agentRoutes.get('/conversations/:id', async (c) => {
     );
     if (!conv) throw notFound('Conversation');
     await expireStaleRuns(q, conv.id);
-    const messages = await q.many('select id, role, content, run_id, refs, meta, created_at from conversation_messages where conversation_id=$1 order by created_at', [conv.id]);
+    const messages = await q.many(`select m.id, m.role, m.content, m.run_id, m.refs, m.meta, m.created_at,
+              case when m.role = 'assistant' and m.run_id is not null then (select count(*)::int from tool_calls tc where tc.run_id = m.run_id) else 0 end as steps
+         from conversation_messages m where m.conversation_id=$1 order by m.created_at`, [conv.id]);
     // M2: an answer still being written when the app reopens, so the client can follow it instead of losing it.
     const active_run = await q.one(`select id, status, created_at from agent_runs where conversation_id=$1 and initiated_by=$2 and status in ('queued','running') order by created_at desc limit 1`, [
       conv.id,
@@ -189,6 +191,8 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
         attachments: z.array(z.string().uuid()).max(5).default([]),
         // M2: skip reusing earlier lookups for this reply (the user wants current data)
         fresh: z.boolean().optional(),
+        // Run 3 / M4: knowledge entries the person added to this message from the in-chat map
+        knowledge: z.array(z.string().uuid()).max(5).default([]),
       })
       .refine((v) => v.content.length > 0 || v.attachments.length > 0, { message: 'Write a message or attach a file.', path: ['content'] }),
   );
@@ -222,9 +226,20 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
     );
     const files = await loadAttachments(q, attachmentIds);
     if (files.length !== new Set(attachmentIds).size) throw notFound('Attachment');
+    const kIds = [...new Set(input.knowledge)];
+    if (kIds.length && !can(t.role, 'memory.read')) throw forbidden('memory.read');
+    // RLS hides other people's private entries, so an id that is not theirs to read is simply "not found".
+    const knowledge = kIds.length
+      ? await q.many<{ id: string; title: string; status: string }>(
+          `select id, coalesce(title, left(content, 80)) as title, status from memory_records where id = any($1::uuid[]) and deleted_at is null`,
+          [kIds],
+        )
+      : [];
+    if (knowledge.length !== kIds.length) throw notFound('Knowledge entry');
     const meta = {
       ...(files.length ? { attachments: files.map((f) => ({ id: f.id, name: f.name, mime: f.mime, kind: f.extracted?.kind ?? 'document', size: f.size_bytes })) } : {}),
       ...(input.fresh ? { fresh: true } : {}),
+      ...(knowledge.length ? { knowledge: knowledge.map((k) => ({ id: k.id, title: k.title, status: k.status })) } : {}),
     };
     const msg = await q.one(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, meta) values ($1,$2,'user',$3,$4,$5) returning id, created_at`, [
       t.orgId,
@@ -255,7 +270,21 @@ agentRoutes.get('/runs/:id', async (c) => {
   const data = await tx(t, async (q) => {
     const run = await q.one('select * from agent_runs where id=$1 and initiated_by=$2', [c.req.param('id'), t.userId]);
     if (!run) throw notFound('Run');
-    const toolCalls = await q.many('select id, tool, risk, policy_decision, status, result_summary, result_refs, created_at from tool_calls where run_id=$1 order by created_at', [run.id]);
+    const calls = await q.many(
+      `select tc.id, tc.tool, tc.args, tc.risk, tc.policy_decision, tc.status, tc.result_summary, tc.result_refs, tc.created_at, tc.finished_at, tc.resolution,
+              tc.reused_context_id is not null as reused, ar.id as approval_id, ar.status as approval_status
+         from tool_calls tc left join approval_requests ar on ar.tool_call_id = tc.id where tc.run_id=$1 order by tc.created_at`,
+      [run.id],
+    );
+    // Run 3 / M3: friendly labels for the collapsed trace; arguments are never returned here.
+    const title = (tool: string, args: unknown) => {
+      try {
+        return getTool(tool)?.preview(args as any)?.title;
+      } catch {
+        return undefined;
+      }
+    };
+    const toolCalls = calls.map(({ args, ...c }: any) => ({ ...c, ...toolLabels(c.tool, title(c.tool, args)) }));
     const events = await q.many('select seq, event, data from run_events where run_id=$1 order by seq', [run.id]);
     return { ...run, toolCalls, events };
   });

@@ -9,24 +9,24 @@ import '../core/api.dart';
 import '../core/chat_resume.dart';
 import '../core/session.dart';
 import '../core/voice.dart';
+import '../ui/activity_trace.dart';
 import '../ui/chat_artifacts.dart';
 import '../ui/core_painter.dart';
+import '../ui/markdown.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'ai.dart';
 import 'approvals.dart';
-
-class _Step {
-  _Step(this.id, this.tool, this.summary, this.decision);
-  final String? id;
-  final String tool;
-  String summary;
-  final String decision;
-  bool? ok;
-}
+import 'knowledge_graph.dart';
+import 'needs_checking.dart';
 
 class _Msg {
-  _Msg(this.role, this.text, {this.steps, this.error, this.speech, this.suggestions = const [], this.agentName, this.template, this.attachments = const [], List<Map<String, dynamic>>? artifacts}) : artifacts = artifacts ?? [];
+  _Msg(this.role, this.text, {this.steps, this.error, this.speech, this.suggestions = const [], this.agentName, this.template, this.attachments = const [], this.knowledge = const [], this.runId, this.stepCount = 0, List<Map<String, dynamic>>? artifacts}) : artifacts = artifacts ?? [];
+  /// Run 3: knowledge entries the person added to this message ({id, title, status}).
+  final List<Map<String, dynamic>> knowledge;
+  /// Run 3: for answers from history, the run whose steps can be opened, and how many there were.
+  final String? runId;
+  final int stepCount;
   /// v1.6 run 2: files sent with a user message ({id, name, mime, kind, size}).
   final List<Map<String, dynamic>> attachments;
   /// v1.6 run 2: charts and images the AI showed in this answer.
@@ -39,7 +39,9 @@ class _Msg {
   List<String> suggestions;
   /// v1.6: which agent answered (automatic switching can change it per message).
   String? agentName, template;
-  List<_Step>? steps;
+  List<TraceStep>? steps;
+  /// True while tokens are still arriving.
+  bool streaming = false;
   Map<String, dynamic>? approval;
   String? error;
 }
@@ -86,6 +88,21 @@ class _LiveState extends ConsumerState<_Live> {
     },
   );
   bool _handsFree = false, _busy = false;
+  bool _leaving = false;
+
+  /// Run 3 / M4B: knowledge entries chosen for the next message ({id, title}). At most [maxChatKnowledge].
+  final List<Map<String, String>> _knowledge = [];
+
+  Future<void> _openKnowledge() async {
+    final picked = await showKnowledgeSheet(context, already: {for (final k in _knowledge) k['id']!});
+    if (picked == null || !mounted) return;
+    if (_knowledge.length >= maxChatKnowledge) {
+      toast(context, 'You can add up to $maxChatKnowledge knowledge entries to one message.');
+      return;
+    }
+    if (_knowledge.any((k) => k['id'] == picked['id'])) return;
+    setState(() => _knowledge.add(picked));
+  }
   String _spoken = '';
   int _word = -1;
   double _speakLevel = 0;
@@ -247,7 +264,13 @@ class _LiveState extends ConsumerState<_Live> {
         final meta = (m['meta'] as Map?)?.cast<String, dynamic>() ?? const {};
         List<Map<String, dynamic>> maps(Object? v) => ((v as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
         return _Msg(m['role'] as String, m['content'] as String,
-            speech: meta['speech'] as String?, suggestions: ((meta['suggestions'] as List?) ?? const []).whereType<String>().toList(), attachments: maps(meta['attachments']), artifacts: maps(meta['artifacts']));
+            speech: meta['speech'] as String?,
+            suggestions: ((meta['suggestions'] as List?) ?? const []).whereType<String>().toList(),
+            attachments: maps(meta['attachments']),
+            artifacts: maps(meta['artifacts']),
+            knowledge: maps(meta['knowledge']),
+            runId: m['run_id'] as String?,
+            stepCount: (m['steps'] as num?)?.toInt() ?? 0);
       }));
     if (mounted) setState(() {});
     _toBottom();
@@ -301,7 +324,12 @@ class _LiveState extends ConsumerState<_Live> {
       return;
     }
     final sending = _files.take();
-    if (content.isEmpty && sending.isEmpty) return;
+    if (content.isEmpty && sending.isEmpty) {
+      if (_knowledge.isNotEmpty) toast(context, 'Write a message to go with the knowledge you added.');
+      return;
+    }
+    final knowledge = [..._knowledge];
+    _knowledge.clear();
     _input.clear();
     _busy = true;
     _relisten?.cancel();
@@ -309,7 +337,7 @@ class _LiveState extends ConsumerState<_Live> {
     await _voice.stop();
     setState(() {
       _spoken = '';
-      _msgs.add(_Msg('user', content, attachments: [for (final p in sending) p.toMeta()]));
+      _msgs.add(_Msg('user', content, attachments: [for (final p in sending) p.toMeta()], knowledge: knowledge));
       _core = CoreState.thinking;
     });
     _toBottom();
@@ -318,7 +346,12 @@ class _LiveState extends ConsumerState<_Live> {
         _convId = ((await _api.post('/conversations', {if (_agent != null) 'agentId': _agent!['id']})) as Map)['id'] as String;
         _remember(_convId!);
       }
-      final r = await _api.post('/conversations/$_convId/messages', {'content': content, if (sending.isNotEmpty) 'attachments': [for (final p in sending) p.id], if (_auto) 'agent': 'auto'}) as Map;
+      final r = await _api.post('/conversations/$_convId/messages', {
+        'content': content,
+        if (sending.isNotEmpty) 'attachments': [for (final p in sending) p.id],
+        if (knowledge.isNotEmpty) 'knowledge': [for (final k in knowledge) k['id']],
+        if (_auto) 'agent': 'auto',
+      }) as Map;
       _runId = r['runId'] as String;
       final routed = (r['agent'] as Map?)?.cast<String, dynamic>();
       _stream(_runId!, agentName: routed?['name'] as String?, template: routed?['template'] as String?);
@@ -326,6 +359,9 @@ class _LiveState extends ConsumerState<_Live> {
       setState(() {
         // Keep the files so the person can send again without re-uploading.
         _files.restore(sending);
+        _knowledge
+          ..clear()
+          ..addAll(knowledge);
         _msgs.add(_Msg('system_notice', '', error: e.message));
         _core = e.isNetwork ? CoreState.offline : CoreState.error;
         _busy = false;
@@ -336,7 +372,7 @@ class _LiveState extends ConsumerState<_Live> {
 
   /// [resumed]: following an answer that started before the app reopened; it is shown, not spoken.
   void _stream(String runId, {String? lastId, String? agentName, String? template, bool resumed = false}) {
-    final reply = _Msg('assistant', '', steps: [], agentName: agentName, template: template);
+    final reply = _Msg('assistant', '', steps: [], agentName: agentName, template: template)..streaming = true;
     setState(() {
       for (final m in _msgs) {
         m.suggestions = const [];
@@ -361,14 +397,11 @@ class _LiveState extends ConsumerState<_Live> {
               reply.speech = d['speech'] as String?;
               reply.suggestions = ((d['suggestions'] as List?) ?? const []).whereType<String>().take(3).toList();
             case 'tool.planned':
-              reply.steps!.add(_Step(d['stepId'] as String?, d['tool'] as String? ?? 'tool', d['summary'] as String? ?? '', d['decision'] as String? ?? 'allow'));
+              reply.steps!.add(TraceStep.planned(d));
               _core = CoreState.tool;
             case 'tool.result':
               final s = reply.steps!.where((s) => s.id == d['stepId']).lastOrNull ?? reply.steps!.lastOrNull;
-              if (s != null) {
-                s.ok = d['ok'] as bool?;
-                if (d['summary'] != null) s.summary = d['summary'] as String;
-              }
+              s?.result(d);
               _core = CoreState.thinking;
             case 'artifact':
               if (reply.artifacts.length < 6) reply.artifacts.add(d);
@@ -379,6 +412,7 @@ class _LiveState extends ConsumerState<_Live> {
               reply.error = d['message'] as String? ?? 'Something went wrong.';
               _core = CoreState.error;
             case 'done':
+              reply.streaming = false;
               if (_core != CoreState.approval && _core != CoreState.error) _core = d['status'] == 'waiting_approval' ? CoreState.approval : CoreState.success;
           }
         });
@@ -386,6 +420,7 @@ class _LiveState extends ConsumerState<_Live> {
       },
       onError: (Object err) {
         setState(() {
+          reply.streaming = false;
           reply.error = err is ApiException ? err.message : 'The connection dropped. The answer is still saved; reopen this conversation to see it.';
           _core = err is ApiException && !err.isNetwork ? CoreState.error : CoreState.offline;
           _runId = null;
@@ -393,6 +428,7 @@ class _LiveState extends ConsumerState<_Live> {
       },
       onDone: () async {
         _runId = null;
+        reply.streaming = false;
         ref.read(refreshTick.notifier).bump();
         if (!mounted) return;
         if (reply.text.isEmpty && reply.artifacts.isEmpty && reply.error == null && reply.approval == null && (reply.steps?.isEmpty ?? true)) {
@@ -567,11 +603,26 @@ class _LiveState extends ConsumerState<_Live> {
     final aiOk = _agentReady;
     final hasChat = _msgs.isNotEmpty;
     final template = _agent?['template'] as String? ?? 'ceo';
-    return Scaffold(
+    // Run 3 / M5: leaving the chat with an upload or an unsent message asks first. Nothing else is lost
+    // (answers keep being written on the server; listening stops when the screen closes).
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop || _leaving) return;
+        final unsent = _files.uploading ? 'A file is still uploading and will not be sent.' : (_input.text.trim().isNotEmpty || _pending.isNotEmpty ? 'Your unsent message will be discarded.' : null);
+        if (unsent != null) {
+          _leaving = true;
+          final ok = await confirm(context, title: 'Leave the chat?', body: unsent, action: 'Leave');
+          _leaving = false;
+          if (!ok || !context.mounted) return;
+        }
+        if (context.mounted) Navigator.of(context).pop();
+      },
+      child: Scaffold(
       backgroundColor: QColors.liveInk,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+        leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.maybePop(context)),
         title: _AgentPicker(
             agents: _agents,
             selected: _agent,
@@ -692,12 +743,23 @@ class _LiveState extends ConsumerState<_Live> {
             onMic: _toggleMic,
             onStop: _cancel,
             onAttach: _attach,
+            onKnowledge: _openKnowledge,
             pending: [
+              for (final k in _knowledge)
+                InputChip(
+                  avatar: Icon(Icons.hub_outlined, size: 16, color: q.text2),
+                  label: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 180), child: Text(k['title']!, maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(12, c: q.text))),
+                  tooltip: 'Using ${k['title']} in this message',
+                  deleteButtonTooltipMessage: 'Remove ${k['title']}',
+                  onDeleted: _runId != null ? null : () => setState(() => _knowledge.remove(k)),
+                  visualDensity: VisualDensity.compact,
+                ),
               for (final p in _pending)
                 AttachmentChip(name: p.name, kind: p.kind, size: p.size, uploading: p.uploading, onRemove: _runId != null ? null : () => _files.remove(p)),
             ],
           ),
         ]),
+      ),
       ),
     );
   }
@@ -826,6 +888,23 @@ class _Bubble extends StatelessWidget {
           decoration: BoxDecoration(color: q.surface2, borderRadius: BorderRadius.circular(14), border: Border.all(color: q.line)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
             if (msg.text.isNotEmpty) SelectableText(msg.text, style: qs(15, c: q.text)),
+            // Run 3 / M4C: which knowledge this message carried into the AI's context.
+            if (msg.knowledge.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Wrap(alignment: WrapAlignment.end, spacing: 6, runSpacing: 6, children: [
+                  for (final k in msg.knowledge)
+                    Semantics(
+                      label: 'Using knowledge: ${k['title']}',
+                      excludeSemantics: true,
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.hub_outlined, size: 13, color: q.text3),
+                        const SizedBox(width: 4),
+                        ConstrainedBox(constraints: const BoxConstraints(maxWidth: 200), child: Text('${k['title']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(12, c: q.text2))),
+                      ]),
+                    ),
+                ]),
+              ),
             for (final a in msg.attachments)
               if (a['kind'] == 'image' && a['id'] != null)
                 SizedBox(width: 220, child: ChatImage(fileId: a['id'] as String, name: a['name'] as String? ?? 'Image', height: 160, compact: true))
@@ -842,21 +921,10 @@ class _Bubble extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 14, right: 24),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         if (msg.role == 'assistant') Row(children: [AgentOrb(template, size: 16), const SizedBox(width: 6), Text(agentName, style: qs(12, w: FontWeight.w600, c: q.text3))]),
-        for (final s in msg.steps ?? const <_Step>[])
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(children: [
-              if (s.ok == null)
-                const SizedBox.square(dimension: 14, child: CircularProgressIndicator(strokeWidth: 1.6))
-              else
-                Icon(s.ok! ? Icons.check_circle_outline : Icons.error_outline, size: 15, color: s.ok! ? q.ok : q.bad),
-              const SizedBox(width: 8),
-              Flexible(child: Text(s.summary, style: qs(13, c: q.text2))),
-              const SizedBox(width: 6),
-              Text(s.tool, style: qs(11, c: q.text3, family: mono)),
-            ]),
-          ),
-        if (msg.text.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 6), child: SelectableText(msg.text, style: qs(15, c: q.text, h: 1.5))),
+        // Run 3: one quiet line for what the AI did; important steps stay visible (activity_trace.dart).
+        if ((msg.steps?.isNotEmpty ?? false) || (msg.runId != null && msg.stepCount > 0))
+          ActivityTrace(steps: msg.steps ?? const [], runId: msg.runId, onAttention: () => push(context, const NeedsCheckingScreen())),
+        if (msg.text.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 6), child: MarkdownText(msg.text, streaming: msg.streaming)),
         for (final a in msg.artifacts) ChatArtifact(a),
         if (msg.approval != null) _InlineApproval(data: msg.approval!),
         if (onSuggestion != null && msg.role == 'assistant' && msg.suggestions.isNotEmpty)
@@ -908,10 +976,11 @@ class _InlineApproval extends StatelessWidget {
 }
 
 class _Composer extends StatelessWidget {
-  const _Composer({required this.controller, required this.listening, required this.handsFree, required this.onHandsFree, required this.running, required this.enabled, required this.onSend, required this.onMic, required this.onStop, required this.onAttach, this.pending = const []});
+  const _Composer({required this.controller, required this.listening, required this.handsFree, required this.onHandsFree, required this.running, required this.enabled, required this.onSend, required this.onMic, required this.onStop, required this.onAttach, this.onKnowledge, this.pending = const []});
   final TextEditingController controller;
   final bool listening, running, enabled, handsFree;
   final VoidCallback onSend, onMic, onStop, onHandsFree, onAttach;
+  final VoidCallback? onKnowledge;
   final List<Widget> pending;
   @override
   Widget build(BuildContext context) {
@@ -926,6 +995,16 @@ class _Composer extends StatelessWidget {
             child: Align(alignment: Alignment.centerLeft, child: Wrap(spacing: 6, runSpacing: 6, children: pending)),
           ),
         Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        // Run 3 / M4B: the knowledge map, to the left of the composer; it opens over the chat.
+        if (onKnowledge != null) ...[
+          IconButton(
+            tooltip: 'Add knowledge',
+            onPressed: enabled && !running ? onKnowledge : null,
+            icon: Icon(Icons.hub_outlined, color: q.text2),
+            constraints: const BoxConstraints.tightFor(width: 44, height: 48),
+          ),
+          const SizedBox(width: 2),
+        ],
         Expanded(
           child: TextField(
             controller: controller,

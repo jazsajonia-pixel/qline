@@ -22,6 +22,8 @@ class _WorkState extends ConsumerState<WorkScreen> {
     return Scaffold(
       floatingActionButton: canWrite && _view != 'projects'
           ? FloatingActionButton.extended(
+              // Tabs live in one IndexedStack: shared default hero tags clash when a screen is pushed.
+              heroTag: null,
               backgroundColor: context.q.surface2,
               foregroundColor: context.q.text,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: context.q.lineStrong)),

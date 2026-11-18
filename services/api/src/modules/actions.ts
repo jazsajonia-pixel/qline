@@ -3,8 +3,10 @@ import { z } from "zod";
 import {
   canDecideApproval,
   EXTERNAL_WRITE_TOOLS,
+  toolLabels,
   type Risk,
 } from "@qline/policy";
+import { getTool } from "../agent/tools";
 import { audit } from "../core/audit";
 import { need, tx, type Env } from "../core/context";
 import { withTenant } from "../core/db";
@@ -37,11 +39,24 @@ actionRoutes.get("/actions/unknown", async (c) => {
   const t = need(c, "tasks.read");
   const items = await tx(t, (q) =>
     q.many(
-      `select id, tool, risk, result_summary as summary, created_at, finished_at, run_id, workflow_run_id, mission_task_id
+      `select id, tool, args, risk, result_summary as summary, created_at, finished_at, run_id, workflow_run_id, mission_task_id
          from tool_calls where status='unknown' and resolution is null order by created_at desc limit 100`,
     ),
   );
-  return c.json({ items });
+  // Run 3: a plain title ("Post to Slack") and its preview lines so a person knows what to check. Never raw args.
+  const preview = (tool: string, args: unknown) => {
+    try {
+      return getTool(tool)?.preview(args as any) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  return c.json({
+    items: items.map(({ args, ...r }: any) => {
+      const p = preview(r.tool, args);
+      return { ...r, title: p?.title ?? toolLabels(r.tool).done, lines: (p?.lines ?? []).slice(0, 4).map((l: unknown) => String(l).slice(0, 200)) };
+    }),
+  });
 });
 
 actionRoutes.post("/actions/:id/resolve", async (c) => {
