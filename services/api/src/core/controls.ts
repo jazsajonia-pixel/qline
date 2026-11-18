@@ -1,4 +1,5 @@
 import type { Q } from './db';
+import { AUTONOMY_LEVELS, DEFAULT_DAILY_EXTERNAL_LIMIT, type Autonomy } from '@qline/policy';
 
 export interface WorkspaceControls {
   workspace_id: string;
@@ -19,4 +20,18 @@ export async function getControls(q: Q, workspaceId: string, opts: { lock?: bool
 export async function isStopped(q: Q, workspaceId: string): Promise<boolean> {
   const row = await q.one<{ emergency_stop: boolean }>('select emergency_stop from workspace_controls where workspace_id=$1', [workspaceId]);
   return row?.emergency_stop === true;
+}
+
+/** v1.6: the workspace's autonomy level and whether today's external-action allowance is used up. */
+export async function autonomyState(q: Q, config: any): Promise<{ autonomy: Autonomy; externalCapReached: boolean; dailyExternalLimit: number; externalToday: number }> {
+  const ap = config?.agentPolicy ?? {};
+  const autonomy: Autonomy = AUTONOMY_LEVELS.includes(ap.autonomy) ? ap.autonomy : 'supervised';
+  const limit = Number.isInteger(ap.dailyExternalLimit) ? Math.max(0, Math.min(200, ap.dailyExternalLimit)) : DEFAULT_DAILY_EXTERNAL_LIMIT;
+  if (autonomy !== 'full') return { autonomy, externalCapReached: false, dailyExternalLimit: limit, externalToday: 0 };
+  // Only actions autopilot let through count; human-approved ones do not use the allowance.
+  const r = await q.one<{ n: number }>(
+    `select count(*)::int as n from tool_calls where risk='L3' and policy_decision='allow' and status in ('executing','succeeded') and created_at > now() - interval '24 hours'`,
+  );
+  const n = r?.n ?? 0;
+  return { autonomy, externalCapReached: n >= limit, dailyExternalLimit: limit, externalToday: n };
 }

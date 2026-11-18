@@ -6,6 +6,7 @@ import {
   decideTool,
   defaultAllowlist,
   ROLES,
+  routeAgent,
   TOOL_POLICIES,
 } from '@qline/policy';
 
@@ -84,5 +85,60 @@ describe('approval authority', () => {
     expect(canDecideApproval('admin', 'L3')).toBe(true);
     expect(canDecideApproval('owner', 'L4')).toBe(false);
     expect(canDecideApproval('viewer', 'L1')).toBe(false);
+  });
+});
+
+describe('v1.6 autonomy levels', () => {
+  const ceo = defaultAllowlist('ceo');
+  const d = (tool: string, autonomy?: 'supervised' | 'autopilot' | 'full', extra: Record<string, unknown> = {}) => decideTool({ tool, allowlist: ceo, userRole: 'owner', autonomy, ...extra }).decision;
+
+  it('supervised keeps the defaults', () => {
+    expect(d('tasks.create', 'supervised')).toBe('require_approval');
+    expect(d('slack.post', 'supervised')).toBe('require_approval');
+    expect(d('tasks.search', 'supervised')).toBe('allow');
+  });
+  it('autopilot allows internal writes but still asks for deletes, config and external actions', () => {
+    expect(d('tasks.create', 'autopilot')).toBe('allow');
+    expect(d('contacts.update', 'autopilot')).toBe('allow');
+    expect(d('companies.update', 'autopilot')).toBe('allow');
+    expect(d('tasks.bulk_update', 'autopilot')).toBe('allow');
+    expect(d('records.delete', 'autopilot')).toBe('require_approval');
+    expect(d('config.propose', 'autopilot')).toBe('require_approval');
+    expect(d('slack.post', 'autopilot')).toBe('require_approval');
+    expect(d('slack.channel.create', 'autopilot')).toBe('require_approval');
+  });
+  it('full autopilot also acts in connected apps until the daily cap', () => {
+    expect(d('slack.post', 'full')).toBe('allow');
+    expect(d('slack.channel.create', 'full')).toBe('allow');
+    expect(d('email.send', 'full')).toBe('allow');
+    expect(d('records.delete', 'full')).toBe('allow');
+    expect(d('slack.post', 'full', { externalCapReached: true })).toBe('require_approval');
+    expect(d('config.propose', 'full')).toBe('require_approval');
+  });
+  it('never overrides the hard limits', () => {
+    expect(d('payments.send', 'full')).toBe('deny');
+    expect(d('policy.update', 'full')).toBe('deny');
+    expect(d('slack.post', 'full', { stopped: true })).toBe('deny');
+    expect(decideTool({ tool: 'slack.post', allowlist: defaultAllowlist('research'), userRole: 'owner', autonomy: 'full' }).decision).toBe('deny');
+    expect(decideTool({ tool: 'tasks.create', allowlist: ceo, userRole: 'viewer', autonomy: 'full' }).decision).toBe('deny');
+  });
+  it('only the CEO can hand work to other agents', () => {
+    expect(defaultAllowlist('ceo')).toContain('agents.delegate');
+    expect(defaultAllowlist('sales')).not.toContain('agents.delegate');
+  });
+});
+
+describe('v1.6 automatic agent switching', () => {
+  it('routes clear requests to the matching specialist', () => {
+    expect(routeAgent('How much revenue did we make and what are our expenses?')).toBe('finance');
+    expect(routeAgent('Follow up with the new leads from yesterday')).toBe('sales');
+    expect(routeAgent('Plan an Instagram campaign for the launch')).toBe('marketing');
+    expect(routeAgent('Create tasks for the project deadline next week')).toBe('operations');
+    expect(routeAgent('Research our competitors in Davao')).toBe('research');
+  });
+  it('keeps the CEO for general or mixed requests and for paused agents', () => {
+    expect(routeAgent('Good morning, what should I focus on today?')).toBe('ceo');
+    expect(routeAgent('Check the invoice for that lead')).toBe('ceo');
+    expect(routeAgent('Research our competitors', ['ceo', 'sales'])).toBe('ceo');
   });
 });

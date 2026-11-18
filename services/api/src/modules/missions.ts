@@ -22,13 +22,15 @@ import {
   resolveInputs,
   validateOutput,
   validatePlan,
+  AUTONOMY_LEVELS,
+  type Autonomy,
   type OutputSchema,
   type Plan,
   type Role,
 } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, tx, type Env, type TenantCtx } from '../core/context';
-import { getControls } from '../core/controls';
+import { autonomyState, getControls } from '../core/controls';
 import { withTenant, type Q } from '../core/db';
 import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, limitParam, query } from '../core/validate';
@@ -452,6 +454,7 @@ async function taskHandler(ctx: JobCtx) {
     relaxed: policy.relaxed,
     tightened: policy.tightened,
     depth: t.depth,
+    autonomy: (await asTenant(c, (q) => autonomyState(q, config))).autonomy,
   });
   if (!grant.ok) return mark('failed', { error: grant.reason });
   const schema = t.output_schema as OutputSchema;
@@ -534,11 +537,13 @@ async function taskHandler(ctx: JobCtx) {
 async function runTaskTool(c: Ctx, m: any, t: any, agent: any, granted: string[], role: Role, policy: { relaxed?: string[]; tightened?: string[] }, name: string, args: unknown) {
   return asTenant(c, async (q) => {
     const controls = await getControls(q, m.workspace_id);
-    const decision = decideTool({ tool: name, allowlist: granted, userRole: role, relaxed: policy.relaxed, tightened: policy.tightened, stopped: controls.emergency_stop });
+    const ws = await q.one('select config from workspaces where id=$1', [m.workspace_id]);
+    const auto = await autonomyState(q, ws?.config);
+    const decision = decideTool({ tool: name, allowlist: granted, userRole: role, relaxed: policy.relaxed, tightened: policy.tightened, stopped: controls.emergency_stop, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
     const tool = getTool(name);
     if (decision.decision !== 'allow' || !tool) {
       await trace(q, c.orgId, m.id, 'tool.denied', `agent:${agent.id}`, { tool: name, reason: decision.decision === 'allow' ? 'not implemented' : decision.reason }, t.id);
-      return { forModel: { ok: false, denied: true, reason: decision.decision === 'require_approval' ? 'Mission tasks cannot use tools that need approval.' : decision.reason } };
+      return { forModel: { ok: false, denied: true, reason: decision.decision === 'require_approval' ? 'Mission tasks cannot use tools that need approval. The owner can allow it by turning on autopilot.' : decision.reason } };
     }
     const parsed = tool.schema.safeParse(args);
     if (!parsed.success) return { forModel: { ok: false, error: 'Invalid arguments', issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) } };
@@ -686,27 +691,34 @@ missionRoutes.post('/missions/:id/plan/decision', async (c) => {
       await enqueue(q, { orgId: t.orgId, kind: 'mission.plan', payload: { missionId: m.id, userId: m.created_by, feedback: b.note ?? '' }, idempotencyKey: `mission.plan:${m.id}:${b.planVersion + 1}`, maxAttempts: 3, createdBy: `user:${t.userId}` });
       return true;
     }
-    // Approve: re-validate what is stored (never trust it blindly), then create the tasks in plan order.
-    const v = validatePlan(plan.plan);
-    if (!v.ok) throw new ApiError(409, 'PLAN_INVALID', 'Plan is not valid', v.errors.slice(0, 3).join('; '));
-    // Specialists start paused in a new workspace; say which ones to switch on instead of failing later.
-    const needed = [...new Set(v.plan.tasks.map((x) => x.agent))];
-    const paused = await q.many<{ name: string }>(`select name from agents where workspace_id=$1 and template = any($2) and status <> 'active' order by name`, [m.workspace_id, needed]);
-    if (paused.length) throw new ApiError(409, 'AGENT_PAUSED', 'Activate agents first', `This plan uses ${paused.map((x) => x.name).join(', ')}. Activate them in Agents, then approve.`);
-    for (const k of v.order) {
-      const pt = (v.plan as Plan).tasks.find((x) => x.key === k)!;
-      await q.exec(
-        `insert into mission_tasks (org_id, mission_id, plan_id, key, agent, title, instructions, depends_on, inputs, output_schema, review, tools, created_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, clock_timestamp())`,
-        [t.orgId, m.id, plan.id, pt.key, pt.agent, pt.title, pt.instructions, pt.dependsOn, JSON.stringify(pt.inputs ?? {}), JSON.stringify(pt.outputSchema), pt.review, pt.tools ?? []],
-      );
-    }
-    await q.exec(`update missions set status='running', started_at=now(), updated_at=now() where id=$1`, [m.id]);
-    return advanceMission(q, t.orgId, m.id, `user:${t.userId}`);
+    return startPlan(q, t.orgId, m, plan, `user:${t.userId}`);
   });
   if (enq) kick();
   return c.json(await tx(t, (q) => loadMission(q, c.req.param('id'))));
 });
+
+/**
+ * Starts an approved plan: re-validates what is stored (never trust it blindly), checks the agents are active,
+ * creates the tasks in plan order and lets the mission advance. Shared by plan approval and v1.6 delegation.
+ */
+export async function startPlan(q: Q, orgId: string, m: { id: string; workspace_id: string }, plan: { id: string; plan: unknown }, actor: string): Promise<boolean> {
+  const v = validatePlan(plan.plan);
+  if (!v.ok) throw new ApiError(409, 'PLAN_INVALID', 'Plan is not valid', v.errors.slice(0, 3).join('; '));
+  // Specialists start paused in a new workspace; say which ones to switch on instead of failing later.
+  const needed = [...new Set(v.plan.tasks.map((x) => x.agent))];
+  const paused = await q.many<{ name: string }>(`select name from agents where workspace_id=$1 and template = any($2) and status <> 'active' order by name`, [m.workspace_id, needed]);
+  if (paused.length) throw new ApiError(409, 'AGENT_PAUSED', 'Activate agents first', `This plan uses ${paused.map((x) => x.name).join(', ')}. Activate them in Agents, then approve.`);
+  for (const k of v.order) {
+    const pt = (v.plan as Plan).tasks.find((x) => x.key === k)!;
+    await q.exec(
+      `insert into mission_tasks (org_id, mission_id, plan_id, key, agent, title, instructions, depends_on, inputs, output_schema, review, tools, created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, clock_timestamp())`,
+      [orgId, m.id, plan.id, pt.key, pt.agent, pt.title, pt.instructions, pt.dependsOn, JSON.stringify(pt.inputs ?? {}), JSON.stringify(pt.outputSchema), pt.review, pt.tools ?? []],
+    );
+  }
+  await q.exec(`update missions set status='running', started_at=now(), updated_at=now() where id=$1`, [m.id]);
+  return advanceMission(q, orgId, m.id, actor);
+}
 
 function canControlMission(t: TenantCtx, m: any) {
   return m.created_by === t.userId || can(t.role, 'agents.manage');
@@ -863,3 +875,30 @@ missionRoutes.put('/workspaces/:id/controls', async (c) => {
   return c.json(controlsOut(after));
 });
 
+
+// ---- v1.6 autonomy level (owner / admin only; agents can never change it) --------------------------
+missionRoutes.get('/workspaces/:id/autonomy', async (c) => {
+  const t = need(c, 'agents.use');
+  if (c.req.param('id') !== t.workspaceId) throw notFound('Workspace');
+  const s = await tx(t, async (q) => autonomyState(q, (await q.one('select config from workspaces where id=$1', [t.workspaceId]))?.config));
+  return c.json({ ...s, canChange: can(t.role, 'config.apply') });
+});
+
+missionRoutes.put('/workspaces/:id/autonomy', async (c) => {
+  const t = need(c, 'config.apply');
+  if (c.req.param('id') !== t.workspaceId) throw notFound('Workspace');
+  const b = await body(c, z.object({ autonomy: z.enum(AUTONOMY_LEVELS as [Autonomy, ...Autonomy[]]), dailyExternalLimit: z.number().int().min(0).max(200).optional() }));
+  const s = await tx(t, async (q) => {
+    const before = await q.one('select config from workspaces where id=$1 for update', [t.workspaceId]);
+    const prev = before?.config?.agentPolicy?.autonomy ?? 'supervised';
+    const patch: Record<string, unknown> = { autonomy: b.autonomy };
+    if (b.dailyExternalLimit !== undefined) patch.dailyExternalLimit = b.dailyExternalLimit;
+    await q.exec(
+      `update workspaces set config = jsonb_set(config, '{agentPolicy}', coalesce(config->'agentPolicy', '{}'::jsonb) || $2::jsonb) where id=$1`,
+      [t.workspaceId, JSON.stringify(patch)],
+    );
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'autonomy.changed', targetRef: `workspace:${t.workspaceId}`, correlationId: t.correlationId, detail: { from: prev, to: b.autonomy, dailyExternalLimit: b.dailyExternalLimit } });
+    return autonomyState(q, (await q.one('select config from workspaces where id=$1', [t.workspaceId]))?.config);
+  });
+  return c.json({ ...s, canChange: true });
+});

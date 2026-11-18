@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { canDecideApproval, can, TOOL_POLICIES, type Risk } from '@qline/policy';
+import { canDecideApproval, can, routeAgent, TOOL_POLICIES, type AgentTemplate, type Risk } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import { withTenant } from '../core/db';
@@ -136,7 +136,7 @@ agentRoutes.get('/conversations/:id', async (c) => {
   const data = await tx(t, async (q) => {
     const conv = await q.one(`select c.*, a.name as agent_name, a.template from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2`, [c.req.param('id'), t.userId]);
     if (!conv) throw notFound('Conversation');
-    const messages = await q.many('select id, role, content, run_id, refs, created_at from conversation_messages where conversation_id=$1 order by created_at', [conv.id]);
+    const messages = await q.many('select id, role, content, run_id, refs, meta, created_at from conversation_messages where conversation_id=$1 order by created_at', [conv.id]);
     return { ...conv, messages };
   });
   return c.json(data);
@@ -144,16 +144,28 @@ agentRoutes.get('/conversations/:id', async (c) => {
 
 agentRoutes.post('/conversations/:id/messages', async (c) => {
   const t = need(c, 'agents.use');
-  const { content } = await body(c, z.object({ content: z.string().trim().min(1).max(8000) }));
+  const { content, agent: pick } = await body(c, z.object({ content: z.string().trim().min(1).max(8000), agent: z.union([z.literal('auto'), z.string().uuid()]).optional() }));
   const out = await tx(t, async (q) => {
     const conv = await q.one(`select c.*, a.current_version, a.status as agent_status from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2`, [c.req.param('id'), t.userId]);
     if (!conv) throw notFound('Conversation');
     const busy = await q.one(`select id from agent_runs where conversation_id=$1 and status in ('queued','running')`, [conv.id]);
     if (busy) throw new ApiError(409, 'RUN_IN_PROGRESS', 'Already answering', 'Wait for the current answer or cancel it.');
-    const v = await q.one('select id from agent_versions where agent_id=$1 and version=$2', [conv.agent_id, conv.current_version]);
+    // v1.6: answer with another agent for this message — picked by the user, or routed automatically ('auto').
+    let agent = { id: conv.agent_id as string, version: conv.current_version as number };
+    let routed: { id: string; name: string; template: string } | null = null;
+    if (pick) {
+      const active = await q.many<{ id: string; name: string; template: AgentTemplate; current_version: number }>(`select id, name, template, current_version from agents where workspace_id=$1 and status='active'`, [conv.workspace_id]);
+      const chosen = pick === 'auto' ? active.find((a) => a.template === routeAgent(content, active.map((x) => x.template))) : active.find((a) => a.id === pick);
+      if (pick !== 'auto' && !chosen) throw notFound('Agent');
+      if (chosen) {
+        agent = { id: chosen.id, version: chosen.current_version };
+        routed = { id: chosen.id, name: chosen.name, template: chosen.template };
+      }
+    }
+    const v = await q.one('select id from agent_versions where agent_id=$1 and version=$2', [agent.id, agent.version]);
     const run = await q.one<{ id: string }>(
       `insert into agent_runs (org_id, conversation_id, agent_id, agent_version_id, initiated_by, trigger) values ($1,$2,$3,$4,$5,'chat') returning id`,
-      [t.orgId, conv.id, conv.agent_id, v.id, t.userId],
+      [t.orgId, conv.id, agent.id, v.id, t.userId],
     );
     const msg = await q.one(`insert into conversation_messages (org_id, conversation_id, role, content, run_id) values ($1,$2,'user',$3,$4) returning id, created_at`, [
       t.orgId,
@@ -162,7 +174,7 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
       run!.id,
     ]);
     if (conv.title === 'New conversation') await q.exec('update conversations set title=$2, updated_at=now() where id=$1', [conv.id, content.slice(0, 60)]);
-    return { runId: run!.id, messageId: msg.id };
+    return { runId: run!.id, messageId: msg.id, agent: routed };
   });
   return c.json(out, 202);
 });

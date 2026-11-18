@@ -43,7 +43,7 @@ Google's limits, which Qline can't get around:
    - **Redirect URLs → Add New Redirect URL**, paste exactly
      `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/slack/callback`,
      tap **Add**, then **Save URLs** (the URL is not kept until you save). The Settings → Integration setup screen shows the same URL with a copy button.
-   - Bot token scopes: `chat:write`, `chat:write.public`, `channels:read`
+   - Bot token scopes: `chat:write`, `chat:write.public`, `channels:read`, `channels:manage` (v1.6: lets the AI create channels and set topics; reconnect Slack after adding it)
 3. **Manage Distribution → Activate public distribution**, so other users' workspaces can connect.
 4. **Basic Information**: copy the **Client ID** and **Client Secret**.
 

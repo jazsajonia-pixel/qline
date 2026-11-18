@@ -360,3 +360,24 @@ export async function slackPost(token: string, channel: string, text: string, op
 export async function slackRevoke(token: string) {
   await api(token, 'https://slack.com/api/auth.revoke', { body: {} }).catch(() => undefined);
 }
+
+/** Slack channel names: lowercase, no spaces or periods, up to 80 characters. */
+export function slackChannelName(s: string): string {
+  return s.trim().replace(/^#/, '').toLowerCase().replace(/[\s.]+/g, '-').replace(/[^a-z0-9_-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+}
+
+export async function slackCreateChannel(token: string, name: string, isPrivate = false) {
+  const r = await api(token, 'https://slack.com/api/conversations.create', { body: { name, is_private: isPrivate } }).catch((e) => {
+    throw slackError(e);
+  });
+  return { id: r.channel.id as string, name: r.channel.name as string };
+}
+
+export async function slackSetTopic(token: string, channel: string, topic?: string, purpose?: string) {
+  const call = (method: string, body: Record<string, unknown>) =>
+    api(token, `https://slack.com/api/${method}`, { body }).catch((e) => {
+      throw slackError(e);
+    });
+  if (topic) await call('conversations.setTopic', { channel, topic: slackEscape(topic) });
+  if (purpose) await call('conversations.setPurpose', { channel, purpose: slackEscape(purpose) });
+}

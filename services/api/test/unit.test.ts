@@ -317,3 +317,27 @@ describe('Slack hardening (audit)', () => {
     globalThis.fetch = realFetch;
   });
 });
+
+describe('v1.6 reply metadata (speech + suggestions)', () => {
+  it('hides the meta block from the stream, even when the marker is split across tokens', async () => {
+    const { MetaFilter } = await import('../src/agent/meta');
+    const f = new MetaFilter();
+    const chunks = ['Here are your 3 leads.', '\n- Ana', ' <qli', 'ne-me', 'ta>{"speech":"You have three', ' new leads."}</qline-meta>'];
+    const shown = chunks.map((c) => f.push(c)).join('') + f.flush();
+    expect(shown).toBe('Here are your 3 leads.\n- Ana ');
+    const g = new MetaFilter();
+    expect(g.push('a < b')).toBe('a < b');
+    expect(g.push(' <q')).toBe(' ');
+    expect(g.flush()).toBe('<q');
+  });
+  it('parses speech and suggestions, and falls back to a short brief', async () => {
+    const { parseMeta, briefSpeech, stripMeta } = await import('../src/agent/meta');
+    const raw = 'Long answer.<qline-meta>{"speech":"Three **new** leads today.","suggestions":["Draft replies","Draft replies","Show urgent only","Call Ana","x"]}</qline-meta>';
+    expect(parseMeta(raw, 'Long answer.')).toEqual({ speech: 'Three new leads today.', suggestions: ['Draft replies', 'Show urgent only', 'Call Ana'] });
+    const long = '## Summary\nYou have **12 open tasks**. Four are overdue. Here is the full list:\n1. Call supplier\n2. Send invoice';
+    const b = parseMeta('no meta', long).speech;
+    expect(b).toBe('Summary You have 12 open tasks. Four are overdue.');
+    expect(briefSpeech('x'.repeat(500)).length).toBeLessThanOrEqual(220);
+    expect(stripMeta('Hi<qline-meta>{"speech":"cut')).toBe('Hi');
+  });
+});
