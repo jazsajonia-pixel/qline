@@ -8,6 +8,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/api.dart';
 import '../core/session.dart';
 import '../core/voice.dart';
+import '../ui/chat_artifacts.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
@@ -24,7 +25,11 @@ class _Step {
 }
 
 class _Msg {
-  _Msg(this.role, this.text, {this.steps, this.error, this.speech, this.suggestions = const [], this.agentName, this.template});
+  _Msg(this.role, this.text, {this.steps, this.error, this.speech, this.suggestions = const [], this.agentName, this.template, this.attachments = const [], List<Map<String, dynamic>>? artifacts}) : artifacts = artifacts ?? [];
+  /// v1.6 run 2: files sent with a user message ({id, name, mime, kind, size}).
+  final List<Map<String, dynamic>> attachments;
+  /// v1.6 run 2: charts and images the AI showed in this answer.
+  final List<Map<String, dynamic>> artifacts;
   final String role;
   String text;
   /// v1.6: what the voice says (short), separate from the written answer.
@@ -208,7 +213,9 @@ class _LiveState extends ConsumerState<_Live> {
       ..clear()
       ..addAll(items(c, 'messages').map((m) {
         final meta = (m['meta'] as Map?)?.cast<String, dynamic>() ?? const {};
-        return _Msg(m['role'] as String, m['content'] as String, speech: meta['speech'] as String?, suggestions: ((meta['suggestions'] as List?) ?? const []).whereType<String>().toList());
+        List<Map<String, dynamic>> maps(Object? v) => ((v as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+        return _Msg(m['role'] as String, m['content'] as String,
+            speech: meta['speech'] as String?, suggestions: ((meta['suggestions'] as List?) ?? const []).whereType<String>().toList(), attachments: maps(meta['attachments']), artifacts: maps(meta['artifacts']));
       }));
     if (mounted) setState(() {});
     _toBottom();
@@ -218,9 +225,43 @@ class _LiveState extends ConsumerState<_Live> {
         if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       });
 
+  late final ChatAttachments _files = ChatAttachments(() => _api)..addListener(() {
+      if (mounted) setState(() {});
+    });
+  List<PendingFile> get _pending => _files.items;
+
+  Future<void> _attach() async {
+    if (_files.full) {
+      toast(context, 'You can attach up to $maxChatAttachments files to one message.');
+      return;
+    }
+    final ChatFile? f;
+    try {
+      f = await pickChatFile();
+    } catch (e) {
+      if (mounted) toastError(context, e);
+      return;
+    }
+    if (f == null || !mounted) return;
+    try {
+      final note = await _files.add(f);
+      if (note != null && mounted) toast(context, note);
+    } on AttachmentTooLarge catch (e) {
+      if (mounted) toast(context, e.toString());
+    } catch (e) {
+      if (mounted) toastError(context, e);
+    }
+  }
+
   Future<void> _send([String? text]) async {
     final content = (text ?? _input.text).trim();
-    if (content.isEmpty || _runId != null) return;
+    if (_runId != null) return;
+    if (_files.uploading) {
+      toast(context, 'Wait for the upload to finish, then send.');
+      return;
+    }
+    final sending = _files.take();
+    if (content.isEmpty && sending.isEmpty) return;
     _input.clear();
     _busy = true;
     _relisten?.cancel();
@@ -228,18 +269,20 @@ class _LiveState extends ConsumerState<_Live> {
     await _voice.stop();
     setState(() {
       _spoken = '';
-      _msgs.add(_Msg('user', content));
+      _msgs.add(_Msg('user', content, attachments: [for (final p in sending) p.toMeta()]));
       _core = CoreState.thinking;
     });
     _toBottom();
     try {
       _convId ??= ((await _api.post('/conversations', {if (_agent != null) 'agentId': _agent!['id']})) as Map)['id'] as String;
-      final r = await _api.post('/conversations/$_convId/messages', {'content': content, if (_auto) 'agent': 'auto'}) as Map;
+      final r = await _api.post('/conversations/$_convId/messages', {'content': content, if (sending.isNotEmpty) 'attachments': [for (final p in sending) p.id], if (_auto) 'agent': 'auto'}) as Map;
       _runId = r['runId'] as String;
       final routed = (r['agent'] as Map?)?.cast<String, dynamic>();
       _stream(_runId!, agentName: routed?['name'] as String?, template: routed?['template'] as String?);
     } on ApiException catch (e) {
       setState(() {
+        // Keep the files so the person can send again without re-uploading.
+        _files.restore(sending);
         _msgs.add(_Msg('system_notice', '', error: e.message));
         _core = e.isNetwork ? CoreState.offline : CoreState.error;
         _busy = false;
@@ -283,6 +326,8 @@ class _LiveState extends ConsumerState<_Live> {
                 if (d['summary'] != null) s.summary = d['summary'] as String;
               }
               _core = CoreState.thinking;
+            case 'artifact':
+              if (reply.artifacts.length < 6) reply.artifacts.add(d);
             case 'approval.required':
               reply.approval = d;
               _core = CoreState.approval;
@@ -306,7 +351,7 @@ class _LiveState extends ConsumerState<_Live> {
         _runId = null;
         ref.read(refreshTick.notifier).bump();
         if (!mounted) return;
-        if (reply.text.isEmpty && reply.error == null && reply.approval == null && (reply.steps?.isEmpty ?? true)) {
+        if (reply.text.isEmpty && reply.artifacts.isEmpty && reply.error == null && reply.approval == null && (reply.steps?.isEmpty ?? true)) {
           setState(() => reply.error = 'No answer came back. Try again.');
         }
         final voiceOn = _handsFree || ref.read(prefsProvider).speak;
@@ -450,6 +495,7 @@ class _LiveState extends ConsumerState<_Live> {
       _convId = null;
       _runId = null;
       _msgs.clear();
+      _files.take();
       _core = _agentReady ? CoreState.idle : CoreState.error;
     });
   }
@@ -464,6 +510,7 @@ class _LiveState extends ConsumerState<_Live> {
     if (_handsFree) WakelockPlus.disable();
     _input.dispose();
     _scroll.dispose();
+    _files.dispose();
     super.dispose();
   }
 
@@ -475,7 +522,7 @@ class _LiveState extends ConsumerState<_Live> {
     final hasChat = _msgs.isNotEmpty;
     final template = _agent?['template'] as String? ?? 'ceo';
     return Scaffold(
-      backgroundColor: const Color(0xFF07060D),
+      backgroundColor: QColors.liveInk,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
@@ -596,6 +643,11 @@ class _LiveState extends ConsumerState<_Live> {
             onSend: () => _send(),
             onMic: _toggleMic,
             onStop: _cancel,
+            onAttach: _attach,
+            pending: [
+              for (final p in _pending)
+                AttachmentChip(name: p.name, kind: p.kind, size: p.size, uploading: p.uploading, onRemove: _runId != null ? null : () => _files.remove(p)),
+            ],
           ),
         ]),
       ),
@@ -724,7 +776,14 @@ class _Bubble extends StatelessWidget {
           margin: const EdgeInsets.only(bottom: 10, left: 48),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(color: q.surface2, borderRadius: BorderRadius.circular(14), border: Border.all(color: q.line)),
-          child: SelectableText(msg.text, style: qs(15, c: q.text)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
+            if (msg.text.isNotEmpty) SelectableText(msg.text, style: qs(15, c: q.text)),
+            for (final a in msg.attachments)
+              if (a['kind'] == 'image' && a['id'] != null)
+                SizedBox(width: 220, child: ChatImage(fileId: a['id'] as String, name: a['name'] as String? ?? 'Image', height: 160, compact: true))
+              else
+                Padding(padding: const EdgeInsets.only(top: 6), child: AttachmentChip(name: a['name'] as String? ?? 'File', kind: a['kind'] as String?, size: a['size'] as num?)),
+          ]),
         ),
       );
     }
@@ -750,6 +809,7 @@ class _Bubble extends StatelessWidget {
             ]),
           ),
         if (msg.text.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 6), child: SelectableText(msg.text, style: qs(15, c: q.text, h: 1.5))),
+        for (final a in msg.artifacts) ChatArtifact(a),
         if (msg.approval != null) _InlineApproval(data: msg.approval!),
         if (onSuggestion != null && msg.role == 'assistant' && msg.suggestions.isNotEmpty)
           Padding(
@@ -800,17 +860,24 @@ class _InlineApproval extends StatelessWidget {
 }
 
 class _Composer extends StatelessWidget {
-  const _Composer({required this.controller, required this.listening, required this.handsFree, required this.onHandsFree, required this.running, required this.enabled, required this.onSend, required this.onMic, required this.onStop});
+  const _Composer({required this.controller, required this.listening, required this.handsFree, required this.onHandsFree, required this.running, required this.enabled, required this.onSend, required this.onMic, required this.onStop, required this.onAttach, this.pending = const []});
   final TextEditingController controller;
   final bool listening, running, enabled, handsFree;
-  final VoidCallback onSend, onMic, onStop, onHandsFree;
+  final VoidCallback onSend, onMic, onStop, onHandsFree, onAttach;
+  final List<Widget> pending;
   @override
   Widget build(BuildContext context) {
     final q = context.q;
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
       decoration: BoxDecoration(border: Border(top: BorderSide(color: q.line))),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        if (pending.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Align(alignment: Alignment.centerLeft, child: Wrap(spacing: 6, runSpacing: 6, children: pending)),
+          ),
+        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
         Expanded(
           child: TextField(
             controller: controller,
@@ -820,7 +887,11 @@ class _Composer extends StatelessWidget {
             textCapitalization: TextCapitalization.sentences,
             textInputAction: TextInputAction.send,
             onSubmitted: (_) => onSend(),
-            decoration: InputDecoration(hintText: listening ? 'Listening…' : 'Ask or tell your team', isDense: true),
+            decoration: InputDecoration(
+              hintText: listening ? 'Listening…' : 'Ask or tell your team',
+              isDense: true,
+              prefixIcon: IconButton(tooltip: 'Attach a photo or file', onPressed: enabled && !running ? onAttach : null, icon: const Icon(Icons.attach_file)),
+            ),
           ),
         ),
         const SizedBox(width: 8),
@@ -852,6 +923,7 @@ class _Composer extends StatelessWidget {
             constraints: const BoxConstraints.tightFor(width: 48, height: 48),
           ),
         ],
+        ]),
       ]),
     );
   }

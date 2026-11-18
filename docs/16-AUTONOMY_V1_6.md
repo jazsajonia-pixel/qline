@@ -35,8 +35,67 @@ The model can end its reply with `<qline-meta>{"speech": "...", "suggestions": [
 - With cloud audio, the animation follows the player's actual position.
 - The core's amplitude uses only the real level and the word pulse, smoothed with a fast attack and a slow release. There is no synthetic wobble.
 
+## Run 2: files, charts and the new look
+
+Status: implemented on branch `feat/v1-6-files-charts`, in a draft PR stacked on PR #16. It is not merged and not deployed.
+
+### Files sent to the AI
+
+The client calls `POST /v1/agents/attachments` (multipart field `file`, permission `agents.use`) as soon as a file is picked, then sends the message with `attachments: [ids]`. A message can carry up to 5 files. Its text may be empty when files are attached; it is then stored as "Please look at the attached file." An id that belongs to another workspace returns 404.
+
+| Kind | How it is recognised | Limit | What is stored |
+|---|---|---|---|
+| Image (PNG, JPEG, WebP, GIF) | Magic bytes, not the file name | 5 MB | The bytes in object storage, `files.source='chat'`, `extracted.kind='image'` |
+| Records (CSV, XLSX, JSON) | `detectFormat` + `parseFile` (the Imports parser) | 10 MB | Columns and up to 500 rows in `files.extracted` |
+| Document (TXT, MD, PDF, DOCX) | Same parser | 10 MB | Up to 100,000 characters of text in `files.extracted` |
+
+Each upload writes a `file.attached` audit event.
+
+`GET /v1/files/:id/content` (`documents.read`) serves images only. It re-checks the magic bytes and sets `X-Content-Type-Options: nosniff`, so an uploaded file can never be served as HTML or script.
+
+File contents reach the model as untrusted context, wrapped the same way as other tool data. Images are sent only with the latest user message, at most 4, and only when the model supports vision:
+
+- **OpenAI-compatible providers:** `image_url` data-URI parts.
+- **Anthropic:** base64 image blocks.
+- **DeepSeek:** declares `vision: false`. It gets a note that an image was attached but cannot be seen, and the model is told to say so rather than guess.
+
+### New AI tools
+
+| Tool | Level | What it does |
+|---|---|---|
+| `files.read` | L0 | Pages through an attached file (8,000 characters or 50 rows per page) |
+| `files.save_to_library` | L1 | Saves an attached document as a library note, so it becomes searchable memory |
+| `files.import_records` | L2, asks first (relaxable by autopilot), needs `imports.run` | Imports attached rows into contacts, companies, tasks or leads (up to 500). It creates a normal `import_jobs` row in the same transaction, so the import shows up in Imports and can be rolled back. Only the CEO, sales, marketing and operations agents have it. |
+| `chart.business` | L0 | Charts the workspace's own data, computed on the server. Nine metrics: leads per day, by source and by urgency; tasks by status, by priority and completed per week; contacts by stage and added per week; AI tokens per day. |
+| `chart.create` | L0 | Charts numbers from elsewhere, such as an attached sheet or a Drive file. The input is validated (labels and series must line up) and a `source` is required. |
+| `image.show` | L0 | Shows an attached or stored image again, with a caption |
+
+Migration `0011_v16_files_charts.sql` adds `files.source` (`import` or `chat`, with a check constraint), `files.extracted` (jsonb) and an index. It also adds the tools to all current agent versions.
+
+### Charts and images in chat
+
+Tools return `artifacts`. The runner sends each one as an `artifact` SSE event (at most 6 per answer) and stores them in `conversation_messages.meta.artifacts`, so reopening a conversation shows them again. Live draws charts natively (`lib/ui/chat_artifacts.dart`), so no chart package is added:
+
+- grouped bar, line and pie (donut) charts;
+- a legend when there are several series;
+- a source line: "Computed by Qline from your data" for `chart.business`, or "From: … · provided by the AI" for `chart.create`;
+- a screen-reader summary that reads out the values;
+- no grow-in animation under reduce motion.
+
+Images load with the user's session, are cached in memory, and open full screen on tap.
+
+In the composer, the paperclip opens the system picker. Size limits are checked before upload. Pending files appear as removable chips, and a failed send keeps them so they can be sent again. `ChatAttachments` holds this logic and is unit-tested.
+
+### New palette and app icon
+
+The palette is now "Citrine Signal on Spruce Ink"; tokens and contrast ratios are in docs/03 §2 (`apps/mobile/tool/contrast.py` recomputes them). The launcher icon is now drawn from the exact `QMark` geometry used in the app, by `apps/mobile/tool/make_icons.py`. It includes adaptive and monochrome layers. The old icon was a closed ring with a dot, which did not match the in-app mark. The website and the OAuth "connected" page use the new colours too.
+
+### Test-only storage
+
+When `NODE_ENV=test` and no S3 bucket is configured, the imports module uses an in-memory object store, so integration tests can run file flows. Production still requires S3; nothing changed there.
+
 ## Deploy order
 
-1. Merge PR #15 (Slack fixes). Then merge this PR.
-2. Apply migration `0010_v16_autonomy.sql` to production.
+1. Merge PR #15 (Slack fixes), then PR #16, then the run-2 PR.
+2. Apply migrations `0010_v16_autonomy.sql` and `0011_v16_files_charts.sql` to production.
 3. Deploy the API, then release the APK.

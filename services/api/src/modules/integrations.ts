@@ -82,9 +82,9 @@ function page(ok: boolean, title: string, detail: string, provider: string, back
   const link = back ?? `qline://integrations?provider=${encodeURIComponent(provider)}&ok=${ok ? 1 : 0}`;
   const esc = (s: string) => s.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]!);
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qline</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0A0812;color:#EFECF6;font:16px/1.5 system-ui,sans-serif}
-main{max-width:360px;padding:32px 24px;text-align:center}.dot{width:56px;height:56px;border-radius:50%;margin:0 auto 20px;background:${ok ? '#5EF2C6' : '#FF7A8A'};box-shadow:0 0 48px ${ok ? '#5EF2C666' : '#FF7A8A55'}}
-h1{font-size:22px;margin:0 0 8px}p{color:#B2ACC2;margin:0 0 24px}a{display:inline-block;padding:14px 22px;border-radius:14px;background:#5EF2C6;color:#03140E;font-weight:600;text-decoration:none}</style></head>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#07100F;color:#ECF3EF;font:16px/1.5 system-ui,sans-serif}
+main{max-width:360px;padding:32px 24px;text-align:center}.dot{width:56px;height:56px;border-radius:50%;margin:0 auto 20px;background:${ok ? '#F5C451' : '#FF6F80'};box-shadow:0 0 48px ${ok ? '#F5C45166' : '#FF6F8055'}}
+h1{font-size:22px;margin:0 0 8px}p{color:#AABBB5;margin:0 0 24px}a{display:inline-block;padding:14px 22px;border-radius:14px;background:#F5C451;color:#1C1500;font-weight:600;text-decoration:none}</style></head>
 <body><main><div class="dot"></div><h1>${esc(title)}</h1><p>${esc(detail)}</p><a href="${link}">Return to Qline</a></main>
 <script>setTimeout(function(){location.href=${JSON.stringify(link)}},600)</script></body></html>`;
 }

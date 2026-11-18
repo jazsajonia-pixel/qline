@@ -8,7 +8,9 @@ import 'theme.dart';
 
 enum CoreState { idle, listening, thinking, tool, approval, speaking, success, error, offline }
 
-const _ivory = Color(0xFFE9E4F5), _halo = Color(0xFF5EF2C6), _amber = Color(0xFFB79BFF), _bad = Color(0xFFFF7A8A), _grey = Color(0xFF7E7894);
+// Matches QColors.dark (Citrine Signal on Spruce Ink): ivory strands, citrine for approvals, a cool
+// cyan for tool work (never the human citrine), and the theme's error red.
+const _ivory = Color(0xFFE6F0EC), _halo = Color(0xFFF5C451), _amber = Color(0xFF7FD8E8), _bad = Color(0xFFFF6F80), _grey = Color(0xFF7C8E88);
 
 class _P {
   _P(this.glow, this.scale, this.ring, this.ringW, this.halo, this.sSpeed, this.sAlpha, this.conv, this.dash, this.sats, this.notch, this.err, this.wave, this.amp, this.desat, this.cross);
@@ -207,8 +209,8 @@ class _CorePainter extends CustomPainter {
     final paint = Paint();
 
     if (background) {
-      c.drawRect(Offset.zero & size, paint..color = const Color(0xFF07060D));
-      paint.shader = RadialGradient(colors: [_rgba(hue, .16 * p.glow), _rgba(hue, .05 * p.glow), const Color(0x0007060D)], stops: const [0, .5, 1])
+      c.drawRect(Offset.zero & size, paint..color = QColors.liveInk);
+      paint.shader = RadialGradient(colors: [_rgba(hue, .16 * p.glow), _rgba(hue, .05 * p.glow), const Color(0x00050C0B)], stops: const [0, .5, 1])
           .createShader(Rect.fromCircle(center: ctr, radius: R * 3.4));
       c.drawRect(Offset.zero & size, paint);
       paint.shader = null;
@@ -261,7 +263,7 @@ class _CorePainter extends CustomPainter {
       c.drawCircle(ctr, R * (1.28 + micAmp * .05), Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = _rgba(ringC, .18 * p.halo));
     }
     final sc = p.scale * (1 + micAmp * .06 + talk * .12);
-    paint.shader = RadialGradient(colors: [_rgba(_mix(hue, Colors.white, .3), .55 * p.glow), _rgba(_mix(hue, const Color(0xFF0A0C14), .55), .55), const Color(0xF5080A12)], stops: const [0, .45, 1])
+    paint.shader = RadialGradient(colors: [_rgba(_mix(hue, Colors.white, .3), .55 * p.glow), _rgba(_mix(hue, const Color(0xFF07120F), .55), .55), const Color(0xF5060F0D)], stops: const [0, .45, 1])
         .createShader(Rect.fromCircle(center: ctr, radius: R));
     c.drawCircle(ctr, R, paint);
     paint.shader = null;

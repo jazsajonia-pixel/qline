@@ -41,7 +41,7 @@ class _AlertWatcherState extends ConsumerState<AlertWatcher> with WidgetsBinding
     channelDescription: 'Important email, new leads, approvals and assistant reminders',
     importance: Importance.high,
     priority: Priority.high,
-    color: Color(0xFF5EF2C6),
+    color: Color(0xFFF5C451),
   );
   Timer? _timer;
   bool _busy = false;
