@@ -34,3 +34,13 @@ Method: STRIDE per trust boundary, plus the master prompt's §10 mandatory threa
 ## 3. Operational security
 
 Dependabot or Renovate plus `npm audit` / `osv-scanner`, and container image scanning. Branch protection requires CI and the isolation suite. Environments are separated (local / preview / prod) with separate secrets. There is a backup schedule (Neon PITR) and a **restore drill each quarter**. There is an incident response runbook and a `security@` contact. Logs are structured, carry correlation ids and redact PII and secrets.
+
+## Dependency audit exceptions (v1.6)
+
+CI runs two audits. `npm audit --omit=dev --audit-level=moderate` covers everything that ships, and it has no exceptions. `scripts/audit-gate.mjs` audits the full tree; it accepts only named, dated exceptions that the owner has approved.
+
+| Advisory | Package | Why it does not reach production | Approved | Expires |
+|---|---|---|---|---|
+| GHSA-fc5q-39xc-vjpf | picomatch (via vite/vitest) | Dev/test tooling only; it matches our own fixed globs, never user input. There is no patched release. | Jazz, 2026-11-18 | 2027-01-31 |
+
+When an exception expires, CI fails again. At that point, remove the exception or renew it with a new approval.
