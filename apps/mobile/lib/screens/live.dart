@@ -6,6 +6,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/api.dart';
+import '../core/chat_resume.dart';
 import '../core/session.dart';
 import '../core/voice.dart';
 import '../ui/chat_artifacts.dart';
@@ -196,7 +197,15 @@ class _LiveState extends ConsumerState<_Live> {
       _agents = items(results[0]);
       _ai = (results[1] as Map).cast<String, dynamic>();
       _agent = _agents.where((a) => a['template'] == 'ceo').firstOrNull ?? _agents.firstOrNull;
-      if (_convId != null) await _loadConversation(_convId!);
+      if (_convId != null) {
+        await _loadConversation(_convId!);
+      } else {
+        // M2: continue the conversation you were in (or your most recent one), unless you started a new chat.
+        final key = _pointerKey;
+        final stored = key == null ? null : await ref.read(chatPointerStoreProvider).read(key).catchError((Object _) => null);
+        final r = await resolveConversation(stored: stored, load: _tryLoad, latest: () async => items(await _api.get('/conversations')).firstOrNull?['id'] as String?);
+        if (r.note != null && mounted) toast(context, r.note!);
+      }
       if (!_agentReady) _core = CoreState.error;
     } on ApiException catch (e) {
       _loadError = e.message;
@@ -205,9 +214,32 @@ class _LiveState extends ConsumerState<_Live> {
     if (mounted) setState(() => _loading = false);
   }
 
+  /// M2: the remembered chat for this account and organisation.
+  String? get _pointerKey {
+    final s = ref.read(sessionProvider);
+    return s.orgId == null || s.email == null ? null : chatPointerKey(s.orgId!, s.email!);
+  }
+
+  void _remember(String value) {
+    final key = _pointerKey;
+    if (key != null) ref.read(chatPointerStoreProvider).write(key, value).catchError((Object _) {});
+  }
+
+  /// Opens [id]; false when it no longer exists or is not this person's (the server answers 404 for both).
+  Future<bool> _tryLoad(String id) async {
+    try {
+      await _loadConversation(id);
+      return true;
+    } on ApiException catch (e) {
+      if (e.status == 404) return false;
+      rethrow;
+    }
+  }
+
   Future<void> _loadConversation(String id) async {
     final c = await _api.get('/conversations/$id') as Map;
     _convId = id;
+    _remember(id);
     _agent = _agents.where((a) => a['id'] == c['agent_id']).firstOrNull ?? _agent;
     _msgs
       ..clear()
@@ -219,6 +251,14 @@ class _LiveState extends ConsumerState<_Live> {
       }));
     if (mounted) setState(() {});
     _toBottom();
+    // M2: an answer was still being written when the app closed: follow it to the end.
+    final active = (c['active_run'] as Map?)?.cast<String, dynamic>();
+    if (active != null && _runId == null && mounted) {
+      _runId = active['id'] as String;
+      _busy = true;
+      _core = CoreState.thinking;
+      _stream(_runId!, resumed: true);
+    }
   }
 
   void _toBottom() => WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -274,7 +314,10 @@ class _LiveState extends ConsumerState<_Live> {
     });
     _toBottom();
     try {
-      _convId ??= ((await _api.post('/conversations', {if (_agent != null) 'agentId': _agent!['id']})) as Map)['id'] as String;
+      if (_convId == null) {
+        _convId = ((await _api.post('/conversations', {if (_agent != null) 'agentId': _agent!['id']})) as Map)['id'] as String;
+        _remember(_convId!);
+      }
       final r = await _api.post('/conversations/$_convId/messages', {'content': content, if (sending.isNotEmpty) 'attachments': [for (final p in sending) p.id], if (_auto) 'agent': 'auto'}) as Map;
       _runId = r['runId'] as String;
       final routed = (r['agent'] as Map?)?.cast<String, dynamic>();
@@ -291,7 +334,8 @@ class _LiveState extends ConsumerState<_Live> {
     }
   }
 
-  void _stream(String runId, {String? lastId, String? agentName, String? template}) {
+  /// [resumed]: following an answer that started before the app reopened; it is shown, not spoken.
+  void _stream(String runId, {String? lastId, String? agentName, String? template, bool resumed = false}) {
     final reply = _Msg('assistant', '', steps: [], agentName: agentName, template: template);
     setState(() {
       for (final m in _msgs) {
@@ -354,7 +398,7 @@ class _LiveState extends ConsumerState<_Live> {
         if (reply.text.isEmpty && reply.artifacts.isEmpty && reply.error == null && reply.approval == null && (reply.steps?.isEmpty ?? true)) {
           setState(() => reply.error = 'No answer came back. Try again.');
         }
-        final voiceOn = _handsFree || ref.read(prefsProvider).speak;
+        final voiceOn = !resumed && (_handsFree || ref.read(prefsProvider).speak);
         if (_core == CoreState.success) {
           if (voiceOn && reply.text.isNotEmpty) {
             // Speak the short spoken line, not the whole written answer.
@@ -486,7 +530,9 @@ class _LiveState extends ConsumerState<_Live> {
     _send(words);
   }
 
+  /// New chat is always explicit: reopening the app continues the current conversation (M2).
   void _newChat() {
+    _remember(newChatPointer);
     _sub?.cancel();
     _voice.stop();
     setState(() {
@@ -545,8 +591,10 @@ class _LiveState extends ConsumerState<_Live> {
             tooltip: 'Conversations',
             icon: const Icon(Icons.history),
             onPressed: () async {
-              final id = await showModalBottomSheet<String>(context: context, builder: (_) => Theme(data: buildTheme(false), child: const _History()));
-              if (id != null) {
+              final id = await showModalBottomSheet<String>(context: context, builder: (_) => Theme(data: buildTheme(false), child: _History(canStartNew: _runId == null)));
+              if (id == newChatPointer) {
+                _newChat();
+              } else if (id != null) {
                 _sub?.cancel();
                 try {
                   await _loadConversation(id);
@@ -557,7 +605,7 @@ class _LiveState extends ConsumerState<_Live> {
               }
             },
           ),
-          IconButton(tooltip: 'New conversation', icon: const Icon(Icons.add_comment_outlined), onPressed: _runId == null ? _newChat : null),
+          IconButton(tooltip: 'New chat', icon: const Icon(Icons.add_comment_outlined), onPressed: _runId == null ? _newChat : null),
         ],
       ),
       body: SafeArea(
@@ -930,7 +978,8 @@ class _Composer extends StatelessWidget {
 }
 
 class _History extends StatelessWidget {
-  const _History();
+  const _History({this.canStartNew = true});
+  final bool canStartNew;
   @override
   Widget build(BuildContext context) {
     final q = context.q;
@@ -942,6 +991,13 @@ class _History extends StatelessWidget {
             ? const EmptyState(icon: Icons.forum_outlined, title: 'No conversations yet')
             : ListView(children: [
                 Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 8), child: Text('Conversations', style: qs(16, w: FontWeight.w600, c: q.text))),
+                ListTile(
+                  enabled: canStartNew,
+                  leading: const Icon(Icons.add_comment_outlined),
+                  title: const Text('New chat'),
+                  subtitle: Text(canStartNew ? 'Start an empty conversation' : 'Wait for the current answer to finish', maxLines: 1),
+                  onTap: () => Navigator.pop(context, newChatPointer),
+                ),
                 for (final c in list)
                   ListTile(
                     leading: AgentOrb(c['template'] as String?, size: 28),

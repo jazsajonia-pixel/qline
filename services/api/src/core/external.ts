@@ -17,6 +17,8 @@ export interface ExternalTrace {
   sent: number;
   confirmed: number;
   rejected: number;
+  /** M2: read requests (GET/HEAD) made, to measure what reusing a result saves. */
+  reads?: number;
   /** Provider idempotency key for this action (sent where the provider supports it, e.g. Stripe). */
   idempotencyKey?: string;
 }
@@ -38,7 +40,11 @@ export function noteRequest(
   method: string | undefined,
 ): (status: number | null, okBody?: boolean) => void {
   const t = store.getStore();
-  if (!t || !MUTATING(method)) return () => {};
+  if (!t) return () => {};
+  if (!MUTATING(method)) {
+    t.reads = (t.reads ?? 0) + 1;
+    return () => {};
+  }
   t.sent += 1;
   return (status, okBody = true) => {
     if (status == null) return; // no answer: stays ambiguous
@@ -83,6 +89,7 @@ export async function trackExternal<T>(
     sent: 0,
     confirmed: 0,
     rejected: 0,
+    reads: 0,
     idempotencyKey: opts.idempotencyKey,
   };
   try {

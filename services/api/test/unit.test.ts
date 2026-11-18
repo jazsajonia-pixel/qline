@@ -6,6 +6,7 @@ import { analyseWithRules, buildProposal } from '../src/modules/onboarding';
 import { DEFAULT_CONFIG } from '../src/modules/templates';
 import { classifyByRules, rulesSchema } from '../src/integrations/leads';
 import { envelope } from '../src/modules/voice';
+import { argsHash, reusable, stableArgs } from '../src/agent/context-ledger';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -492,5 +493,22 @@ describe('M1 action safety: honest outcomes for connected-app actions', async ()
     expect(silent.error).toMatch(/not accepting/);
     const noState = await scenario(() => new Response('{}', { status: 200 }), null);
     expect(noState.accepting).toBe(false);
+  });
+});
+
+describe('M2 context ledger keys', () => {
+  it('the same arguments in any key order are the same call; different values are not', () => {
+    expect(argsHash({ status: 'open', limit: 5 })).toBe(argsHash({ limit: 5, status: 'open' }));
+    expect(argsHash({ status: 'open', nested: { b: 1, a: [2, { y: 1, x: 0 }] } })).toBe(argsHash({ nested: { a: [2, { x: 0, y: 1 }], b: 1 }, status: 'open' }));
+    expect(argsHash({ status: 'open' })).not.toBe(argsHash({ status: 'done' }));
+    expect(argsHash({ a: [1, 2] })).not.toBe(argsHash({ a: [2, 1] }));
+    // An omitted optional argument equals an undefined one.
+    expect(stableArgs({ a: 1, b: undefined })).toBe(stableArgs({ a: 1 }));
+  });
+  it('only read-only tools are reusable', () => {
+    expect(reusable('tasks.search')).toBe(true);
+    expect(reusable('tasks.create')).toBe(false);
+    expect(reusable('time.now')).toBe(false);
+    expect(reusable('approvals.list')).toBe(false);
   });
 });

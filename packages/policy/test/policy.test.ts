@@ -169,3 +169,21 @@ describe('M1: EXTERNAL_WRITE_TOOLS', () => {
     for (const t of EXTERNAL_WRITE_TOOLS) expect(TOOL_POLICIES[t]).toBeTruthy();
   });
 });
+
+describe('M2: REUSE_POLICY', () => {
+  it('only lists read-only (L0) tools, with expiries of 30 minutes or less, and never live-status tools', async () => {
+    const { REUSE_POLICY } = await import('../src/index');
+    for (const [tool, p] of Object.entries(REUSE_POLICY)) {
+      expect(TOOL_POLICIES[tool]?.risk, tool).toBe('L0');
+      expect(p.ttlSec).toBeGreaterThan(0);
+      expect(p.ttlSec).toBeLessThanOrEqual(1800);
+      expect(p.tables.length).toBeGreaterThan(0);
+    }
+    for (const live of ['time.now', 'approvals.list', 'agents.status', 'leads.list', 'business.snapshot', 'chart.create', 'chart.business', 'image.show']) expect(REUSE_POLICY[live]).toBeUndefined();
+  });
+  it('wantsFresh spots requests for current data', async () => {
+    const { wantsFresh } = await import('../src/index');
+    for (const s of ['Refresh my tasks', 'check again please', 'any new emails?', 'what is the latest on Acme', 'show it again', 'up-to-date numbers', 'Check mo ulit yung tasks', 'May bago ba sa inbox?']) expect(wantsFresh(s), s).toBe(true);
+    for (const s of ['What tasks are open?', 'Summarise the Acme deal', 'Draft a reply to Dana']) expect(wantsFresh(s), s).toBe(false);
+  });
+});

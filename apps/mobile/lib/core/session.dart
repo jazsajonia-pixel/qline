@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'api.dart';
+import 'chat_resume.dart';
 
 class Org {
   Org(this.id, this.name, this.role);
@@ -141,6 +142,8 @@ class SessionNotifier extends Notifier<SessionState> {
     _api.orgId = null;
     await _storage.delete(key: 'token');
     await _storage.delete(key: 'org');
+    // M2: forget which chat was open, so the next account on this device starts clean.
+    await ref.read(chatPointerStoreProvider).clearAll().catchError((Object _) {});
     state = const SessionState(loading: false);
   }
 }
