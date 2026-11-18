@@ -1,3 +1,4 @@
+import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
@@ -358,30 +359,48 @@ export async function decideApproval(t: TenantCtx, approvalId: string, decision:
     });
     throw forbidden('Permission re-check failed, so the action was not run.');
   }
-  try {
-    const out = await tx(t, async (q) => {
-      const r = await tool!.execute(q, { orgId: t.orgId, workspaceId: t.workspaceId, userId: a.requested_for, actor: { kind: 'agent', id: a.requester_id } }, tc.args);
-      await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tc.id, r.ok ? 'succeeded' : 'failed', r.summary, JSON.stringify(r.refs)]);
-      await q.exec(`update approval_requests set status=$2 where id=$1`, [a.id, r.ok ? 'executed' : 'failed']);
-      if (run) {
-        await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, refs) values ($1,$2,'system_notice',$3,$4,$5)`, [
-          t.orgId,
-          run.conversation_id,
-          r.ok ? `Approved and done: ${r.summary}.` : `Approved, but it failed: ${r.summary}.`,
-          run.id,
-          JSON.stringify(r.refs),
-        ]);
-        await q.exec(`update agent_runs set status='completed', ended_at=now() where id=$1 and status='waiting_approval' and not exists (select 1 from tool_calls where run_id=$1 and status='waiting_approval')`, [run.id]);
-      }
-      if (a.requested_for !== t.userId) await notify(q, t.orgId, a.requested_for, { category: 'approval', title: `Approved: ${a.preview?.title ?? a.action}` });
-      return r;
-    });
+  // Commit the intent before the provider call, so an interrupted attempt is visible as "unknown", never re-run.
+  const started = await tx(t, (q) => q.one(`update tool_calls set status='executing' where id=$1 and status='waiting_approval' returning id`, [tc.id]));
+  if (!started) throw new ApiError(409, 'APPROVAL_ALREADY_DECIDED', 'Already handled', 'This action has already been started.');
+  const tracked = await trackExternal(
+    () =>
+      tx(t, async (q) => {
+        const r = await tool!.execute(q, { orgId: t.orgId, workspaceId: t.workspaceId, userId: a.requested_for, actor: { kind: 'agent', id: a.requester_id } }, tc.args);
+        await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tc.id, r.ok ? 'succeeded' : 'failed', r.summary, JSON.stringify(r.refs)]);
+        await q.exec(`update approval_requests set status=$2 where id=$1`, [a.id, r.ok ? 'executed' : 'failed']);
+        if (run) {
+          await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, refs) values ($1,$2,'system_notice',$3,$4,$5)`, [
+            t.orgId,
+            run.conversation_id,
+            r.ok ? `Approved and done: ${r.summary}.` : `Approved, but it failed: ${r.summary}.`,
+            run.id,
+            JSON.stringify(r.refs),
+          ]);
+          await q.exec(`update agent_runs set status='completed', ended_at=now() where id=$1 and status='waiting_approval' and not exists (select 1 from tool_calls where run_id=$1 and status='waiting_approval')`, [run.id]);
+        }
+        if (a.requested_for !== t.userId) await notify(q, t.orgId, a.requested_for, { category: 'approval', title: `Approved: ${a.preview?.title ?? a.action}` });
+        return r;
+      }),
+    { idempotencyKey: `qline-${tc.id}` },
+  );
+  if (tracked.ok) {
+    const out = tracked.value;
     return { status: out.ok ? 'executed' : 'failed', result: out, approval: { id: a.id, status: out.ok ? 'executed' : 'failed' } };
-  } catch (e) {
-    await withTenant({ orgId: t.orgId, userId: t.userId }, async (q) => {
-      await q.exec(`update tool_calls set status='failed', result_summary=$2, finished_at=now() where id=$1`, [tc.id, (e as Error).message.slice(0, 300)]);
-      await q.exec(`update approval_requests set status='failed' where id=$1`, [a.id]);
-    });
-    throw new ApiError(500, 'ACTION_FAILED', 'The approved action failed', (e as Error).message);
   }
+  const outcome = tracked.outcome;
+  await withTenant({ orgId: t.orgId, userId: t.userId }, async (q) => {
+    await q.exec(`update tool_calls set status=$2, result_summary=$3, finished_at=now() where id=$1 and status='executing'`, [tc.id, outcome, outcome === 'unknown' ? UNKNOWN_SUMMARY : safeError(tracked.error)]);
+    // approval_requests has no "unknown" state: 'failed' there, while the tool call carries the honest outcome.
+    await q.exec(`update approval_requests set status='failed' where id=$1`, [a.id]);
+    if (run && outcome === 'unknown') {
+      await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id) values ($1,$2,'system_notice',$3,$4)`, [
+        t.orgId,
+        run.conversation_id,
+        `Approved, but Qline could not confirm the result: ${a.preview?.title ?? a.action} may or may not have happened. Check it before trying again.`,
+        run.id,
+      ]);
+    }
+  });
+  if (outcome === 'unknown') return { status: 'unknown', approval: { id: a.id, status: 'failed' }, toolCall: { id: tc.id, status: 'unknown' }, message: UNKNOWN_SUMMARY };
+  throw new ApiError(500, 'ACTION_FAILED', 'The approved action failed', safeError(tracked.error));
 }

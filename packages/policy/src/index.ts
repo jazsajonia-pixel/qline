@@ -193,6 +193,17 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'social.publish': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
 };
 
+/**
+ * M1 (docs/17 §H): tools that change something outside Qline (a connected app). Their intent is committed before
+ * the provider call, an interrupted or ambiguous call is recorded as "unknown" and never retried automatically, and
+ * under full autopilot the L3 ones use the workspace's daily allowance. Every L3 tool must be listed here.
+ */
+export const EXTERNAL_WRITE_TOOLS = new Set([
+  'email.send', 'slack.post', 'slack.channel.create', 'slack.channel.topic', 'calendar.create', 'calendar.invite.send',
+  'forms.create', 'sheets.create', 'sheets.append', 'drive.create', 'drive.update', 'notion.create', 'notion.append',
+  'github.issue.create', 'github.issue.comment', 'stripe.customer.create', 'stripe.invoice.draft', 'social.publish',
+]);
+
 /** Actions that are never available to agents or workflows, whatever the configuration. */
 export const HARD_DENY_PREFIXES = ['payments.', 'transfers.'];
 export const AGENT_DENY = new Set(['records.purge', 'org.delete', 'share.external', 'agents.grant_permission', 'policy.update']);

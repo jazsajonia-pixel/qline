@@ -12,6 +12,8 @@ These are stored per workspace in `workspaces.config.agentPolicy.autonomy`. The 
 | autopilot | L1 and L2 writes (tasks, contacts, companies, projects) and delegation to other agents | `records.delete`, L3 external actions (Slack, email), `config.propose` |
 | full | Also L3 external actions and `records.delete`, up to `dailyExternalLimit` (default 25) in a rolling 24 hours | `config.propose`; anything over the daily limit |
 
+Since M1 (docs/17) the limit is per workspace and enforced atomically with a reservation ledger; an action whose outcome is unknown keeps its slot and is never retried automatically.
+
 No level overrides any of the following: L4 (money, roles, deleting the org, sharing outside Qline), `AGENT_DENY`, the emergency stop, pause, the agent's tool allowlist, or the caller's role permissions. All of this logic lives in `decideTool` in `packages/policy`. The daily limit counts L3 `tool_calls` that have `policy_decision='allow'` (see `autonomyState` in `services/api/src/core/controls.ts`).
 
 ## New tools

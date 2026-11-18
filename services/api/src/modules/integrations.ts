@@ -298,6 +298,8 @@ integrationRoutes.post('/integrations/google/form', async (c) => {
   const org = await tx(t, (q) => q.one('select name from organizations where id=$1', [t.orgId]));
   const form = await formCreate(token, input.title ?? `Contact ${org?.name ?? 'us'}`, input.description ?? 'Tell us what you need and we will get back to you quickly.').catch((e) => upstream(e, 'Creating the form'));
   await tx(t, (q) => q.exec(`update integration_connections set settings = settings || $2::jsonb, cursor = cursor - 'formAfter' where id=$1`, [conn.id, JSON.stringify({ form })]));
+  await tx(t, (q) => audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: form.accepting ? 'form.published' : 'form.publish_unverified', targetRef: `form:${form.id}`, correlationId: t.correlationId, detail: { error: form.publishError ?? null } }));
+  // 201 either way (the form exists); `accepting:false` + `publishError` tell the app it is not live yet.
   return c.json({ form }, 201);
 });
 

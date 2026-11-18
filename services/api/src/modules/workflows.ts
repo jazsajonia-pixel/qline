@@ -1,6 +1,7 @@
+import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { can, decideTool, TOOL_POLICIES, type Role } from '@qline/policy';
+import { can, decideTool, EXTERNAL_WRITE_TOOLS, TOOL_POLICIES, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import { withTenant, type Q } from '../core/db';
@@ -9,7 +10,7 @@ import { onEvents, type DomainEvent } from '../core/events';
 import { body, limitParam, query } from '../core/validate';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { notify } from './work';
-import { buildDigest, RECIPES, runAutomationStep } from '../integrations/steps';
+import { buildDigest, RECIPES, runAutomationStep, type StepResult } from '../integrations/steps';
 import { enqueue, kick, registerJob, runInline, type JobCtx } from '../runtime/jobs';
 import { isStopped } from '../core/controls';
 
@@ -124,7 +125,7 @@ async function loadDefinition(q: any, run: any): Promise<Definition> {
   return v.definition;
 }
 
-type StepOutcome = { stop: boolean; run?: any; approvalId?: string; external?: { tcId: string; index: number; step: any; ownerId: string; wfName: string } };
+type StepOutcome = { stop: boolean; run?: any; approvalId?: string; external?: { tcId: string; index: number; step: any; ownerId: string; wfName: string; wfId?: string; tool?: { name: string; args: unknown } } };
 
 /** Runs steps until the run stops. Called only from the `workflow.advance` job (one worker per run at a time). */
 export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobCtx): Promise<any> {
@@ -327,6 +328,33 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
         await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, 'Missing approval step']);
         return { stop: true, run: { ...run, status: 'failed' } };
       }
+      if (EXTERNAL_WRITE_TOOLS.has(s.tool)) {
+        // A connected-app write (M1): commit the intent, call the provider outside the run lock, never repeat it.
+        const key = `wf:${runId}:${i}`;
+        const prior = await q.one('select id, status, result_summary from tool_calls where idempotency_key=$1', [key]);
+        if (prior?.status === 'succeeded') {
+          await record('succeeded', prior.result_summary ?? `${tool.preview(parsed.data).title} already done`);
+          await next();
+          return { stop: false };
+        }
+        if (prior?.status === 'failed') {
+          await record('failed', prior.result_summary ?? 'Step failed');
+          await q.exec(`update workflow_runs set status='failed', error=$2, ended_at=now() where id=$1`, [runId, prior.result_summary ?? 'Step failed']);
+          return { stop: true, run: { ...run, status: 'failed' } };
+        }
+        if (prior) {
+          await q.exec(`update tool_calls set status='unknown', result_summary=$2, finished_at=coalesce(finished_at, now()) where id=$1 and status='executing'`, [prior.id, UNKNOWN_SUMMARY]);
+          await record('unknown', `${tool.preview(parsed.data).title}: the previous attempt was interrupted, so it may or may not have happened. Not retried.`);
+          await q.exec(`update workflow_runs set status='needs_attention', error=$2 where id=$1`, [runId, 'Outcome of an external step is unknown']);
+          await notify(q, e.orgId, wf.owner_id, { category: 'workflow', title: `Check workflow "${wf.name}"`, body: 'A step in a connected app was interrupted. Check whether it happened, then re-run if needed.', ref: { type: 'workflow_run', id: runId } });
+          return { stop: true, run: { ...run, status: 'needs_attention' } };
+        }
+        const xtc = await q.one(
+          `insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,$6,$7,'executing') returning id`,
+          [e.orgId, runId, s.tool, JSON.stringify(parsed.data), decision.risk, decision.decision, key],
+        );
+        return { stop: false, external: { tcId: xtc.id, index: i, step: s, ownerId: wf.owner_id, wfName: wf.name, wfId: wf.id, tool: { name: s.tool, args: parsed.data } } };
+      }
       const tc = await q.one(
         `insert into tool_calls (org_id, workflow_run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,$6,$7,'planned')
          on conflict (org_id, idempotency_key) do nothing returning id`,
@@ -355,7 +383,7 @@ export async function advanceWorkflowRun(e: EngineCtx, runId: string, job?: JobC
 
 /** Calls the provider outside the run lock, then records the result and moves on, all fenced by the job lease. */
 async function finishExternalStep(e: EngineCtx, runId: string, x: NonNullable<StepOutcome['external']>, job?: JobCtx) {
-  const r = await withTenant({ orgId: e.orgId, userId: e.userId }, (q) => runAutomationStep(q, { orgId: e.orgId, workspaceId: e.workspaceId, ownerId: x.ownerId, runId }, x.step));
+  const r: StepResult = x.tool ? await runExternalTool(e, runId, x) : await withTenant({ orgId: e.orgId, userId: e.userId }, (q) => runAutomationStep(q, { orgId: e.orgId, workspaceId: e.workspaceId, ownerId: x.ownerId, runId }, x.step));
   // Always record what happened, even if this worker was fenced out meanwhile (a person may be checking it).
   await withTenant({ orgId: e.orgId, userId: e.userId }, async (q) => {
     const run = await q.one('select status, current_step from workflow_runs where id=$1 for update', [runId]);
@@ -382,6 +410,21 @@ async function finishExternalStep(e: EngineCtx, runId: string, x: NonNullable<St
     }
     await q.exec('update workflow_runs set current_step=current_step+1 where id=$1', [runId]);
   });
+}
+
+/** A connected-app tool step: its own transaction, with an honest outcome when it throws (M1). */
+async function runExternalTool(e: EngineCtx, runId: string, x: NonNullable<StepOutcome['external']>): Promise<StepResult> {
+  const tool = getTool(x.tool!.name)!;
+  const t = await trackExternal(
+    () =>
+      withTenant({ orgId: e.orgId, userId: e.userId }, (q) =>
+        tool.execute(q, { orgId: e.orgId, workspaceId: e.workspaceId, userId: x.ownerId, actor: { kind: 'workflow', id: x.wfId! } }, x.tool!.args),
+      ),
+    { idempotencyKey: `qline-${x.tcId}` },
+  );
+  if (t.ok) return { ok: t.value.ok, summary: t.value.summary };
+  if (t.outcome === 'unknown') return { ok: false, unknown: true, summary: `${tool.preview(x.tool!.args).title}: not sure it happened (it may or may not have)` };
+  return { ok: false, summary: `${tool.preview(x.tool!.args).title} failed: ${safeError(t.error)}` };
 }
 
 async function getRunDetail(e: EngineCtx, runId: string) {

@@ -30,7 +30,8 @@ import {
 } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, tx, type Env, type TenantCtx } from '../core/context';
-import { autonomyState, getControls } from '../core/controls';
+import { autonomyState, getControls, reserveExternalAction, settleReservation } from '../core/controls';
+import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { withTenant, type Q } from '../core/db';
 import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, limitParam, query } from '../core/validate';
@@ -454,7 +455,7 @@ async function taskHandler(ctx: JobCtx) {
     relaxed: policy.relaxed,
     tightened: policy.tightened,
     depth: t.depth,
-    autonomy: (await asTenant(c, (q) => autonomyState(q, config))).autonomy,
+    autonomy: (await asTenant(c, (q) => autonomyState(q, config, m.workspace_id))).autonomy,
   });
   if (!grant.ok) return mark('failed', { error: grant.reason });
   const schema = t.output_schema as OutputSchema;
@@ -534,41 +535,81 @@ async function taskHandler(ctx: JobCtx) {
   }
 }
 
-async function runTaskTool(c: Ctx, m: any, t: any, agent: any, granted: string[], role: Role, policy: { relaxed?: string[]; tightened?: string[] }, name: string, args: unknown) {
-  return asTenant(c, async (q) => {
+async function runTaskTool(c: Ctx, m: any, t: any, agent: any, granted: string[], role: Role, policy: { relaxed?: string[]; tightened?: string[] }, name: string, args: unknown): Promise<{ forModel: unknown; budget?: boolean }> {
+  // Phase 1 (one short transaction, committed BEFORE any provider call): decide, de-duplicate, take the mission
+  // budget and, for full-autopilot actions in connected apps, atomically reserve a slot in the daily allowance.
+  const prep = await asTenant(c, async (q): Promise<{ done: { forModel: unknown; budget?: boolean } } | { tool: NonNullable<ReturnType<typeof getTool>>; data: any; tcId: string }> => {
     const controls = await getControls(q, m.workspace_id);
     const ws = await q.one('select config from workspaces where id=$1', [m.workspace_id]);
-    const auto = await autonomyState(q, ws?.config);
+    const auto = await autonomyState(q, ws?.config, m.workspace_id);
     const decision = decideTool({ tool: name, allowlist: granted, userRole: role, relaxed: policy.relaxed, tightened: policy.tightened, stopped: controls.emergency_stop, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
     const tool = getTool(name);
     if (decision.decision !== 'allow' || !tool) {
       await trace(q, c.orgId, m.id, 'tool.denied', `agent:${agent.id}`, { tool: name, reason: decision.decision === 'allow' ? 'not implemented' : decision.reason }, t.id);
-      return { forModel: { ok: false, denied: true, reason: decision.decision === 'require_approval' ? 'Mission tasks cannot use tools that need approval. The owner can allow it by turning on autopilot.' : decision.reason } };
+      return { done: { forModel: { ok: false, denied: true, reason: decision.decision === 'require_approval' ? 'Mission tasks cannot use tools that need approval. The owner can allow it by turning on autopilot.' : decision.reason } } };
     }
     const parsed = tool.schema.safeParse(args);
-    if (!parsed.success) return { forModel: { ok: false, error: 'Invalid arguments', issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) } };
+    if (!parsed.success) return { done: { forModel: { ok: false, error: 'Invalid arguments', issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) } } };
     // Same task + tool + args → same tool call: a retried job never repeats a write.
     const key = `mt:${t.id}:${name}:${createHash('sha256').update(JSON.stringify(parsed.data)).digest('hex').slice(0, 32)}`;
     const prior = await q.one('select id, status, result_summary, result_refs from tool_calls where idempotency_key=$1', [key]);
     if (prior?.status === 'succeeded' || prior?.status === 'failed') {
-      return { forModel: { ok: prior.status === 'succeeded', toolCallId: prior.id, summary: prior.result_summary, replayed: true } };
+      return { done: { forModel: { ok: prior.status === 'succeeded', toolCallId: prior.id, summary: prior.result_summary, replayed: true } } };
     }
-    if (!(await reserveToolCall(q, m.id))) return { budget: true, forModel: null };
+    if (prior?.status === 'executing' || prior?.status === 'unknown') {
+      // A previous attempt was interrupted after it started: it may have happened. Never run it again.
+      await q.exec(`update tool_calls set status='unknown', result_summary=$2, finished_at=coalesce(finished_at, now()) where id=$1 and status='executing'`, [prior.id, UNKNOWN_SUMMARY]);
+      await settleReservation(q, prior.id, 'unknown');
+      await trace(q, c.orgId, m.id, 'tool.unknown', `agent:${agent.id}`, { tool: name, toolCallId: prior.id }, t.id);
+      return { done: { forModel: { ok: false, outcome: 'unknown', toolCallId: prior.id, note: 'An earlier attempt may already have done this. It will not be repeated; tell the user to check it.' } } };
+    }
+    if (!(await reserveToolCall(q, m.id))) return { done: { budget: true, forModel: null } };
     const tc = await q.one<{ id: string }>(
-      `insert into tool_calls (org_id, mission_task_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,'allow',$6,'planned')
-       on conflict (org_id, idempotency_key) do update set tool=excluded.tool returning id`,
+      `insert into tool_calls (org_id, mission_task_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,'allow',$6,'executing')
+       on conflict (org_id, idempotency_key) do update set status='executing' returning id`,
       [c.orgId, t.id, name, JSON.stringify(parsed.data), decision.risk, key],
     );
     await q.exec('update mission_tasks set tool_calls=tool_calls+1 where id=$1', [t.id]);
-    try {
-      const r = await tool.execute(q, { orgId: c.orgId, workspaceId: m.workspace_id, userId: m.created_by, actor: { kind: 'agent', id: agent.id } }, parsed.data);
-      await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tc!.id, r.ok ? 'succeeded' : 'failed', r.summary, JSON.stringify(r.refs)]);
-      await trace(q, c.orgId, m.id, 'tool.called', `agent:${agent.id}`, { tool: name, ok: r.ok, toolCallId: tc!.id, summary: r.summary }, t.id);
-      return { forModel: { ok: r.ok, toolCallId: tc!.id, summary: r.summary, refs: r.refs, data: r.data ?? null } };
-    } catch (e) {
-      await q.exec(`update tool_calls set status='failed', result_summary=$2, finished_at=now() where id=$1`, [tc!.id, (e as Error).message.slice(0, 300)]);
-      return { forModel: { ok: false, error: 'Tool failed' } };
+    if (decision.risk === 'L3' && auto.autonomy === 'full') {
+      if (!(await reserveExternalAction(q, { orgId: c.orgId, workspaceId: m.workspace_id, toolCallId: tc!.id, tool: name }))) {
+        await q.exec(`update tool_calls set status='denied', policy_decision='require_approval', result_summary=$2, finished_at=now() where id=$1`, [tc!.id, CAP_REASON]);
+        await trace(q, c.orgId, m.id, 'tool.denied', `agent:${agent.id}`, { tool: name, reason: CAP_REASON }, t.id);
+        return { done: { forModel: { ok: false, denied: true, reason: CAP_REASON } } };
+      }
     }
+    return { tool, data: parsed.data, tcId: tc!.id };
+  });
+  if ('done' in prep) return prep.done;
+  const { tool, data, tcId } = prep;
+
+  // Phase 2: the action itself, in its own transaction. Its result row is written in the same transaction.
+  const r = await trackExternal(
+    () =>
+      asTenant(c, async (q) => {
+        const res = await tool.execute(q, { orgId: c.orgId, workspaceId: m.workspace_id, userId: m.created_by, actor: { kind: 'agent', id: agent.id } }, data);
+        await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tcId, res.ok ? 'succeeded' : 'failed', res.summary, JSON.stringify(res.refs)]);
+        await settleReservation(q, tcId, res.ok ? 'succeeded' : 'failed');
+        await trace(q, c.orgId, m.id, 'tool.called', `agent:${agent.id}`, { tool: name, ok: res.ok, toolCallId: tcId, summary: res.summary }, t.id);
+        return res;
+      }),
+    { idempotencyKey: `qline-${tcId}` },
+  );
+  if (r.ok) return { forModel: { ok: r.value.ok, toolCallId: tcId, summary: r.value.summary, refs: r.value.refs, data: r.value.data ?? null } };
+
+  // Phase 3: it threw. A definite failure frees the slot; anything that may have reached the provider is "unknown".
+  await recordThrownOutcome(c, tcId, r.outcome, r.error);
+  await asTenant(c, (q) => trace(q, c.orgId, m.id, r.outcome === 'unknown' ? 'tool.unknown' : 'tool.called', `agent:${agent.id}`, { tool: name, ok: false, toolCallId: tcId, outcome: r.outcome }, t.id));
+  if (r.outcome === 'unknown') return { forModel: { ok: false, outcome: 'unknown', toolCallId: tcId, note: 'This may or may not have happened in the connected app. Do not try again; tell the user to check it.' } };
+  return { forModel: { ok: false, error: 'Tool failed' } };
+}
+
+const CAP_REASON = "Today's limit for actions in connected apps is used up, so this needs a human decision.";
+
+/** Records the outcome of a tool that threw, in a fresh transaction (the tool's own one was rolled back). */
+async function recordThrownOutcome(c: Ctx, tcId: string, outcome: 'failed' | 'unknown', error: Error) {
+  await asTenant(c, async (q) => {
+    await q.exec(`update tool_calls set status=$2, result_summary=$3, finished_at=now() where id=$1 and status='executing'`, [tcId, outcome, outcome === 'unknown' ? UNKNOWN_SUMMARY : safeError(error)]);
+    await settleReservation(q, tcId, outcome);
   });
 }
 
@@ -880,7 +921,7 @@ missionRoutes.put('/workspaces/:id/controls', async (c) => {
 missionRoutes.get('/workspaces/:id/autonomy', async (c) => {
   const t = need(c, 'agents.use');
   if (c.req.param('id') !== t.workspaceId) throw notFound('Workspace');
-  const s = await tx(t, async (q) => autonomyState(q, (await q.one('select config from workspaces where id=$1', [t.workspaceId]))?.config));
+  const s = await tx(t, async (q) => autonomyState(q, (await q.one('select config from workspaces where id=$1', [t.workspaceId]))?.config, t.workspaceId));
   return c.json({ ...s, canChange: can(t.role, 'config.apply') });
 });
 
@@ -898,7 +939,7 @@ missionRoutes.put('/workspaces/:id/autonomy', async (c) => {
       [t.workspaceId, JSON.stringify(patch)],
     );
     await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'autonomy.changed', targetRef: `workspace:${t.workspaceId}`, correlationId: t.correlationId, detail: { from: prev, to: b.autonomy, dailyExternalLimit: b.dailyExternalLimit } });
-    return autonomyState(q, (await q.one('select config from workspaces where id=$1', [t.workspaceId]))?.config);
+    return autonomyState(q, (await q.one('select config from workspaces where id=$1', [t.workspaceId]))?.config, t.workspaceId);
   });
   return c.json({ ...s, canChange: true });
 });

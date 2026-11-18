@@ -212,6 +212,29 @@ const FORM_FIELDS: { key: string; title: string; required: boolean; paragraph?: 
   { key: 'message', title: 'How can we help?', required: true, paragraph: true },
 ];
 
+/**
+ * Publishes a form and then reads it back to verify it is really accepting responses (M1, docs/17 §C).
+ * Forms created with the API after 2026-06-30 start unpublished, so a failed publish is a real problem: it is
+ * reported, never swallowed. `accepting` is true only when Google's own form state says so.
+ */
+export async function publishForm(token: string, formId: string): Promise<{ accepting: boolean; error?: string; form: any }> {
+  let error: string | undefined;
+  try {
+    await api(token, `https://forms.googleapis.com/v1/forms/${formId}:setPublishSettings`, {
+      body: { publishSettings: { publishState: { isPublished: true, isAcceptingResponses: true } }, updateMask: 'publishState' },
+    });
+  } catch (e) {
+    error = String((e as Error).message ?? 'publish failed').slice(0, 200);
+  }
+  // The form already exists; a failed read-back must not turn a created form into an error.
+  const form = await api(token, `https://forms.googleapis.com/v1/forms/${formId}`).catch(() => null);
+  if (!form) return { accepting: false, error: error ?? 'Could not confirm whether the form is accepting responses', form: {} };
+  const state = form?.publishSettings?.publishState;
+  const accepting = state?.isPublished === true && state?.isAcceptingResponses === true;
+  if (!accepting && !error) error = state ? 'Google reports the form is not accepting responses' : 'Google did not report a publish state for this form';
+  return { accepting, error: accepting ? undefined : error, form };
+}
+
 export async function formCreate(token: string, title: string, description: string) {
   const f = await api(token, 'https://forms.googleapis.com/v1/forms', { body: { info: { title, documentTitle: title } } });
   const requests: any[] = [{ updateFormInfo: { info: { description }, updateMask: 'description' } }];
@@ -221,22 +244,15 @@ export async function formCreate(token: string, title: string, description: stri
     }),
   );
   await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}:batchUpdate`, { body: { requests } });
-  try {
-    // Forms created through the API may start unpublished.
-    await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}:setPublishSettings`, {
-      body: { publishSettings: { publishState: { isPublished: true, isAcceptingResponses: true } }, updateMask: '*' },
-    });
-  } catch {
-    /* older forms are published by default */
-  }
-  const full = await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}`);
+  const pub = await publishForm(token, f.formId);
+  const full = pub.form;
   const questions: Record<string, string> = {};
   for (const it of full.items ?? []) {
     const k = FORM_FIELDS.find((x) => x.title === it.title)?.key;
     const qid = it.questionItem?.question?.questionId;
     if (k && qid) questions[k] = qid;
   }
-  return { id: f.formId as string, responderUri: (full.responderUri ?? f.responderUri) as string, editUrl: `https://docs.google.com/forms/d/${f.formId}/edit`, questions };
+  return { id: f.formId as string, responderUri: (full.responderUri ?? f.responderUri) as string, editUrl: `https://docs.google.com/forms/d/${f.formId}/edit`, questions, accepting: pub.accepting, publishError: pub.error };
 }
 
 export interface FormQuestion {
@@ -266,15 +282,8 @@ export async function formCreateCustom(token: string, title: string, description
   if (description) requests.push({ updateFormInfo: { info: { description }, updateMask: 'description' } });
   questions.forEach((x, i) => requests.push({ createItem: { item: { title: x.title, questionItem: { question: formQuestionBody(x) } }, location: { index: i } } }));
   await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}:batchUpdate`, { body: { requests } });
-  try {
-    await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}:setPublishSettings`, {
-      body: { publishSettings: { publishState: { isPublished: true, isAcceptingResponses: true } }, updateMask: '*' },
-    });
-  } catch {
-    /* older forms are published by default */
-  }
-  const full = await api(token, `https://forms.googleapis.com/v1/forms/${f.formId}`);
-  return { id: f.formId as string, responderUri: (full.responderUri ?? f.responderUri) as string, editUrl: `https://docs.google.com/forms/d/${f.formId}/edit` };
+  const pub = await publishForm(token, f.formId);
+  return { id: f.formId as string, responderUri: (pub.form.responderUri ?? f.responderUri) as string, editUrl: `https://docs.google.com/forms/d/${f.formId}/edit`, accepting: pub.accepting, publishError: pub.error };
 }
 
 /** Responses with answers keyed by question title. */
@@ -286,6 +295,10 @@ export async function formResponsesReadable(token: string, id: string, limit = 2
     if (qid) titles[qid] = it.title;
   }
   const r = await api(token, `https://forms.googleapis.com/v1/forms/${encodeURIComponent(id)}/responses`);
+  return shapeResponses(r, titles, limit);
+}
+
+function shapeResponses(r: any, titles: Record<string, string>, limit: number) {
   return ((r.responses ?? []) as any[])
     .sort((a, b) => String(b.lastSubmittedTime).localeCompare(String(a.lastSubmittedTime)))
     .slice(0, limit)

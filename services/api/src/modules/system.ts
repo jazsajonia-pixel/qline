@@ -12,6 +12,7 @@ import { storageConfigured, storageReady } from './imports';
 import { runScheduledWorkflows } from './workflows';
 import { drain, runtimeStats, workerId } from '../runtime/jobs';
 import { relayOutbox } from '../runtime/outbox';
+import { reconcileStaleActions } from './actions';
 
 // ---------------------------------------------------------------------------
 // Integrations: honest catalogue (docs/09). Nothing is shown as connected
@@ -108,8 +109,9 @@ const tick = async (c: any, key: string | undefined) => {
   const r = await step(() => runScheduledWorkflows());
   const sync = await step(() => runDueSyncs());
   const drained = await step(() => drain({ worker: workerId('tick'), budgetMs: 45_000 }));
+  const reconciled = await step(() => reconcileStaleActions());
   const stats = await step(() => runtimeStats());
-  return c.json({ ok: true, relayed, ...(r as object), sync, drained, stats });
+  return c.json({ ok: true, relayed, ...(r as object), sync, drained, reconciled, stats });
 };
 // Neon trigger paths cannot carry a query string, so the key is a path segment.
 internalRoutes.all('/tick/:key', (c) => tick(c, c.req.param('key')));

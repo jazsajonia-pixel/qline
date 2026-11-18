@@ -159,3 +159,13 @@ describe('v1.6 file and chart tools', () => {
     expect(decideTool({ tool: 'files.import_records', allowlist: ceo, userRole: 'owner', autonomy: 'full', stopped: true }).decision).toBe('deny');
   });
 });
+
+describe('M1: EXTERNAL_WRITE_TOOLS', () => {
+  it('lists every L3 tool, so no connected-app action can skip the reservation and unknown-outcome path', async () => {
+    const { EXTERNAL_WRITE_TOOLS } = await import('../src/index');
+    const l3 = Object.entries(TOOL_POLICIES).filter(([, p]) => p.risk === 'L3').map(([k]) => k);
+    expect(l3.length).toBeGreaterThan(0);
+    for (const t of l3) expect(EXTERNAL_WRITE_TOOLS.has(t)).toBe(true);
+    for (const t of EXTERNAL_WRITE_TOOLS) expect(TOOL_POLICIES[t]).toBeTruthy();
+  });
+});

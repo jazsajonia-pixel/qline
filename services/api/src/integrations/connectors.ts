@@ -1,4 +1,5 @@
 import { PROVIDER_TIMEOUT_MS } from './oauth';
+import { currentIdempotencyKey, noteRequest } from '../core/external';
 
 /**
  * v1.6 run 3: thin wrappers over the Google Drive, Notion, GitHub and Stripe REST APIs.
@@ -16,8 +17,19 @@ export class ProviderHttpError extends Error {
 }
 
 async function call(url: string, init: RequestInit & { timeoutMs?: number }) {
-  const r = await fetch(url, { ...init, signal: AbortSignal.timeout(init.timeoutMs ?? PROVIDER_TIMEOUT_MS) });
-  const text = await r.text();
+  const answered = noteRequest(init.method);
+  // Stripe supports idempotency keys: a repeated request with the same key returns the first result instead of acting twice.
+  const idem = currentIdempotencyKey();
+  const headers = idem && url.startsWith('https://api.stripe.com/') && (init.method ?? 'GET').toUpperCase() === 'POST' ? { ...(init.headers as Record<string, string>), 'Idempotency-Key': idem } : init.headers;
+  let r: Response;
+  try {
+    r = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(init.timeoutMs ?? PROVIDER_TIMEOUT_MS) });
+  } catch (e) {
+    answered(null);
+    throw e;
+  }
+  answered(r.status);
+  const text = await r.text().catch(() => '');
   let j: any = null;
   try {
     j = text ? JSON.parse(text) : null;
