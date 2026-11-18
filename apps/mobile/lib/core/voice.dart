@@ -178,7 +178,9 @@ class Speaker {
   final void Function(String message) onNotice;
 
   final FlutterTts _tts = FlutterTts();
-  final AudioPlayer _player = AudioPlayer();
+  // Created on first playback, so stopping before anything played never touches the native player.
+  AudioPlayer? _playerOrNull;
+  AudioPlayer get _player => _playerOrNull ??= AudioPlayer();
   Timer? _tick;
   int _session = 0;
   bool _ttsReady = false;
@@ -237,7 +239,7 @@ class Speaker {
     _level = 0;
     onLevel(0);
     try {
-      await _player.stop();
+      await _playerOrNull?.stop();
     } catch (_) {}
     try {
       await _tts.stop();
@@ -246,7 +248,7 @@ class Speaker {
 
   Future<void> dispose() async {
     await stop();
-    await _player.dispose();
+    await _playerOrNull?.dispose();
   }
 
   /// Speaks [text]. Word indexes refer to wordsOf(speakable(text)).

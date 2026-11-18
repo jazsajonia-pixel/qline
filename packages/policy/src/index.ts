@@ -646,3 +646,62 @@ export function routeAgent(text: string, active: readonly AgentTemplate[] = AGEN
   if (hits.length > 1 && hits[0]!.n === hits[1]!.n) return 'ceo';
   return hits[0]!.t;
 }
+
+/**
+ * Run 3 / M3: plain-language names for tool activity in the chat ("Checked your tasks", never "tasks.search").
+ * The tool id stays available in the expanded trace for people who want the details.
+ */
+export const TOOL_FAMILY_NOUNS: Record<string, string> = {
+  records: 'your records',
+  tasks: 'your tasks',
+  documents: 'your documents',
+  memory: 'your knowledge base',
+  knowledge: 'your knowledge base',
+  notes: 'notes',
+  contacts: 'your contacts',
+  companies: 'companies',
+  projects: 'your projects',
+  drafts: 'drafts',
+  config: 'settings',
+  gmail: 'your email',
+  email: 'your email',
+  calendar: 'your calendar',
+  leads: 'your leads',
+  approvals: 'approvals',
+  workflows: 'your workflows',
+  forms: 'Google Forms',
+  sheets: 'Google Sheets',
+  notify: 'notifications',
+  time: 'the time',
+  business: 'your business overview',
+  slack: 'Slack',
+  agents: 'your AI team',
+  files: 'the file',
+  chart: 'a chart',
+  image: 'an image',
+  drive: 'Google Drive',
+  notion: 'Notion',
+  github: 'GitHub',
+  stripe: 'Stripe',
+  social: 'social media',
+};
+
+export function toolNoun(tool: string): string {
+  return TOOL_FAMILY_NOUNS[tool.split('.')[0]!] ?? 'your workspace';
+}
+
+/**
+ * What the chat shows for a step. Reads say what was looked at; actions use their preview title
+ * ("Create a task") so a consequential action is never hidden behind a vague label.
+ */
+export function toolLabels(tool: string, previewTitle?: string): { running: string; done: string } {
+  const p = TOOL_POLICIES[tool];
+  if (p?.risk === 'L0' || !previewTitle) {
+    const noun = toolNoun(tool);
+    if (tool === 'chart.business' || tool === 'chart.create') return { running: 'Making a chart', done: 'Made a chart' };
+    if (tool === 'image.show') return { running: 'Showing an image', done: 'Showed an image' };
+    if (tool === 'time.now') return { running: 'Checking the time', done: 'Checked the time' };
+    return { running: `Checking ${noun}`, done: `Checked ${noun}` };
+  }
+  return { running: previewTitle, done: previewTitle };
+}

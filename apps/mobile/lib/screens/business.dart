@@ -189,7 +189,7 @@ class _ContactsState extends ConsumerState<ContactsScreen> {
     final canWrite = ref.watch(sessionProvider.select((s) => s.canWrite));
     return Page2(
       title: 'Clients & contacts',
-      fab: canWrite ? FloatingActionButton(tooltip: 'Add contact', onPressed: () => showContactEditor(context, ref), child: const Icon(Icons.person_add_alt)) : null,
+      fab: canWrite ? FloatingActionButton(heroTag: null, tooltip: 'Add contact', onPressed: () => showContactEditor(context, ref), child: const Icon(Icons.person_add_alt)) : null,
       body: Column(children: [
         Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 8), child: TextField(decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Search name or email', isDense: true), onSubmitted: (v) => setState(() => _q = v.trim()))),
         Expanded(

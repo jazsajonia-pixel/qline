@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../core/alerts.dart';
+import '../core/back_exit.dart';
 import '../core/session.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
@@ -46,7 +47,18 @@ class _ShellState extends ConsumerState<Shell> {
     final pending = ref.watch(pendingCount).value ?? 0;
     final unread = ref.watch(unreadAlerts);
     final pages = [HomeScreen(onTab: (i) => setState(() => _tab = i)), const WorkScreen(), const SizedBox(), const BusinessScreen(), const LibraryScreen()];
-    return AlertWatcher(
+    // Run 3 / M5: Back on another tab goes Home first; Back on Home asks before closing the app.
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (_tab != 0) {
+          setState(() => _tab = 0);
+          return;
+        }
+        confirmExit(context);
+      },
+      child: AlertWatcher(
       child: Scaffold(
         appBar: AppBar(
           titleSpacing: 12,
@@ -68,6 +80,7 @@ class _ShellState extends ConsumerState<Shell> {
         ),
         body: IndexedStack(index: _tab, children: pages),
         bottomNavigationBar: _BottomNav(index: _tab, onTap: (i) => i == 2 ? _openLive() : setState(() => _tab = i)),
+      ),
       ),
     );
   }
