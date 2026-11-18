@@ -5,6 +5,7 @@ import { audit } from '../core/audit';
 import { createTask, updateTask } from '../modules/work';
 import { appTools } from './tools-apps';
 import { moreTools } from './tools-more';
+import { v16Tools } from './tools-v16';
 
 export interface ToolCtx {
   orgId: string;
@@ -204,6 +205,7 @@ const defs = {
 
   ...appTools,
   ...moreTools,
+  ...v16Tools,
 };
 
 export type ToolName = keyof typeof defs;

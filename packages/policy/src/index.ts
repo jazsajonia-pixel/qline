@@ -148,6 +148,13 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'workflows.run': { risk: 'L2', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'workflows.manage' },
   'slack.post': { risk: 'L3', templates: T('ceo', 'sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
   'email.send': { risk: 'L3', templates: T('ceo', 'sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
+  // v1.6: edit more business data, manage Slack channels, hand work to other agents in the background
+  'companies.update': { risk: 'L1', templates: T('ceo', 'sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write', relaxable: true },
+  'projects.update': { risk: 'L1', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write', relaxable: true },
+  'agents.delegate': { risk: 'L1', templates: T('ceo'), decision: 'allow', requires: 'agents.use' },
+  'agents.status': { risk: 'L0', templates: T('ceo'), decision: 'allow', requires: 'agents.use' },
+  'slack.channel.create': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'integrations.manage' },
+  'slack.channel.topic': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'integrations.manage' },
   'calendar.invite.send': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
   'social.publish': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
 };
@@ -180,6 +187,10 @@ export interface DecideInput {
   tightened?: readonly string[];
   /** v1.5: workspace emergency stop. When on, every agent and workflow tool is denied. */
   stopped?: boolean;
+  /** v1.6: owner-chosen autonomy level (see AUTONOMY_LEVELS). Defaults to supervised. */
+  autonomy?: Autonomy;
+  /** v1.6: true when the workspace has used up today's external-action allowance (full autopilot only). */
+  externalCapReached?: boolean;
 }
 
 export interface DecideResult {
@@ -187,6 +198,20 @@ export interface DecideResult {
   risk: Risk;
   reason: string;
 }
+
+/**
+ * v1.6 autonomy levels, chosen by an owner or admin (never by an agent: `policy.update` is in AGENT_DENY).
+ * - supervised: the defaults above; anything that changes data or leaves Qline asks first.
+ * - autopilot: the AI changes Qline data (L1/L2) on its own. Deleting records and changing configuration still ask.
+ * - full: also acts in connected apps (L3: Slack, email, invites) up to a daily cap, and may delete records.
+ * Never relaxed at any level: L4 / money movement / AGENT_DENY, the emergency stop, the agent's allowlist,
+ * the human's permissions, and configuration changes (`config.propose`).
+ */
+export type Autonomy = 'supervised' | 'autopilot' | 'full';
+export const AUTONOMY_LEVELS: Autonomy[] = ['supervised', 'autopilot', 'full'];
+export const ALWAYS_ASK = new Set(['config.propose']);
+const AUTOPILOT_ASK = new Set(['records.delete']);
+export const DEFAULT_DAILY_EXTERNAL_LIMIT = 25;
 
 export function decideTool(input: DecideInput): DecideResult {
   const { tool } = input;
@@ -208,8 +233,19 @@ export function decideTool(input: DecideInput): DecideResult {
   let decision = p.decision;
   if (decision === 'allow' && input.tightened?.includes(tool)) decision = 'require_approval';
   if (decision === 'require_approval' && p.relaxable && p.risk !== 'L3' && input.relaxed?.includes(tool)) decision = 'allow';
-  // Floor: L3 always needs approval, whatever the org says.
+  // Floor: L3 always needs approval, whatever the org's per-tool overrides say.
   if (p.risk === 'L3') decision = 'require_approval';
+  const level = input.autonomy ?? 'supervised';
+  if (decision === 'require_approval' && !ALWAYS_ASK.has(tool) && p.risk !== 'L4') {
+    if (level === 'autopilot' && (p.risk === 'L1' || p.risk === 'L2') && !AUTOPILOT_ASK.has(tool)) {
+      return { decision: 'allow', risk: p.risk, reason: 'Allowed by autopilot.' };
+    }
+    if (level === 'full') {
+      if (p.risk !== 'L3') return { decision: 'allow', risk: p.risk, reason: 'Allowed by full autopilot.' };
+      if (!input.externalCapReached) return { decision: 'allow', risk: p.risk, reason: 'Allowed by full autopilot.' };
+      return { decision: 'require_approval', risk: p.risk, reason: "Today's limit for actions in connected apps is used up, so this needs a human decision." };
+    }
+  }
   return { decision, risk: p.risk, reason: decision === 'allow' ? 'Allowed by policy.' : 'Needs a human decision.' };
 }
 
@@ -259,6 +295,8 @@ export interface EffectiveInput {
   tightened?: readonly string[];
   /** Delegation depth of the child (root mission = 0). */
   depth: number;
+  /** v1.6: workspace autonomy. Autopilot/full also grant the writes that level lets through without asking. */
+  autonomy?: Autonomy;
   /** Workspace emergency stop. */
   stopped?: boolean;
 }
@@ -287,8 +325,11 @@ export function effectivePermissions(input: EffectiveInput): EffectiveResult {
     if (!parent.has(tool) || !agent.has(tool)) continue;
     if (requested && !requested.has(tool)) continue;
     const p = TOOL_POLICIES[tool]!;
-    if (!(p.risk === 'L0' || (p.risk === 'L1' && MISSION_INTERNAL_WRITES.has(tool)))) continue;
-    const d = decideTool({ tool, allowlist: [...agent], userRole: input.role, relaxed: input.relaxed, tightened: input.tightened });
+    // Background tasks never start more background work (no runaway fan-out).
+    if (tool === 'agents.delegate') continue;
+    const auto = input.autonomy && input.autonomy !== 'supervised';
+    if (!auto && !(p.risk === 'L0' || (p.risk === 'L1' && MISSION_INTERNAL_WRITES.has(tool)))) continue;
+    const d = decideTool({ tool, allowlist: [...agent], userRole: input.role, relaxed: input.relaxed, tightened: input.tightened, autonomy: input.autonomy });
     if (d.decision !== 'allow') continue;
     tools.push(tool);
   }
@@ -489,4 +530,26 @@ export function resolveInputs(inputs: unknown, outputs: Record<string, unknown>,
     return v ?? null;
   }
   return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, resolveInputs(x, outputs, depth + 1)]));
+}
+
+// ---------------------------------------------------------------------------
+// v1.6 automatic agent switching: route a chat message to the best specialist.
+// Pure and deterministic (no model call), so it is free, fast and testable.
+// ---------------------------------------------------------------------------
+const ROUTES: [AgentTemplate, RegExp][] = [
+  ['finance', /\b(invoice|invoices|revenue|profit|expense|expenses|budget|cash ?flow|pricing|price|payment|payments|tax|taxes|margin|cost|costs|forecast|financ\w*|accounting|payroll)\b/i],
+  ['sales', /\b(lead|leads|deal|deals|prospect\w*|pipeline|customer|customers|client|clients|follow[- ]?up|quote|proposal|crm|close the|closing)\b/i],
+  ['marketing', /\b(campaign|campaigns|marketing|social|post|posts|instagram|facebook|tiktok|linkedin|newsletter|brand|content|seo|ads?|audience|promo\w*)\b/i],
+  ['operations', /\b(task|tasks|project|projects|schedule|deadline|deadlines|process|workflow|workflows|inventory|supplier|suppliers|team|staff|operations?|slack|channel)\b/i],
+  ['research', /\b(research|competitor\w*|market size|compare|comparison|analy[sz]e|study|survey|benchmark|trend|trends)\b/i],
+];
+
+/** Picks the specialist for a message, or 'ceo' when nothing (or more than one area) clearly fits. */
+export function routeAgent(text: string, active: readonly AgentTemplate[] = AGENT_TEMPLATES): AgentTemplate {
+  const hits = ROUTES.filter(([t, re]) => active.includes(t) && re.test(text)).map(([t, re]) => ({ t, n: (text.match(new RegExp(re.source, 'gi')) ?? []).length }));
+  if (!hits.length) return 'ceo';
+  hits.sort((a, b) => b.n - a.n);
+  // Two areas equally strong: let the CEO coordinate.
+  if (hits.length > 1 && hits[0]!.n === hits[1]!.n) return 'ceo';
+  return hits[0]!.t;
 }

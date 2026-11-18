@@ -2,7 +2,8 @@ import { ProviderError, type ChatMessage, type ToolCallReq } from '@qline/ai';
 import { decideTool, riskLabel, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { withTenant, type Q } from '../core/db';
-import { isStopped } from '../core/controls';
+import { autonomyState, isStopped } from '../core/controls';
+import { MetaFilter, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName } from './tools';
 
@@ -67,15 +68,16 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
   if (!setup) return;
   const { run, history, config, profile, resolved } = setup;
 
-  const finish = async (status: 'completed' | 'failed' | 'waiting_approval', text: string, usage: { i: number; o: number }, error?: string, refs: unknown[] = []) => {
+  const finish = async (status: 'completed' | 'failed' | 'waiting_approval', text: string, usage: { i: number; o: number }, error?: string, refs: unknown[] = [], meta?: ReplyMeta) => {
     await db(async (q) => {
       if (text.trim()) {
-        await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, refs) values ($1,$2,'assistant',$3,$4,$5)`, [
+        await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, refs, meta) values ($1,$2,'assistant',$3,$4,$5,$6)`, [
           ctx.orgId,
           run.conversation_id,
           text,
           runId,
           JSON.stringify(refs),
+          JSON.stringify(meta ?? {}),
         ]);
       }
       if (error) {
@@ -129,9 +131,11 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     `You are "${run.agent_name}". ${run.instructions}`,
     `Business profile: ${untrusted('business_profile', profile)}`,
     `Workspace terminology and statuses: ${JSON.stringify({ terminology: config.terminology, taskStatuses: config.taskStatuses })}`,
+    META_INSTRUCTIONS,
   ].join('\n\n');
 
   const messages: ChatMessage[] = [{ role: 'system', content: system }, ...history.map((h: any) => ({ role: h.role, content: h.content }))];
+  let raw = '';
 
   let text = '';
   let usage = { i: 0, o: 0 };
@@ -146,15 +150,20 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
       const calls: ToolCallReq[] = [];
       let turnText = '';
       let reasoning = '';
+      const filter = new MetaFilter();
       for await (const ev of provider.stream({ model, messages, tools: toolCount < MAX_TOOL_CALLS ? tools : undefined, maxTokens: 4096 }, signal)) {
         if (ev.type === 'reasoning') reasoning += ev.text;
         else if (ev.type === 'token') {
           turnText += ev.text;
-          await emit('token', { text: ev.text });
+          const show = filter.push(ev.text);
+          if (show) await emit('token', { text: show });
         } else if (ev.type === 'tool_call') calls.push(ev.call);
         else if (ev.type === 'usage') usage = { i: usage.i + ev.inputTokens, o: usage.o + ev.outputTokens };
       }
-      text += turnText;
+      const tail = filter.flush();
+      if (tail) await emit('token', { text: tail });
+      raw += turnText;
+      text += stripMeta(turnText);
       if (!calls.length) break;
 
       messages.push({ role: 'assistant', content: turnText || null, tool_calls: calls, reasoning_content: reasoning || undefined });
@@ -186,7 +195,9 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
   }
 
   if (refs.length) await emit('citation', { refs });
-  await finish(parked ? 'waiting_approval' : 'completed', text, usage, undefined, refs);
+  const meta = parseMeta(raw, text);
+  if (text.trim()) await emit('meta', meta);
+  await finish(parked ? 'waiting_approval' : 'completed', text, usage, undefined, refs, meta);
   await emit('done', { usage: { inputTokens: usage.i, outputTokens: usage.o }, status: parked ? 'waiting_approval' : 'completed' });
 }
 
@@ -203,8 +214,11 @@ async function handleToolCall(
   const db = <T,>(fn: (q: Q) => Promise<T>) => withTenant({ orgId: ctx.orgId, userId: ctx.userId }, fn);
   const tool = getTool(name);
   // v1.5: the emergency stop is read per call, so pulling it mid-run takes effect at the next tool.
-  const stopped = await db((q) => isStopped(q, ctx.workspaceId));
-  const decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened, stopped });
+  const { stopped, auto } = await db(async (q) => {
+    const ws = await q.one('select config from workspaces where id=$1', [ctx.workspaceId]);
+    return { stopped: await isStopped(q, ctx.workspaceId), auto: await autonomyState(q, ws?.config) };
+  });
+  const decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened, stopped, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
   const idem = `run:${run.id}:${index}`;
   let args: unknown = {};
   try {

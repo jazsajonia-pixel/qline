@@ -65,6 +65,26 @@ List<String> wordsOf(String s) => s.split(RegExp(r'\s+')).where((w) => w.isNotEm
 /// Many Android speech services never deliver a `finalResult`, or report `done` / `notListening`
 /// before it arrives. So a request is committed on whichever comes first: the final result, the
 /// recogniser stopping, or [silence] with no new words.
+/// v1.6: what to say for a reply — the model's short spoken line, or the first sentence or two of
+/// the written answer when there is none. The voice never reads a long answer word for word.
+String spokenLine(String? speech, String text, {int maxChars = 220}) {
+  final sp = speakable(speech ?? '');
+  if (sp.isNotEmpty) return sp;
+  final t = speakable(text);
+  final sentences = RegExp(r'[^.!?]+[.!?]+(\s|$)|[^.!?]+$').allMatches(t).map((m) => m.group(0)!).toList();
+  var out = '';
+  var n = 0;
+  for (final s in sentences) {
+    if ((out + s).length > maxChars && out.isNotEmpty) break;
+    out += s;
+    n++;
+    if (n >= 2 || out.length > 80) break;
+  }
+  out = out.trim();
+  if (out.length > maxChars) out = '${out.substring(0, maxChars - 1).replaceFirst(RegExp(r'\s+\S*$'), '')}…';
+  return out;
+}
+
 class UtteranceGate {
   UtteranceGate({required this.onCommit, this.silence = const Duration(milliseconds: 1500)});
   final void Function(String words) onCommit;
@@ -297,19 +317,33 @@ class Speaker {
       }
       hit(idx);
     });
-    // Some engines never send progress callbacks: fall back to estimated word timing.
+    // Some engines never send progress callbacks: fall back to estimated word timing,
+    // timed from the moment the engine reports it started speaking (not from when we asked it to).
     final est = estimateWordTimes(words, p.rate);
     final clock = Stopwatch();
+    var started = false;
+    _tts.setStartHandler(() {
+      if (my != _session || started) return;
+      started = true;
+      clock
+        ..reset()
+        ..start();
+    });
     _tick?.cancel();
     _tick = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (my != _session) return;
-      if (!gotProgress && words.isNotEmpty) {
-        final t = clock.elapsedMilliseconds - 250; // engine start latency
-        if (t >= 0) {
-          var w = est.indexWhere((b) => b > t);
-          if (w < 0) w = words.length - 1;
-          hit(w);
-        }
+      // No start callback after 600 ms: assume it started (older engines).
+      if (!started && clock.elapsedMilliseconds > 600) {
+        started = true;
+        clock
+          ..reset()
+          ..start();
+      }
+      if (!gotProgress && started && words.isNotEmpty) {
+        final t = clock.elapsedMilliseconds;
+        var w = est.indexWhere((b) => b > t);
+        if (w < 0) w = words.length - 1;
+        hit(w);
       }
       _level *= .86;
       onLevel(_level);
@@ -317,6 +351,8 @@ class Speaker {
     clock.start();
     await _tts.speak(part);
     clock.stop();
+    _level = 0;
+    onLevel(0);
   }
 
   Future<void> _playAudio(Map<String, dynamic> a, String part, int offset, int my) async {
@@ -344,14 +380,35 @@ class Speaker {
     sub = _player.onPlayerComplete.listen((_) {
       if (!done.isCompleted) done.complete();
     });
+    // Follow the player's own position (re-anchored on every position update) so the core moves
+    // with the sound, not with when play() returned. Nothing moves until audio is actually playing.
     final clock = Stopwatch();
+    var basePos = -1;
+    final posSub = _player.onPositionChanged.listen((d) {
+      if (my != _session) return;
+      basePos = d.inMilliseconds;
+      clock
+        ..reset()
+        ..start();
+    });
+    final stateSub = _player.onPlayerStateChanged.listen((st) {
+      if (st == PlayerState.playing && basePos < 0) {
+        basePos = 0;
+        clock
+          ..reset()
+          ..start();
+      }
+    });
     await _player.play(BytesSource(bytes, mimeType: 'audio/wav'));
-    clock.start();
     var lastWord = -1;
     _tick?.cancel();
     _tick = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (my != _session) return;
-      final t = clock.elapsedMilliseconds;
+      if (basePos < 0) {
+        onLevel(0);
+        return;
+      }
+      final t = basePos + clock.elapsedMilliseconds;
       final i = (t / stepMs).floor();
       onLevel(i < env.length ? env[i] : 0);
       var w = bounds.indexWhere((b) => b > t);
@@ -364,6 +421,9 @@ class Speaker {
     });
     await done.future;
     await sub.cancel();
+    await posSub.cancel();
+    await stateSub.cancel();
     _tick?.cancel();
+    onLevel(0);
   }
 }

@@ -16,7 +16,7 @@ import type { ToolDef } from './tools';
 type Conn = { conn: any; token: string };
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-async function connection(q: Q, providers: ('google' | 'microsoft' | 'slack')[], scope?: (p: string) => string): Promise<Conn | string> {
+export async function connection(q: Q, providers: ('google' | 'microsoft' | 'slack')[], scope?: (p: string) => string): Promise<Conn | string> {
   const rows = await q.many(`select * from integration_connections where provider = any($1) and status='ok' order by provider`, [providers]);
   const conn = rows.find((c: any) => !scope || hasScope(c, scope(c.provider)));
   if (!conn) {
@@ -32,7 +32,7 @@ async function connection(q: Q, providers: ('google' | 'microsoft' | 'slack')[],
   }
 }
 
-const fail = (summary: string) => ({ ok: false, summary, refs: [] });
+export const fail = (summary: string) => ({ ok: false, summary, refs: [] });
 const mailScope = (p: string) => (p === 'google' ? 'gmail.readonly' : 'Mail.Read');
 
 const question = z.object({

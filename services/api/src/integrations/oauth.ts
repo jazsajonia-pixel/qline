@@ -23,7 +23,7 @@ export const FEATURE_SCOPES: Record<Feature, { provider: OAuthProvider; scopes: 
   calendar: { provider: 'google', scopes: [G + 'calendar.events'] },
   outlook: { provider: 'microsoft', scopes: ['Mail.Read', 'Mail.Send'] },
   ms_calendar: { provider: 'microsoft', scopes: ['Calendars.ReadWrite'] },
-  slack: { provider: 'slack', scopes: ['chat:write', 'chat:write.public', 'channels:read'] },
+  slack: { provider: 'slack', scopes: ['chat:write', 'chat:write.public', 'channels:read', 'channels:manage'] },
 };
 
 const BASE_SCOPES: Record<OAuthProvider, string[]> = {
