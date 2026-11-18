@@ -142,7 +142,8 @@ void main() {
             filename = RegExp(r'filename="([^"]+)"').firstMatch(latin1.decode(r.bodyBytes))?.group(1);
             return _json({'id': '11111111-1111-4111-8111-111111111111', 'name': 'leads.csv', 'kind': 'records', 'note': 'Kept the first 500 rows.'}, 201);
           }));
-      final note = await files.add((name: 'leads.csv', bytes: Uint8List.fromList(utf8.encode('name,email\nAna,a@x.co\n'))));
+      final csv = Uint8List.fromList(utf8.encode('name,email\nAna,a@x.co\n'));
+      final note = await files.add((name: 'leads.csv', bytes: csv));
       expect(calls, ['POST /v1/agents/attachments']);
       expect(filename, 'leads.csv');
       expect(note, 'Kept the first 500 rows.');
@@ -150,7 +151,7 @@ void main() {
       expect(files.items.single.kind, 'records');
       expect(files.uploading, isFalse);
       final sent = files.take();
-      expect(sent.single.toMeta(), {'id': '11111111-1111-4111-8111-111111111111', 'name': 'leads.csv', 'kind': 'records', 'size': 21});
+      expect(sent.single.toMeta(), {'id': '11111111-1111-4111-8111-111111111111', 'name': 'leads.csv', 'kind': 'records', 'size': csv.length});
       expect(files.items, isEmpty);
       files.restore(sent);
       expect(files.items.length, 1, reason: 'a failed send puts the files back');
