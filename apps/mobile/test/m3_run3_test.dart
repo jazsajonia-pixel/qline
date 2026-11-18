@@ -16,6 +16,7 @@ import 'package:qline/screens/knowledge_graph.dart';
 import 'package:qline/screens/live.dart';
 import 'package:qline/screens/shell.dart';
 import 'package:qline/ui/activity_trace.dart';
+import 'package:qline/ui/chat_artifacts.dart';
 import 'package:qline/ui/theme.dart';
 
 /// Run 3 (docs/19): collapsed activity trace, knowledge in the chat, the map canvas, Android Back.
@@ -302,11 +303,20 @@ void main() {
       await t.tap(find.byTooltip('Fit to screen'));
       await t.pumpAndSettle();
       expect(viewer.transformationController!.value.getMaxScaleOnAxis(), closeTo(before, before * .05));
-      pos.values['qline.kgpos.o1.overview'] = {'entry:$_e1': const Offset(10, 10)};
+      final key = graphPositionsKey('o1', 'ana@shop.ph', null);
+      pos.values[key] = {'entry:$_e1': const Offset(10, 10)};
       await t.tap(find.byTooltip('Reset layout'));
       await t.pumpAndSettle();
-      expect(pos.values.containsKey('qline.kgpos.o1.overview'), isFalse);
+      expect(pos.values.containsKey(key), isFalse);
       expect(viewer.boundaryMargin, const EdgeInsets.all(double.infinity));
+    });
+
+    test('positions are kept per person, and the key holds no email address', () {
+      final a = graphPositionsKey('o1', 'ana@shop.ph', null);
+      expect(a, isNot(graphPositionsKey('o1', 'ben@shop.ph', null)));
+      expect(a, graphPositionsKey('o1', ' Ana@Shop.ph ', null));
+      expect(a, isNot(contains('ana')));
+      expect(graphPositionsKey('o1', 'ana@shop.ph', 'entry:x'), endsWith('.entry:x'));
     });
 
     testWidgets('filters and search narrow the map; "connected only" hides lonely items', (t) async {
@@ -407,7 +417,7 @@ void main() {
       expect(exits, 0);
     });
 
-    testWidgets('leaving the chat with an unsent message asks first', (t) async {
+    testWidgets('typed text survives leaving the chat as a draft; Back does not ask for text alone', (t) async {
       await t.pumpWidget(
         _app(
           Builder(
@@ -424,16 +434,47 @@ void main() {
       await t.tap(find.text('open'));
       await _settle(t);
       await t.enterText(find.byType(TextField), 'half a thought');
+      await t.pump(const Duration(milliseconds: 700));
       await t.binding.handlePopRoute();
       await _settle(t);
-      expect(find.text('Leave the chat?'), findsOneWidget);
-      await t.tap(find.text('Cancel'));
-      await _settle(t);
-      expect(find.byType(LiveScreen), findsOneWidget);
-      await t.enterText(find.byType(TextField), '');
-      await t.binding.handlePopRoute();
-      await _settle(t);
+      expect(find.text('Leave the chat?'), findsNothing);
       expect(find.byType(LiveScreen), findsNothing);
+      await t.tap(find.text('open'));
+      await _settle(t);
+      expect(find.text('half a thought'), findsOneWidget);
+    });
+  });
+
+  group('phase 3: files in the chat', () {
+    testWidgets('a file card saves a copy from /files/:id/download', (t) async {
+      final asked = <String>[];
+      String? savedName;
+      saveFileBytes = (name, bytes) async {
+        savedName = name;
+        return '/storage/$name';
+      };
+      await t.pumpWidget(_app(
+        const Scaffold(body: Center(child: ChatArtifact({'type': 'file', 'fileId': 'f1', 'name': 'plan.pdf', 'kind': 'document', 'size': 2048, 'source': 'Google Drive'}))),
+        client: MockClient((r) async {
+          asked.add(r.url.path);
+          return http.Response.bytes([1, 2, 3], 200);
+        }),
+      ));
+      expect(find.text('plan.pdf'), findsOneWidget);
+      expect(find.textContaining('Google Drive'), findsOneWidget);
+      await t.tap(find.text('plan.pdf'));
+      await t.pumpAndSettle();
+      expect(asked.single, endsWith('/files/f1/download'));
+      expect(savedName, 'plan.pdf');
+      expect(find.text('Saved plan.pdf'), findsOneWidget);
+    });
+
+    testWidgets('a sent attachment chip is a button with a 48 dp target', (t) async {
+      var taps = 0;
+      await t.pumpWidget(_app(Scaffold(body: Center(child: AttachmentChip(name: 'notes.txt', kind: 'document', size: 10, onTap: () => taps++))), client: MockClient((_) async => _json({}))));
+      expect(t.getSize(find.byType(InkWell)).height, greaterThanOrEqualTo(48));
+      await t.tap(find.text('notes.txt'));
+      expect(taps, 1);
     });
   });
 }

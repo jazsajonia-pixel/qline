@@ -71,6 +71,27 @@ d("Personal AI OS", () => {
       expect((await call(a, "GET", "/me")).status).toBe(200);
     });
   });
+
+  describe("files (phase 3)", () => {
+    it("downloads any visible file as an opaque attachment, audited; other orgs get 404", async () => {
+      const a = await withOrg(await signUp("Dalisay"));
+      const b = await withOrg(await signUp("Bituin"));
+      const form = new FormData();
+      form.set("file", new File([new TextEncoder().encode("hello <script>alert(1)</script>")], "note.txt", { type: "text/html" }));
+      const up = await app.fetch(new Request("http://localhost/v1/agents/attachments", { method: "POST", headers: { authorization: `Bearer ${a.token}`, "x-qline-org": a.org! }, body: form }));
+      expect(up.status).toBe(201);
+      const id = (await up.json()).id;
+      const res = await app.fetch(new Request(`http://localhost/v1/files/${id}/download`, { headers: { authorization: `Bearer ${a.token}`, "x-qline-org": a.org! } }));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("application/octet-stream");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("content-disposition")).toBe('attachment; filename="note.txt"');
+      expect(await res.text()).toContain("hello");
+      expect((await call(b, "GET", `/files/${id}/download`)).status).toBe(404);
+      const audited = await db.withTenant({ orgId: a.org!, userId: a.userId! }, (q) => q.one(`select count(*)::int as n from audit_events where action='file.downloaded' and target_ref=$1`, [`file:${id}`]));
+      expect(audited!.n).toBe(1);
+    });
+  });
 });
 
 export { call, signUp, withOrg };

@@ -8,15 +8,24 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// It holds no message content. All pointers are removed on sign-out.
 const newChatPointer = 'new';
 const _prefix = 'chat.current.';
+const _draftPrefix = 'chat.draft.';
 
 /// One key per organisation and account, so switching either never opens someone else's conversation.
 String chatPointerKey(String orgId, String email) => '$_prefix$orgId.${email.trim().toLowerCase()}';
 
+/// Personal AI OS phase 3: an unsent message is kept per account, organisation and conversation ([newChatPointer]
+/// for a chat that has no id yet), in the same encrypted store as the pointer, and removed on send and sign-out.
+String chatDraftKey(String orgId, String email, String? conversationId) => '$_draftPrefix$orgId.${email.trim().toLowerCase()}.${conversationId ?? newChatPointer}';
+
+/// Drafts longer than this are cut (a draft is a note to self, not a document).
+const maxDraftChars = 8000;
+
 abstract class ChatPointerStore {
   Future<String?> read(String key);
   Future<void> write(String key, String value);
+  Future<void> delete(String key);
 
-  /// Removes every chat pointer (sign-out, session expired).
+  /// Removes every chat pointer and draft (sign-out, session expired).
   Future<void> clearAll();
 }
 
@@ -28,9 +37,11 @@ class SecureChatPointerStore implements ChatPointerStore {
   @override
   Future<void> write(String key, String value) => _storage.write(key: key, value: value);
   @override
+  Future<void> delete(String key) => _storage.delete(key: key);
+  @override
   Future<void> clearAll() async {
     final all = await _storage.readAll();
-    for (final k in all.keys.where((k) => k.startsWith(_prefix)).toList()) {
+    for (final k in all.keys.where((k) => k.startsWith(_prefix) || k.startsWith(_draftPrefix)).toList()) {
       await _storage.delete(key: k);
     }
   }
@@ -44,7 +55,9 @@ class MemoryChatPointerStore implements ChatPointerStore {
   @override
   Future<void> write(String key, String value) async => values[key] = value;
   @override
-  Future<void> clearAll() async => values.removeWhere((k, _) => k.startsWith(_prefix));
+  Future<void> delete(String key) async => values.remove(key);
+  @override
+  Future<void> clearAll() async => values.removeWhere((k, _) => k.startsWith(_prefix) || k.startsWith(_draftPrefix));
 }
 
 final chatPointerStoreProvider = Provider<ChatPointerStore>((ref) => const SecureChatPointerStore());
