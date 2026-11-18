@@ -2,7 +2,8 @@ import { ProviderError, type ChatMessage, type ToolCallReq } from '@qline/ai';
 import { decideTool, riskLabel, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { withTenant, type Q } from '../core/db';
-import { autonomyState, isStopped } from '../core/controls';
+import { autonomyState, isStopped, reserveExternalAction, settleReservation } from '../core/controls';
+import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { MetaFilter, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName, type Artifact } from './tools';
@@ -270,9 +271,9 @@ async function handleToolCall(
   // v1.5: the emergency stop is read per call, so pulling it mid-run takes effect at the next tool.
   const { stopped, auto } = await db(async (q) => {
     const ws = await q.one('select config from workspaces where id=$1', [ctx.workspaceId]);
-    return { stopped: await isStopped(q, ctx.workspaceId), auto: await autonomyState(q, ws?.config) };
+    return { stopped: await isStopped(q, ctx.workspaceId), auto: await autonomyState(q, ws?.config, ctx.workspaceId) };
   });
-  const decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened, stopped, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
+  let decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened, stopped, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
   const idem = `run:${run.id}:${index}`;
   let args: unknown = {};
   try {
@@ -289,13 +290,27 @@ async function handleToolCall(
     return { forModel: { ok: false, error: 'Invalid arguments', issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) } };
   }
   const preview = tool.preview(parsed.data);
-  const tc = await db((q) =>
-    q.one<{ id: string }>(
-      `insert into tool_calls (org_id, run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,$6,$7,'planned')
-       on conflict (org_id, idempotency_key) do update set tool=excluded.tool returning id`,
-      [ctx.orgId, run.id, name, JSON.stringify(parsed.data), decision.risk, decision.decision, idem],
-    ),
-  );
+  // Intent is committed before any provider call ('executing' when it will run now). A full-autopilot action in a
+  // connected app takes its slot in the daily allowance atomically here, or falls back to asking a human (M1).
+  const tc = await db(async (q) => {
+    const row = await q.one<{ id: string; status: string; inserted: boolean }>(
+      `insert into tool_calls (org_id, run_id, tool, args, risk, policy_decision, idempotency_key, status) values ($1,$2,$3,$4,$5,$6,$7,$8)
+       on conflict (org_id, idempotency_key) do update set tool=excluded.tool returning id, status, (xmax = 0) as inserted`,
+      [ctx.orgId, run.id, name, JSON.stringify(parsed.data), decision.risk, decision.decision, idem, decision.decision === 'allow' ? 'executing' : 'planned'],
+    );
+    if (!row!.inserted) return row; // the same step was already recorded: never act on it twice
+    if (decision.decision === 'allow' && decision.risk === 'L3' && auto.autonomy === 'full') {
+      if (!(await reserveExternalAction(q, { orgId: ctx.orgId, workspaceId: ctx.workspaceId, toolCallId: row!.id, tool: name }))) {
+        decision = { decision: 'require_approval', risk: decision.risk, reason: "Today's limit for actions in connected apps is used up, so this needs a human decision." };
+        await q.exec(`update tool_calls set status='planned', policy_decision='require_approval' where id=$1`, [row!.id]);
+      }
+    }
+    return row;
+  });
+  if (!tc!.inserted) {
+    await emit('tool.result', { stepId: tc!.id, ok: tc!.status === 'succeeded', summary: 'Already handled earlier in this reply.' });
+    return { forModel: { ok: tc!.status === 'succeeded', replayed: true, status: tc!.status } };
+  }
   await emit('tool.planned', { stepId: tc!.id, tool: name, summary: preview.title, decision: decision.decision });
 
   if (decision.decision === 'deny') {
@@ -322,19 +337,33 @@ async function handleToolCall(
     return { forModel: { ok: false, status: 'waiting for approval', approvalId: appr.id, note: 'A human must approve this in Approvals. It has NOT happened yet.' }, parked: true };
   }
 
-  try {
-    const result = await db(async (q) => {
-      const r = await tool.execute(q, { orgId: ctx.orgId, workspaceId: ctx.workspaceId, userId: ctx.userId, actor: { kind: 'agent', id: run.agent_id }, interactive: true }, parsed.data);
-      await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tc!.id, r.ok ? 'succeeded' : 'failed', r.summary, JSON.stringify(r.refs)]);
-      return r;
-    });
+  const tracked = await trackExternal(
+    () =>
+      db(async (q) => {
+        const r = await tool.execute(q, { orgId: ctx.orgId, workspaceId: ctx.workspaceId, userId: ctx.userId, actor: { kind: 'agent', id: run.agent_id }, interactive: true }, parsed.data);
+        await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tc!.id, r.ok ? 'succeeded' : 'failed', r.summary, JSON.stringify(r.refs)]);
+        await settleReservation(q, tc!.id, r.ok ? 'succeeded' : 'failed');
+        return r;
+      }),
+    { idempotencyKey: `qline-${tc!.id}` },
+  );
+  if (tracked.ok) {
+    const result = tracked.value;
     await emit('tool.result', { stepId: tc!.id, ok: result.ok, summary: result.summary, refs: result.refs });
     return { forModel: { ok: result.ok, summary: result.summary, data: result.data ?? null, ...(result.artifacts?.length ? { shown: `${result.artifacts.length} item(s) shown in the chat` } : {}) }, refs: result.refs, artifacts: result.artifacts };
-  } catch (e) {
-    await db((q) => q.exec(`update tool_calls set status='failed', result_summary=$2, finished_at=now() where id=$1`, [tc!.id, (e as Error).message.slice(0, 300)]));
-    await emit('tool.result', { stepId: tc!.id, ok: false, summary: 'The tool failed.' });
-    return { forModel: { ok: false, error: 'Tool failed' } };
   }
+  // The tool threw. If a request may have reached the connected app, the honest answer is "unknown", not "failed".
+  const outcome = tracked.outcome;
+  await db(async (q) => {
+    await q.exec(`update tool_calls set status=$2, result_summary=$3, finished_at=now() where id=$1 and status='executing'`, [tc!.id, outcome, outcome === 'unknown' ? UNKNOWN_SUMMARY : safeError(tracked.error)]);
+    await settleReservation(q, tc!.id, outcome);
+  });
+  if (outcome === 'unknown') {
+    await emit('tool.result', { stepId: tc!.id, ok: false, outcome: 'unknown', summary: 'Not sure this happened. Check it before trying again.' });
+    return { forModel: { ok: false, outcome: 'unknown', note: 'This may or may not have happened in the connected app. Do not retry it. Tell the user plainly that the result is unknown and they should check.' } };
+  }
+  await emit('tool.result', { stepId: tc!.id, ok: false, summary: 'The tool failed.' });
+  return { forModel: { ok: false, error: 'Tool failed' } };
 }
 
 export { toModelName };

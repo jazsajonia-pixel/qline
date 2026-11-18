@@ -112,7 +112,7 @@ export const appTools = {
 
   'forms.create': {
     description:
-      'Create a Google Form with your own questions, publish it, and return its public link (to share) and edit link. Use this whenever the user asks for a form, survey, sign-up sheet, booking or feedback form. Always give the user the responderUrl.',
+      'Create a Google Form with your own questions, try to publish it, and return its links. Use this whenever the user asks for a form, survey, sign-up sheet, booking or feedback form. Only give the responderUrl as ready to share when accepting is true; otherwise give the editUrl and say it must be published first.',
     schema: z.object({ title: z.string().trim().min(1).max(200), description: z.string().max(2000).optional(), questions: z.array(question).min(1).max(40) }),
     async execute(q, ctx, a) {
       const c = await connection(q, ['google'], () => 'drive.file');
@@ -123,11 +123,15 @@ export const appTools = {
         [ctx.orgId, ctx.workspaceId, `Form: ${a.title}`, `Share: ${f.responderUri}\nEdit: ${f.editUrl}\nForm ID: ${f.id}\n\nQuestions:\n${a.questions.map((x: Qn, i: number) => `${i + 1}. ${x.title} (${x.type})`).join('\n')}`, `${ctx.actor.kind}:${ctx.actor.id}`],
       );
       await audit(q, { orgId: ctx.orgId, actorKind: ctx.actor.kind, actorId: ctx.actor.id, action: 'form.created', targetRef: `form:${f.id}`, detail: { title: a.title, questions: a.questions.length } });
+      await audit(q, { orgId: ctx.orgId, actorKind: ctx.actor.kind, actorId: ctx.actor.id, action: f.accepting ? 'form.published' : 'form.publish_unverified', targetRef: `form:${f.id}`, detail: { error: f.publishError ?? null } });
+      // Never call a form ready unless Google confirmed it is accepting responses (docs/17 §C).
       return {
         ok: true,
-        summary: `Created form “${a.title}” (${a.questions.length} questions)`,
-        refs: [{ type: 'link', id: f.responderUri, title: `${a.title} (share link)` }, { type: 'document', id: doc.id, title: `Form: ${a.title}` }],
-        data: { formId: f.id, responderUrl: f.responderUri, editUrl: f.editUrl },
+        summary: f.accepting
+          ? `Created form “${a.title}” (${a.questions.length} questions). It is published and accepting responses.`
+          : `Created form “${a.title}” (${a.questions.length} questions), but it is NOT accepting responses yet (${f.publishError}). Do not share the link as ready: ask the user to open the edit link and press Publish.`,
+        refs: [{ type: 'link', id: f.accepting ? f.responderUri : f.editUrl, title: f.accepting ? `${a.title} (share link)` : `${a.title} (edit — publish needed)` }, { type: 'document', id: doc.id, title: `Form: ${a.title}` }],
+        data: { formId: f.id, responderUrl: f.responderUri, editUrl: f.editUrl, accepting: f.accepting, publishError: f.publishError ?? null },
       };
     },
     preview: (a) => ({ title: `Create form: ${a.title}`, lines: a.questions.slice(0, 6).map((x: Qn) => `• ${x.title}`) }),
@@ -139,7 +143,15 @@ export const appTools = {
     async execute(q, _ctx, a) {
       const c = await connection(q, ['google'], () => 'drive.file');
       if (typeof c === 'string') return fail(c);
-      const rows = await formResponsesReadable(c.token, a.formId, a.limit ?? 20);
+      let rows;
+      try {
+        rows = await formResponsesReadable(c.token, a.formId, a.limit ?? 20);
+      } catch (e) {
+        const st = (e as { status?: number }).status;
+        // drive.file only reaches files Qline created or the user opened with Qline.
+        if (st === 403 || st === 404) return fail('Qline can only read responses for forms it created with this Google connection. Check the form ID, or create the form through Qline.');
+        throw e;
+      }
       return { ok: true, summary: `${rows.length} response${rows.length === 1 ? '' : 's'}`, refs: [], data: rows };
     },
     preview: (a) => ({ title: 'Read form responses', lines: [a.formId] }),

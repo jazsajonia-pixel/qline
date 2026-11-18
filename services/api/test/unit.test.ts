@@ -384,3 +384,113 @@ describe('v1.6 run 3: untrusted data, connector helpers and policies', async () 
     for (const t of ['drive.search', 'drive.read', 'notion.search', 'notion.read', 'github.repos', 'github.issues', 'github.read', 'stripe.summary', 'stripe.list', 'knowledge.search']) expect(TOOL_POLICIES[t]!.risk).toBe('L0');
   });
 });
+
+describe('M1 action safety: honest outcomes for connected-app actions', async () => {
+  const X = await import('../src/core/external');
+  const { api } = await import('../src/integrations/oauth');
+  const { publishForm } = await import('../src/integrations/services');
+  const realFetch = globalThis.fetch;
+  const stub = (fn: (url: string, init: any) => Response | Promise<Response>) => {
+    globalThis.fetch = (async (input: any, init: any = {}) => fn(String(input?.url ?? input), init)) as typeof fetch;
+  };
+  const restore = () => {
+    globalThis.fetch = realFetch;
+  };
+
+  it('classify: nothing sent or every send refused → failed; anything else → unknown', () => {
+    expect(X.classify({ sent: 0, confirmed: 0, rejected: 0 })).toBe('failed');
+    expect(X.classify({ sent: 2, confirmed: 0, rejected: 2 })).toBe('failed');
+    expect(X.classify({ sent: 1, confirmed: 0, rejected: 0 })).toBe('unknown'); // timeout / network / 5xx
+    expect(X.classify({ sent: 2, confirmed: 1, rejected: 1 })).toBe('unknown'); // first write happened
+    expect(X.classify({ sent: 1, confirmed: 1, rejected: 0 })).toBe('unknown'); // provider ok, then Qline failed
+    expect(X.isDefiniteRefusal(400)).toBe(true);
+    expect(X.isDefiniteRefusal(408)).toBe(false);
+    expect(X.isDefiniteRefusal(503)).toBe(false);
+  });
+
+  it('api(): timeouts, 5xx and 408 after a POST are unknown; 4xx and Slack ok:false are failed; GETs never count', async () => {
+    const run = async (resp: () => Response | Promise<Response>, method = 'POST') => {
+      stub(() => resp());
+      try {
+        return await X.trackExternal(() => api('tok', 'https://example.test/x', method === 'POST' ? { body: { a: 1 } } : {}));
+      } finally {
+        restore();
+      }
+    };
+    const net = await run(() => {
+      throw new TypeError('fetch failed');
+    });
+    expect(net.ok ? 'ok' : net.outcome).toBe('unknown');
+    const down = await run(() => new Response('bad gateway', { status: 502 }));
+    expect(down.ok ? 'ok' : down.outcome).toBe('unknown');
+    const slow = await run(() => new Response('{}', { status: 408 }));
+    expect(slow.ok ? 'ok' : slow.outcome).toBe('unknown');
+    const refused = await run(() => new Response(JSON.stringify({ error: { message: 'nope' } }), { status: 403 }));
+    expect(refused.ok ? 'ok' : refused.outcome).toBe('failed');
+    const slackRefused = await run(() => new Response(JSON.stringify({ ok: false, error: 'channel_not_found' }), { status: 200 }));
+    expect(slackRefused.ok ? 'ok' : slackRefused.outcome).toBe('failed');
+    const readFail = await run(() => new Response('down', { status: 503 }), 'GET');
+    expect(readFail.ok ? 'ok' : readFail.outcome).toBe('failed'); // a read cannot have changed anything
+    // Provider confirmed the write, then Qline itself failed (e.g. its commit) → unknown, never "failed".
+    stub(() => new Response('{"ok":true}', { status: 200 }));
+    try {
+      const after = await X.trackExternal(async () => {
+        await api('tok', 'https://example.test/x', { body: { a: 1 } });
+        throw new Error('db commit failed');
+      });
+      expect(after.ok ? 'ok' : after.outcome).toBe('unknown');
+    } finally {
+      restore();
+    }
+  });
+
+  it('idempotency keys are per request and deterministic', async () => {
+    const keys: (string | undefined)[] = [];
+    await X.trackExternal(
+      async () => {
+        X.noteRequest('POST');
+        keys.push(X.currentIdempotencyKey());
+        X.noteRequest('POST');
+        keys.push(X.currentIdempotencyKey());
+      },
+      { idempotencyKey: 'qline-abc' },
+    );
+    expect(keys).toEqual(['qline-abc:1', 'qline-abc:2']);
+    expect(X.currentIdempotencyKey()).toBeUndefined();
+  });
+
+  it('safeError masks tokens providers sometimes echo', () => {
+    const m = X.safeError(new Error('bad Bearer ya29.AAAA-secret and xoxb-123-456 and sk_live_abcdef and ghp_abcdefghij and AIzaSyA1234567890123456789012'));
+    expect(m).not.toMatch(/ya29|xoxb-123|sk_live_abc|ghp_abc|AIzaSyA123/);
+    expect(X.safeError('x'.repeat(1000)).length).toBe(300);
+  });
+
+  it('Google Forms: "ready" only when Google confirms the form is published and accepting responses', async () => {
+    const form = (state: unknown) => new Response(JSON.stringify({ formId: 'F1', responderUri: 'https://docs.google.com/forms/d/e/F1/viewform', ...(state ? { publishSettings: { publishState: state } } : {}) }), { status: 200 });
+    const scenario = async (publish: () => Response, state: unknown) => {
+      let mask: string | null = null;
+      stub((url, init) => {
+        if (url.endsWith(':setPublishSettings')) {
+          mask = JSON.parse(init.body).updateMask;
+          return publish();
+        }
+        return form(state);
+      });
+      try {
+        return { ...(await publishForm('tok', 'F1')), mask };
+      } finally {
+        restore();
+      }
+    };
+    const ok = await scenario(() => new Response('{}', { status: 200 }), { isPublished: true, isAcceptingResponses: true });
+    expect(ok).toMatchObject({ accepting: true, error: undefined, mask: 'publishState' });
+    const refused = await scenario(() => new Response(JSON.stringify({ error: { message: 'The caller does not have permission' } }), { status: 403 }), { isPublished: false, isAcceptingResponses: false });
+    expect(refused.accepting).toBe(false);
+    expect(refused.error).toMatch(/permission/);
+    const silent = await scenario(() => new Response('{}', { status: 200 }), { isPublished: true, isAcceptingResponses: false });
+    expect(silent.accepting).toBe(false);
+    expect(silent.error).toMatch(/not accepting/);
+    const noState = await scenario(() => new Response('{}', { status: 200 }), null);
+    expect(noState.accepting).toBe(false);
+  });
+});

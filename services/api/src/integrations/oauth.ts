@@ -1,3 +1,4 @@
+import { noteRequest } from '../core/external';
 import { createHash, randomBytes } from 'node:crypto';
 import { env } from '../core/env';
 import { ApiError } from '../core/errors';
@@ -267,22 +268,31 @@ export async function accessToken(q: Q, conn: any, force = false): Promise<strin
 export const PROVIDER_TIMEOUT_MS = 20_000;
 
 export async function api(token: string, url: string, init: { method?: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {}) {
-  const r = await fetch(url, {
-    signal: AbortSignal.timeout(init.timeoutMs ?? PROVIDER_TIMEOUT_MS),
-    method: init.method ?? (init.body ? 'POST' : 'GET'),
-    headers: { authorization: `Bearer ${token}`, accept: 'application/json', ...(init.body ? { 'content-type': 'application/json; charset=utf-8' } : {}), ...(init.headers ?? {}) },
-    body: init.body ? JSON.stringify(init.body) : undefined,
-  });
-  const text = await r.text();
+  const method = init.method ?? (init.body ? 'POST' : 'GET');
+  const answered = noteRequest(method);
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      signal: AbortSignal.timeout(init.timeoutMs ?? PROVIDER_TIMEOUT_MS),
+      method,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json', ...(init.body ? { 'content-type': 'application/json; charset=utf-8' } : {}), ...(init.headers ?? {}) },
+      body: init.body ? JSON.stringify(init.body) : undefined,
+    });
+  } catch (e) {
+    answered(null); // timeout / network: the request may have reached the provider
+    throw e;
+  }
+  const text = await r.text().catch(() => '');
   let j: any = null;
   try {
     j = text ? JSON.parse(text) : null;
   } catch {
     j = { raw: text.slice(0, 300) };
   }
+  answered(r.status, !(j && j.ok === false));
   if (!r.ok || (j && j.ok === false)) {
     const msg = j?.error?.message ?? j?.error_description ?? (typeof j?.error === 'string' ? j.error : null) ?? `HTTP ${r.status}`;
-    const e = new Error(msg) as Error & { status: number };
+    const e = new Error(String(msg).slice(0, 300)) as Error & { status: number };
     e.status = r.status;
     throw e;
   }

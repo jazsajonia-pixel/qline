@@ -60,3 +60,8 @@ Source: `packages/policy/src/index.ts`. Content returned by every connector is w
 - The catalogue shows status pills with an icon and a word. It never shows a "Connected" badge on a static mockup in production.
 - Each connector's detail screen shows the scopes in plain language ("Read emails you choose"), last sync, errors with a fix action, which agents can use it, and **Test connection** and **Disconnect** controls.
 - Qline never asks users to paste secrets into chat. API keys go into a dedicated masked field and are stored server-side.
+
+
+## Google Forms publish state (M1)
+
+Forms created through the API after 2026-06-30 start unpublished. Qline publishes each new form and then reads it back; it only calls a form ready when Google reports it is published and accepting responses. Otherwise the result carries `accepting:false` and `publishError`, and the user is told to open the form and press Publish. Reading responses uses `drive.file`, which only covers forms Qline created. See docs/17 §C.

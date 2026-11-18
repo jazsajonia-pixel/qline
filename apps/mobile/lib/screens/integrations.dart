@@ -375,7 +375,10 @@ class _ConnectionState extends ConsumerState<ConnectionScreen> {
                 contentPadding: const EdgeInsets.symmetric(horizontal: 4),
                 leading: const Icon(Icons.assignment_outlined),
                 title: const Text('Lead form'),
-                subtitle: Text(form['responderUri'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(12, c: q.text3, family: mono)),
+                // `accepting` is false when Google did not confirm the form is published (older forms omit it).
+                subtitle: form['accepting'] == false
+                    ? Text('Not accepting responses yet. Open the form in Google and press Publish.', style: qs(12, c: q.text3))
+                    : Text(form['responderUri'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(12, c: q.text3, family: mono)),
                 trailing: IconButton(
                   tooltip: 'Copy form link',
                   icon: const Icon(Icons.copy),
@@ -394,7 +397,7 @@ class _ConnectionState extends ConsumerState<ConnectionScreen> {
                     ? () async {
                         final title = await promptText(context, title: 'Form title', label: 'Title', initial: 'Contact us', action: 'Create');
                         if (title == null || !context.mounted) return;
-                        final r = await act(context, ref, (api) => api.post('/integrations/google/form', {'title': title}), ok: 'Form created. Responses become leads automatically.');
+                        final r = await act(context, ref, (api) => api.post('/integrations/google/form', {'title': title}), ok: 'Form created. Check its status below.');
                         if (r != null) await _reload();
                       }
                     : null),
