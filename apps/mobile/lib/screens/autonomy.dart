@@ -49,6 +49,7 @@ class AutonomyScreen extends ConsumerWidget {
                       action: 'Turn on');
                   if (!ok) return;
                 }
+                if (!context.mounted) return;
                 await act(context, ref, (api) => api.put('/workspaces/${d['ws']}/autonomy', {'autonomy': v}), ok: 'Autonomy updated');
                 await reload();
               },
