@@ -48,6 +48,11 @@ async function setup(name: string): Promise<Who> {
 
 /** Run a tool the way the agent runner does: inside the tenant transaction, as an agent. */
 const run = (w: Who, name: string, args: unknown) =>
+  db.withTenant({ orgId: w.org!, userId: w.userId! }, (q) => {
+    const t = tools.getTool(name)!;
+    return t.execute(q, { orgId: w.org!, workspaceId: w.ws!, actor: { kind: 'agent', id: 'test-agent' }, userId: w.userId! }, t.schema.parse(args));
+  });
+
 const activate = async (w: Who, templates: string[]) => {
   const agents = (await call(w, 'GET', '/agents')).json.items;
   for (const a of agents.filter((x: any) => templates.includes(x.template))) expect((await call(w, 'PATCH', `/agents/${a.id}`, { status: 'active' })).status).toBe(200);
