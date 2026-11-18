@@ -204,6 +204,54 @@ export const EXTERNAL_WRITE_TOOLS = new Set([
   'github.issue.create', 'github.issue.comment', 'stripe.customer.create', 'stripe.invoice.draft', 'social.publish',
 ]);
 
+/**
+ * M2 (docs/18): read-only tools whose result the AI may reuse within one conversation while it is still valid.
+ * - ttlSec: hard expiry (never more than 30 minutes).
+ * - tables: Qline tables the result depends on; any committed change to them since the read invalidates it.
+ * - writes: tool prefixes that change the same connected-app data; a Qline write there since the read invalidates it.
+ * Not listed (always run fresh): time.now, approvals.list, agents.status, leads.list, business.snapshot (live
+ * status), charts/images (they produce artifacts), and every write.
+ */
+export interface ReusePolicy {
+  ttlSec: number;
+  tables: string[];
+  writes?: string[];
+}
+const CONN = ['integration_connections'];
+export const REUSE_POLICY: Record<string, ReusePolicy> = {
+  'records.search': { ttlSec: 300, tables: ['companies', 'contacts', 'documents', 'projects', 'tasks'] },
+  'tasks.search': { ttlSec: 300, tables: ['tasks', 'task_comments', 'projects'] },
+  'documents.search': { ttlSec: 300, tables: ['documents', 'memory_records'] },
+  'documents.read': { ttlSec: 600, tables: ['documents'] },
+  'memory.read': { ttlSec: 300, tables: ['memory_records'] },
+  'knowledge.search': { ttlSec: 600, tables: ['memory_records', 'knowledge_links', 'knowledge_categories'] },
+  'contacts.get': { ttlSec: 300, tables: ['contacts', 'companies', 'tasks', 'lead_inbox'] },
+  'projects.list': { ttlSec: 300, tables: ['projects', 'tasks'] },
+  'workflows.list': { ttlSec: 600, tables: ['workflows', 'workflow_versions'] },
+  'files.read': { ttlSec: 1800, tables: ['files'] },
+  // Connected apps can also change outside Qline, so these rely on short expiries for that.
+  'gmail.search': { ttlSec: 60, tables: CONN, writes: ['email.', 'gmail.'] },
+  'gmail.read': { ttlSec: 1800, tables: CONN, writes: ['email.', 'gmail.'] },
+  'calendar.list': { ttlSec: 120, tables: CONN, writes: ['calendar.'] },
+  'drive.search': { ttlSec: 120, tables: CONN, writes: ['drive.', 'forms.', 'sheets.'] },
+  'drive.read': { ttlSec: 300, tables: CONN, writes: ['drive.', 'forms.', 'sheets.'] },
+  'sheets.read': { ttlSec: 120, tables: CONN, writes: ['sheets.'] },
+  'forms.responses': { ttlSec: 60, tables: CONN, writes: ['forms.'] },
+  'notion.search': { ttlSec: 120, tables: CONN, writes: ['notion.'] },
+  'notion.read': { ttlSec: 300, tables: CONN, writes: ['notion.'] },
+  'github.repos': { ttlSec: 600, tables: CONN, writes: ['github.'] },
+  'github.issues': { ttlSec: 120, tables: CONN, writes: ['github.'] },
+  'github.read': { ttlSec: 300, tables: CONN, writes: ['github.'] },
+  'slack.channels': { ttlSec: 600, tables: CONN, writes: ['slack.'] },
+  'stripe.summary': { ttlSec: 120, tables: CONN, writes: ['stripe.'] },
+  'stripe.list': { ttlSec: 120, tables: CONN, writes: ['stripe.'] },
+};
+
+/** The user asked for current data ("refresh", "check again", "latest", Filipino "ulit", "may bago"…): skip reuse for this reply. */
+export function wantsFresh(text: string): boolean {
+  return /\b(refresh|reload|re-?check|check again|look again|again|latest|newest|up[- ]to[- ]date|fresh|right now|currently|just now|any new|anything new|ulit|pinakabago|may bago)\b/i.test(text);
+}
+
 /** Actions that are never available to agents or workflows, whatever the configuration. */
 export const HARD_DENY_PREFIXES = ['payments.', 'transfers.'];
 export const AGENT_DENY = new Set(['records.purge', 'org.delete', 'share.external', 'agents.grant_permission', 'policy.update']);

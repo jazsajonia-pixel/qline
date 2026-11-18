@@ -10,6 +10,7 @@ import { isStopped } from '../core/controls';
 import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, query } from '../core/validate';
 import { executeRun, makeEmitter } from '../agent/runner';
+import { ledgerStats } from '../agent/context-ledger';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { applyWorkflowDecision, resumeWorkflowAfterDecision } from './workflows';
 import { notify } from './work';
@@ -99,6 +100,28 @@ agentRoutes.patch('/agents/:id', async (c) => {
 // ---------------------------------------------------------------------------
 // Conversations & runs
 // ---------------------------------------------------------------------------
+/** A chat answer runs inside its stream request and is capped at 2 minutes, so a run still "active" after this died. */
+export const STALE_RUN_MIN = 5;
+
+/**
+ * M2: marks runs of this conversation that can no longer be running (server restarted or the request was cut off
+ * mid-answer) as interrupted, so they stop blocking the conversation with "Already answering".
+ */
+async function expireStaleRuns(q: Parameters<Parameters<typeof tx>[1]>[0], conversationId: string) {
+  const dead = await q.many<{ id: string }>(
+    `update agent_runs set status='failed', error='Interrupted', ended_at=now()
+      where conversation_id=$1 and status in ('queued','running') and coalesce(started_at, created_at) < now() - make_interval(mins => $2)
+      returning id`,
+    [conversationId, STALE_RUN_MIN],
+  );
+  for (const r of dead)
+    await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id) select org_id, id, 'system_notice', $2, $3 from conversations where id=$1`, [
+      conversationId,
+      'That answer was interrupted. Send your message again.',
+      r.id,
+    ]);
+}
+
 agentRoutes.get('/conversations', async (c) => {
   const t = need(c, 'agents.use');
   const p = query(c, z.object({ q: z.string().max(200).optional() }));
@@ -106,9 +129,10 @@ agentRoutes.get('/conversations', async (c) => {
     q.many(
       `select c.id, c.title, c.agent_id, a.name as agent_name, a.template, c.updated_at,
          (select content from conversation_messages m where m.conversation_id=c.id order by created_at desc limit 1) as last_message
-       from conversations c join agents a on a.id=c.agent_id where c.user_id=$1 and ($2::text is null or c.title ilike '%'||$2||'%')
+       from conversations c join agents a on a.id=c.agent_id
+       where c.user_id=$1 and c.workspace_id=$3 and ($2::text is null or c.title ilike '%'||$2||'%')
        order by c.updated_at desc limit 50`,
-      [t.userId, p.q ?? null],
+      [t.userId, p.q ?? null, t.workspaceId],
     ),
   );
   return c.json({ items });
@@ -136,10 +160,19 @@ agentRoutes.post('/conversations', async (c) => {
 agentRoutes.get('/conversations/:id', async (c) => {
   const t = need(c, 'agents.use');
   const data = await tx(t, async (q) => {
-    const conv = await q.one(`select c.*, a.name as agent_name, a.template from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2`, [c.req.param('id'), t.userId]);
+    const conv = await q.one(
+      `select c.*, a.name as agent_name, a.template from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2 and c.workspace_id=$3`,
+      [c.req.param('id'), t.userId, t.workspaceId],
+    );
     if (!conv) throw notFound('Conversation');
+    await expireStaleRuns(q, conv.id);
     const messages = await q.many('select id, role, content, run_id, refs, meta, created_at from conversation_messages where conversation_id=$1 order by created_at', [conv.id]);
-    return { ...conv, messages };
+    // M2: an answer still being written when the app reopens, so the client can follow it instead of losing it.
+    const active_run = await q.one(`select id, status, created_at from agent_runs where conversation_id=$1 and initiated_by=$2 and status in ('queued','running') order by created_at desc limit 1`, [
+      conv.id,
+      t.userId,
+    ]);
+    return { ...conv, messages, active_run: active_run ?? null };
   });
   return c.json(data);
 });
@@ -154,14 +187,20 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
         agent: z.union([z.literal('auto'), z.string().uuid()]).optional(),
         // v1.6: files sent with this message (ids from POST /agents/attachments)
         attachments: z.array(z.string().uuid()).max(5).default([]),
+        // M2: skip reusing earlier lookups for this reply (the user wants current data)
+        fresh: z.boolean().optional(),
       })
       .refine((v) => v.content.length > 0 || v.attachments.length > 0, { message: 'Write a message or attach a file.', path: ['content'] }),
   );
   const { agent: pick, attachments: attachmentIds } = input;
   const content = input.content || 'Please look at the attached file.';
   const out = await tx(t, async (q) => {
-    const conv = await q.one(`select c.*, a.current_version, a.status as agent_status from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2`, [c.req.param('id'), t.userId]);
+    const conv = await q.one(
+      `select c.*, a.current_version, a.status as agent_status from conversations c join agents a on a.id=c.agent_id where c.id=$1 and c.user_id=$2 and c.workspace_id=$3`,
+      [c.req.param('id'), t.userId, t.workspaceId],
+    );
     if (!conv) throw notFound('Conversation');
+    await expireStaleRuns(q, conv.id);
     const busy = await q.one(`select id from agent_runs where conversation_id=$1 and status in ('queued','running')`, [conv.id]);
     if (busy) throw new ApiError(409, 'RUN_IN_PROGRESS', 'Already answering', 'Wait for the current answer or cancel it.');
     // v1.6: answer with another agent for this message — picked by the user, or routed automatically ('auto').
@@ -183,7 +222,10 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
     );
     const files = await loadAttachments(q, attachmentIds);
     if (files.length !== new Set(attachmentIds).size) throw notFound('Attachment');
-    const meta = files.length ? { attachments: files.map((f) => ({ id: f.id, name: f.name, mime: f.mime, kind: f.extracted?.kind ?? 'document', size: f.size_bytes })) } : {};
+    const meta = {
+      ...(files.length ? { attachments: files.map((f) => ({ id: f.id, name: f.name, mime: f.mime, kind: f.extracted?.kind ?? 'document', size: f.size_bytes })) } : {}),
+      ...(input.fresh ? { fresh: true } : {}),
+    };
     const msg = await q.one(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, meta) values ($1,$2,'user',$3,$4,$5) returning id, created_at`, [
       t.orgId,
       conv.id,
@@ -195,6 +237,17 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
     return { runId: run!.id, messageId: msg.id, agent: routed };
   });
   return c.json(out, 202);
+});
+
+/** M2: what this conversation reused instead of looking up again, and what that saved (measured). */
+agentRoutes.get('/conversations/:id/context', async (c) => {
+  const t = need(c, 'agents.use');
+  const data = await tx(t, async (q) => {
+    const conv = await q.one('select id from conversations where id=$1 and user_id=$2 and workspace_id=$3', [c.req.param('id'), t.userId, t.workspaceId]);
+    if (!conv) throw notFound('Conversation');
+    return ledgerStats(q, conv.id, t.userId);
+  });
+  return c.json(data);
 });
 
 agentRoutes.get('/runs/:id', async (c) => {

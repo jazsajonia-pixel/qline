@@ -1,9 +1,10 @@
 import { ProviderError, type ChatMessage, type ToolCallReq } from '@qline/ai';
-import { decideTool, riskLabel, type Role } from '@qline/policy';
+import { decideTool, riskLabel, wantsFresh, type Role } from '@qline/policy';
 import { audit } from '../core/audit';
 import { withTenant, type Q } from '../core/db';
 import { autonomyState, isStopped, reserveExternalAction, settleReservation } from '../core/controls';
 import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
+import { currentSnapshot, findReusable, ledgerDigest, ownXid, remember, reusable, type LedgerScope } from './context-ledger';
 import { MetaFilter, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName, type Artifact } from './tools';
@@ -85,10 +86,18 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     const resolved = await resolveModel(q, ctx.orgId, { provider: run.provider, model: run.model, name: run.agent_name });
     const ids = history.flatMap((h: any) => ((h.meta?.attachments ?? []) as { id: string }[]).map((a) => a.id));
     const files = await loadAttachments(q, [...new Set(ids)]);
-    return { run, history: history.reverse(), config: ws?.config ?? {}, profile: profile?.profile ?? {}, resolved, files };
+    // M2: what this conversation already looked up (still valid), so identical reads are reused, not repeated.
+    const scope: LedgerScope | null = run.conversation_id
+      ? { orgId: ctx.orgId, workspaceId: ctx.workspaceId, conversationId: run.conversation_id, userId: ctx.userId, role: ctx.role }
+      : null;
+    const digest = scope ? await ledgerDigest(q, scope) : [];
+    return { run, history: history.reverse(), config: ws?.config ?? {}, profile: profile?.profile ?? {}, resolved, files, scope, digest };
   });
   if (!setup) return;
-  const { run, history, config, profile, resolved, files } = setup;
+  const { run, history, config, profile, resolved, files, scope, digest } = setup;
+  const latest: any = [...history].reverse().find((h: any) => h.role === 'user');
+  const fresh = !!latest && (latest.meta?.fresh === true || wantsFresh(String(latest.content ?? '')));
+  const reuse = { scope: fresh ? null : scope, remember: scope };
   const fileById = new Map(files.map((f) => [f.id, f]));
 
   const finish = async (status: 'completed' | 'failed' | 'waiting_approval', text: string, usage: { i: number; o: number }, error?: string, refs: unknown[] = [], meta?: ReplyMeta & { artifacts?: Artifact[] }) => {
@@ -156,6 +165,13 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     `Workspace terminology and statuses: ${JSON.stringify({ terminology: config.terminology, taskStatuses: config.taskStatuses })}`,
     FILES_AND_CHARTS,
     KNOWLEDGE_AND_CONNECTORS,
+    ...(fresh
+      ? ['The user asked for current data: every lookup in this reply runs again now.']
+      : digest.length
+        ? [
+            `Already looked up in this conversation and still current (nothing it depends on changed in Qline). Repeating the identical call returns that saved result instantly; only make a new call if you need different data:\n${untrusted('conversation_context', digest.join('\n'))}`,
+          ]
+        : []),
     META_INSTRUCTIONS,
   ].join('\n\n');
 
@@ -220,7 +236,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
       for (const call of calls) {
         toolCount += 1;
         const name = fromModelName(call.function.name);
-        const result = await handleToolCall(ctx, run, name, call, toolCount, allow, policy, emit);
+        const result = await handleToolCall(ctx, run, name, call, toolCount, allow, policy, emit, reuse);
         if (result.parked) parked = true;
         if (result.refs) refs.push(...result.refs);
         for (const a of result.artifacts ?? []) {
@@ -265,6 +281,7 @@ async function handleToolCall(
   allow: string[],
   policy: { relaxed?: string[]; tightened?: string[] },
   emit: Emit,
+  reuse: { scope: LedgerScope | null; remember: LedgerScope | null } = { scope: null, remember: null },
 ): Promise<{ forModel: unknown; parked?: boolean; refs?: unknown[]; artifacts?: Artifact[] }> {
   const db = <T,>(fn: (q: Q) => Promise<T>) => withTenant({ orgId: ctx.orgId, userId: ctx.userId, runKind: 'interactive' }, fn);
   const tool = getTool(name);
@@ -290,6 +307,31 @@ async function handleToolCall(
     return { forModel: { ok: false, error: 'Invalid arguments', issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) } };
   }
   const preview = tool.preview(parsed.data);
+  // M2: the same read already done in this conversation, still valid → answer from it instead of running it again.
+  const reusing = reusable(name) && decision.decision === 'allow';
+  if (reusing && reuse.scope) {
+    const scope = reuse.scope;
+    const hit = await db(async (q) => {
+      const e = await findReusable(q, scope, name, parsed.data);
+      if (!e) return null;
+      const row = await q.one<{ id: string }>(
+        `insert into tool_calls (org_id, run_id, tool, args, risk, policy_decision, idempotency_key, status, result_summary, result_refs, reused_context_id, finished_at)
+         values ($1,$2,$3,$4,$5,'allow',$6,'succeeded',$7,$8,$9,now()) on conflict (org_id, idempotency_key) do nothing returning id`,
+        [ctx.orgId, run.id, name, JSON.stringify(parsed.data), decision.risk, idem, e.summary, JSON.stringify(e.refs), e.id],
+      );
+      return row ? { e, id: row.id } : null;
+    });
+    if (hit) {
+      const ageSec = Math.max(0, Math.round((Date.now() - new Date(hit.e.created_at).getTime()) / 1000));
+      const ago = ageSec < 60 ? 'just now' : `${Math.round(ageSec / 60)} min ago`;
+      await emit('tool.planned', { stepId: hit.id, tool: name, summary: preview.title, decision: 'allow' });
+      await emit('tool.result', { stepId: hit.id, ok: true, reused: true, summary: `${hit.e.summary} (from earlier in this chat, ${ago})`, refs: hit.e.refs });
+      return {
+        forModel: { ok: true, summary: hit.e.summary, data: hit.e.data ?? null, reused: { ageSec, note: 'Saved result from earlier in this conversation; nothing it depends on has changed in Qline since.' } },
+        refs: hit.e.refs,
+      };
+    }
+  }
   // Intent is committed before any provider call ('executing' when it will run now). A full-autopilot action in a
   // connected app takes its slot in the daily allowance atomically here, or falls back to asking a human (M1).
   const tc = await db(async (q) => {
@@ -340,15 +382,32 @@ async function handleToolCall(
   const tracked = await trackExternal(
     () =>
       db(async (q) => {
+        const snap = reusing && reuse.remember ? await currentSnapshot(q) : null;
+        const t0 = Date.now();
         const r = await tool.execute(q, { orgId: ctx.orgId, workspaceId: ctx.workspaceId, userId: ctx.userId, actor: { kind: 'agent', id: run.agent_id }, interactive: true }, parsed.data);
         await q.exec(`update tool_calls set status=$2, result_summary=$3, result_refs=$4, finished_at=now() where id=$1`, [tc!.id, r.ok ? 'succeeded' : 'failed', r.summary, JSON.stringify(r.refs)]);
         await settleReservation(q, tc!.id, r.ok ? 'succeeded' : 'failed');
-        return r;
+        return { r, snap, ms: Date.now() - t0, xid: snap ? await ownXid(q) : null };
       }),
     { idempotencyKey: `qline-${tc!.id}` },
   );
   if (tracked.ok) {
-    const result = tracked.value;
+    const { r: result, snap, ms, xid } = tracked.value;
+    // Failures and results that show something in the chat are never reused.
+    if (snap && reuse.remember && result.ok && !result.artifacts?.length) {
+      await remember(reuse.remember, {
+        tool: name,
+        args: parsed.data,
+        summary: result.summary,
+        data: result.data ?? null,
+        refs: result.refs,
+        toolCallId: tc!.id,
+        snapshot: snap,
+        ownXid: xid,
+        durationMs: ms,
+        providerReads: tracked.trace.reads ?? 0,
+      }).catch(() => {}); // the ledger is an optimisation: never fail a reply over it
+    }
     await emit('tool.result', { stepId: tc!.id, ok: result.ok, summary: result.summary, refs: result.refs });
     return { forModel: { ok: result.ok, summary: result.summary, data: result.data ?? null, ...(result.artifacts?.length ? { shown: `${result.artifacts.length} item(s) shown in the chat` } : {}) }, refs: result.refs, artifacts: result.artifacts };
   }

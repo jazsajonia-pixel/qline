@@ -109,9 +109,9 @@ unknown actions (API only in M1).
 
 | Run | Milestones |
 |---|---|
-| 1 (this) | Phase 0 audit + M1 action safety |
-| 2 | M2 conversation resume / New Chat + context ledger, M3 Markdown + collapsed tool trace with friendly names, unknown-action UI |
-| 3 | M4 knowledge canvas + in-chat Knowledge toggle, M5 Android Back exit confirm, and as much of M10 (Gemini keys) / M11 (OAuth timeouts, single-flight refresh) as fits |
+| 1 | Phase 0 audit + M1 action safety |
+| 2 | M2 conversation resume / New Chat + context ledger (docs/18). M3 and the unknown-action UI moved to run 3. |
+| 3 | M3 Markdown + collapsed tool trace with friendly names, unknown-action UI, M4 knowledge canvas + in-chat Knowledge toggle, M5 Android Back exit confirm, and as much of M10 (Gemini keys) / M11 (OAuth timeouts, single-flight refresh) as fits |
 
 M6 live voice, M7 Drive files/inline images, M8 customization, M9 custom agents need their own runs; they will not
 be done properly inside three runs.
