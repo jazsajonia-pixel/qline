@@ -45,6 +45,7 @@ class SettingsScreen extends ConsumerWidget {
                   }
                 },
         ),
+        nav(Icons.devices_outlined, 'Signed-in devices', 'See where you are signed in, sign out other devices', const SessionsScreen()),
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('Organisation')),
         nav(Icons.flag_outlined, 'Missions & emergency stop', 'AI CEO plans, pause, stop everything', const MissionsScreen()),
         nav(Icons.bolt_outlined, 'AI autonomy', 'What the AI can do without asking', const AutonomyScreen()),
@@ -186,6 +187,70 @@ String _roleHelp(String r) => switch (r) {
       'member' => 'Work with tasks, contacts and AI',
       _ => 'Read only',
     };
+
+/// Where this account is signed in. Tokens never reach the app; only ids and device details.
+class SessionsScreen extends ConsumerWidget {
+  const SessionsScreen({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    return Page2(
+      title: 'Signed-in devices',
+      body: Load<List<Map<String, dynamic>>>(
+        fetch: (api) async => items(await api.get('/me/sessions')),
+        builder: (context, list, reload) {
+          final others = list.where((x) => x['current'] != true).length;
+          return RefreshIndicator(
+            onRefresh: reload,
+            child: ListView(padding: const EdgeInsets.symmetric(vertical: 8), children: [
+              for (final x in list)
+                ListTile(
+                  leading: Icon(x['current'] == true ? Icons.smartphone : Icons.devices_other_outlined),
+                  title: Text(deviceLabel(x['userAgent'] as String?) + (x['current'] == true ? ' · this device' : '')),
+                  subtitle: Text('Last active ${ago(x['updatedAt'] as String?)} · signed in ${ago(x['createdAt'] as String?)}', style: qs(12, c: q.text3)),
+                  trailing: x['current'] == true
+                      ? null
+                      : IconButton(
+                          tooltip: 'Sign out this device',
+                          icon: const Icon(Icons.logout),
+                          onPressed: () async {
+                            await act(context, ref, (api) => api.delete('/me/sessions/${x['id']}'), ok: 'Signed out');
+                            await reload();
+                          },
+                        ),
+                ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: QButton(others == 0 ? 'No other devices' : 'Sign out $others other device${others == 1 ? '' : 's'}', kind: QBtn.destructive, expand: true, onPressed: others == 0
+                    ? null
+                    : () async {
+                        if (await confirm(context, title: 'Sign out other devices?', body: 'Every other phone or browser signed in to this account will need the password again. This device stays signed in.', action: 'Sign out others', destructive: true)) {
+                          if (!context.mounted) return;
+                          await act(context, ref, (api) => api.post('/me/sessions/revoke-others'), ok: 'Other devices signed out');
+                          await reload();
+                        }
+                      }),
+              ),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// A short readable device name from a user agent.
+String deviceLabel(String? ua) {
+  final u = (ua ?? '').toLowerCase();
+  if (u.isEmpty) return 'Unknown device';
+  if (u.contains('dart') || u.contains('qline')) return 'Qline app';
+  if (u.contains('android')) return 'Android browser';
+  if (u.contains('iphone') || u.contains('ipad')) return 'iPhone or iPad';
+  if (u.contains('windows')) return 'Windows browser';
+  if (u.contains('mac os')) return 'Mac browser';
+  if (u.contains('linux')) return 'Linux browser';
+  return 'Browser';
+}
 
 class AuditScreen extends ConsumerWidget {
   const AuditScreen({super.key});
