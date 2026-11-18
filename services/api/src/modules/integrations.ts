@@ -25,7 +25,7 @@ import {
   type OAuthProvider,
 } from '../integrations/oauth';
 import { classify, loadRules, rulesSchema, saveRules, syncConnection } from '../integrations/leads';
-import { formCreate, sheetCreate, slackChannels, slackPost, upcomingEvents } from '../integrations/services';
+import { formCreate, sheetCreate, slackChannels, slackPost, slackRevoke, upcomingEvents } from '../integrations/services';
 import { open } from '../core/secrets';
 import { finishGoogleSignIn, SIGNIN_STATE_PREFIX } from './google-signin';
 import { complete } from '@qline/ai';
@@ -173,10 +173,11 @@ integrationRoutes.delete('/integrations/:provider', async (c) => {
   const p = providerParam(c.req.param('provider'));
   const conn = await tx(t, (q) => q.one('select * from integration_connections where provider=$1', [p]));
   if (!conn) throw notFound('Connection');
-  if (p === 'google') {
+  if (p === 'google' || p === 'slack') {
     try {
       const tok = JSON.parse(open(conn.token_ciphertext, `oauth:${t.orgId}:${p}`));
-      await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tok.refresh_token ?? tok.access_token)}`, { method: 'POST' });
+      if (p === 'google') await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tok.refresh_token ?? tok.access_token)}`, { method: 'POST', signal: AbortSignal.timeout(10_000) });
+      else await slackRevoke(tok.access_token);
     } catch {
       /* best effort */
     }

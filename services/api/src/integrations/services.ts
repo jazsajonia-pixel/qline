@@ -312,11 +312,51 @@ export async function formResponses(token: string, id: string, afterIso: string 
 }
 
 // ---- Slack ------------------------------------------------------------------------------------
-export async function slackChannels(token: string) {
-  const r = await api(token, 'https://slack.com/api/conversations.list?types=public_channel&exclude_archived=true&limit=200');
-  return (r.channels ?? []).map((c: any) => ({ id: c.id as string, name: c.name as string }));
+/**
+ * Slack treats `<...>` as control syntax (`<!channel>`, `<@U123>`, `<https://x|label>`), so text from
+ * emails, forms or a model could ping everyone or disguise a link. Escape &, < and > (Slack's documented rule).
+ */
+export const slackEscape = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** Slack errors that mean the connection itself is gone, so the user has to reconnect. */
+const SLACK_GONE = new Set(['token_revoked', 'invalid_auth', 'account_inactive', 'not_authed', 'token_expired', 'team_access_not_granted']);
+const SLACK_HINT: Record<string, string> = {
+  channel_not_found: 'That Slack channel no longer exists or is private. Pick another channel in Settings → Integrations → Slack.',
+  is_archived: 'That Slack channel is archived. Pick another channel in Settings → Integrations → Slack.',
+  not_in_channel: 'Qline is not in that channel. Invite the Qline app to it, or pick a public channel.',
+  restricted_action: 'Your Slack workspace does not allow apps to post in that channel.',
+  missing_scope: 'Qline is missing a Slack permission. Reconnect Slack in Settings → Integrations.',
+  ratelimited: 'Slack is rate-limiting Qline. Try again in a minute.',
+  msg_too_long: 'The message is too long for Slack.',
+};
+function slackError(e: unknown): Error {
+  const code = (e as Error).message;
+  if (SLACK_GONE.has(code)) return Object.assign(new Error(`Slack removed Qline's access (${code}). Reconnect Slack in Settings → Integrations.`), { status: 401, slack: code });
+  return Object.assign(new Error(SLACK_HINT[code] ? `${SLACK_HINT[code]} (${code})` : `Slack error: ${code}`), { status: (e as any).status, slack: code });
 }
 
-export async function slackPost(token: string, channel: string, text: string) {
-  return api(token, 'https://slack.com/api/chat.postMessage', { body: { channel, text, unfurl_links: false } });
+export async function slackChannels(token: string) {
+  const out: { id: string; name: string }[] = [];
+  let cursor = '';
+  // Page through (Slack returns at most 1000 per page; stop at 2000 to bound the call).
+  for (let page = 0; page < 10 && out.length < 2000; page++) {
+    const r = await api(token, `https://slack.com/api/conversations.list?types=public_channel&exclude_archived=true&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`).catch((e) => {
+      throw slackError(e);
+    });
+    for (const c of r.channels ?? []) out.push({ id: c.id as string, name: c.name as string });
+    cursor = r.response_metadata?.next_cursor ?? '';
+    if (!cursor) break;
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Posts `text` escaped. Pass `{ formatted: true }` only for text Qline built itself with escaped parts. */
+export async function slackPost(token: string, channel: string, text: string, opts: { formatted?: boolean } = {}) {
+  return api(token, 'https://slack.com/api/chat.postMessage', { body: { channel, text: opts.formatted ? text : slackEscape(text), unfurl_links: false, unfurl_media: false } }).catch((e) => {
+    throw slackError(e);
+  });
+}
+
+export async function slackRevoke(token: string) {
+  await api(token, 'https://slack.com/api/auth.revoke', { body: {} }).catch(() => undefined);
 }

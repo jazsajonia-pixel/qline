@@ -13,6 +13,7 @@ import {
   sheetAppend,
   sheetRows,
   sheetSetCell,
+  slackEscape,
   slackPost,
   type InboundMail,
 } from './services';
@@ -278,7 +279,9 @@ export async function afterProcessed(c: SyncCtx, items: Processed[]) {
     try {
       const token = await withTenant({ orgId: c.orgId, userId: c.userId }, (q) => accessToken(q, slack));
       const tag = l.urgency === 'urgent' ? ':rotating_light: *Urgent lead*' : rank(l.urgency) >= 2 ? ':fire: *Hot lead*' : ':sparkles: *New lead*';
-      await slackPost(token, channel, `${tag} — ${l.name}${l.email ? ` <mailto:${l.email}|${l.email}>` : ''}\n${l.summary}\n_via ${l.source} · Qline_`);
+      // Sender name, address and summary come from outside (emails, forms), so they are escaped; only Qline's own markup is live.
+      const email = l.email && /^[^\s@<>|]+@[^\s@<>|]+\.[^\s@<>|]+$/.test(l.email) ? l.email : null;
+      await slackPost(token, channel, `${tag} — ${slackEscape(l.name ?? 'Someone')}${email ? ` <mailto:${email}|${slackEscape(email)}>` : ''}\n${slackEscape(l.summary ?? '')}\n_via ${slackEscape(l.source)} · Qline_`, { formatted: true });
     } catch (e) {
       console.error('slack alert failed', (e as Error).message);
     }

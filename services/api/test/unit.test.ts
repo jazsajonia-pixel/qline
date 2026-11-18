@@ -262,3 +262,58 @@ describe('workflow definitions (M4)', () => {
     expect(mk('brief')).toBe(true);
   });
 });
+
+describe('Slack hardening (audit)', () => {
+  const realFetch = globalThis.fetch;
+  const reply = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  it('escapes Slack control syntax so outside text cannot ping or disguise links', async () => {
+    const { slackEscape } = await import('../src/integrations/services');
+    expect(slackEscape('<!channel> & <https://evil.example|Verify invoice>')).toBe('&lt;!channel&gt; &amp; &lt;https://evil.example|Verify invoice&gt;');
+    expect(slackEscape(':wave: *bold* _it_')).toBe(':wave: *bold* _it_');
+  });
+
+  it('slackPost escapes by default and keeps Qline-built markup only when formatted', async () => {
+    const { slackPost } = await import('../src/integrations/services');
+    const sent: any[] = [];
+    globalThis.fetch = (async (_u: any, init: any) => {
+      sent.push(JSON.parse(init.body));
+      return reply({ ok: true });
+    }) as any;
+    try {
+      await slackPost('t', 'C1', 'hi <!here>');
+      await slackPost('t', 'C1', '<mailto:a@b.co|a@b.co>', { formatted: true });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(sent[0].text).toBe('hi &lt;!here&gt;');
+    expect(sent[0].unfurl_links).toBe(false);
+    expect(sent[1].text).toBe('<mailto:a@b.co|a@b.co>');
+  });
+
+  it('slackChannels follows Slack pagination cursors', async () => {
+    const { slackChannels } = await import('../src/integrations/services');
+    const urls: string[] = [];
+    globalThis.fetch = (async (u: any) => {
+      urls.push(String(u));
+      return String(u).includes('cursor=') ? reply({ ok: true, channels: [{ id: 'C2', name: 'alerts' }], response_metadata: { next_cursor: '' } }) : reply({ ok: true, channels: [{ id: 'C1', name: 'general' }], response_metadata: { next_cursor: 'abc' } });
+    }) as any;
+    try {
+      const list = await slackChannels('t');
+      expect(list.map((c) => c.name)).toEqual(['alerts', 'general']);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain('cursor=abc');
+  });
+
+  it('turns Slack error codes into readable, actionable messages', async () => {
+    const { slackPost } = await import('../src/integrations/services');
+    globalThis.fetch = (async () => reply({ ok: false, error: 'token_revoked' })) as any;
+    await expect(slackPost('t', 'C1', 'x')).rejects.toThrow(/Reconnect Slack/);
+    globalThis.fetch = (async () => reply({ ok: false, error: 'not_in_channel' })) as any;
+    await expect(slackPost('t', 'C1', 'x')).rejects.toThrow(/Invite the Qline app/);
+    globalThis.fetch = realFetch;
+  });
+});
