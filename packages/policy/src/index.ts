@@ -155,6 +155,13 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'agents.status': { risk: 'L0', templates: T('ceo'), decision: 'allow', requires: 'agents.use' },
   'slack.channel.create': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'integrations.manage' },
   'slack.channel.topic': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'integrations.manage' },
+  // v1.6 run 2: files sent in chat, charts and images in replies
+  'files.read': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
+  'chart.business': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'chart.create': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'agents.use' },
+  'image.show': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
+  'files.save_to_library': { risk: 'L1', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.write' },
+  'files.import_records': { risk: 'L2', templates: T('ceo', 'sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'imports.run', relaxable: true },
   'calendar.invite.send': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
   'social.publish': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
 };

@@ -4,6 +4,7 @@ import Papa from 'papaparse';
 import { z } from 'zod';
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { audit } from '../core/audit';
+import type { Q } from '../core/db';
 import { need, requireTenant, requireUser, tx, type Env } from '../core/context';
 import { env } from '../core/env';
 import { ApiError, badRequest, notFound } from '../core/errors';
@@ -26,10 +27,19 @@ function client() {
   if (!s3) s3 = new S3Client({ endpoint: process.env.AWS_ENDPOINT_URL_S3, region: process.env.AWS_REGION ?? 'ap-southeast-1', forcePathStyle: true });
   return s3;
 }
+// Tests only: an in-memory store when no bucket is configured. Never used outside NODE_ENV=test.
+const memStore = new Map<string, Uint8Array>();
+const useMem = () => process.env.NODE_ENV === 'test' && !storageConfigured();
 export async function putObject(key: string, bytes: Uint8Array, mime: string) {
+  if (useMem()) return void memStore.set(key, bytes);
   await client().send(new PutObjectCommand({ Bucket: env.bucket, Key: key, Body: bytes, ContentType: mime }));
 }
 export async function getObject(key: string): Promise<Uint8Array> {
+  if (useMem()) {
+    const b = memStore.get(key);
+    if (!b) throw notFound('File');
+    return b;
+  }
   const r = await client().send(new GetObjectCommand({ Bucket: env.bucket, Key: key }));
   return new Uint8Array(await r.Body!.transformToByteArray());
 }
@@ -46,7 +56,7 @@ export async function storageReady(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // Validation + parsing (docs/08 §2)
 // ---------------------------------------------------------------------------
-type Format = 'csv' | 'xlsx' | 'json' | 'txt' | 'md' | 'pdf' | 'docx';
+export type Format = 'csv' | 'xlsx' | 'json' | 'txt' | 'md' | 'pdf' | 'docx';
 const EXT: Record<string, Format> = { csv: 'csv', xlsx: 'xlsx', json: 'json', txt: 'txt', md: 'md', markdown: 'md', pdf: 'pdf', docx: 'docx' };
 export const RECORD_FORMATS: Format[] = ['csv', 'xlsx', 'json'];
 
@@ -148,7 +158,7 @@ export const TARGETS = {
   companies: ['name', 'domain', 'notes'],
   tasks: ['title', 'description', 'status', 'priority', 'dueAt'],
 } as const;
-type Target = keyof typeof TARGETS;
+export type Target = keyof typeof TARGETS;
 
 const SYNONYMS: Record<string, string[]> = {
   name: ['name', 'full name', 'contact', 'contact name', 'client', 'client name', 'customer', 'company name'],
@@ -167,15 +177,18 @@ const SYNONYMS: Record<string, string[]> = {
 
 const norm = (s: string) => s.toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
 
+/** Best column for each field of one target (by header synonyms). */
+export function fieldsFor(columns: string[], target: Target): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const f of TARGETS[target]) {
+    const col = columns.find((c) => SYNONYMS[f]?.includes(norm(c))) ?? columns.find((c) => SYNONYMS[f]?.some((s) => norm(c).includes(s)));
+    if (col && !Object.values(fields).includes(col)) fields[f] = col;
+  }
+  return fields;
+}
+
 export function suggestMapping(columns: string[]): { target: Target; fields: Record<string, string> } {
-  const score = (target: Target) => {
-    const fields: Record<string, string> = {};
-    for (const f of TARGETS[target]) {
-      const col = columns.find((c) => SYNONYMS[f]?.includes(norm(c))) ?? columns.find((c) => SYNONYMS[f]?.some((s) => norm(c).includes(s)));
-      if (col && !Object.values(fields).includes(col)) fields[f] = col;
-    }
-    return fields;
-  };
+  const score = (target: Target) => fieldsFor(columns, target);
   const c = score('contacts');
   const t = score('tasks');
   const co = score('companies');
@@ -189,6 +202,123 @@ function parseDate(s: string): string | null {
   if (!s) return null;
   const d = new Date(s);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+
+/** Writes parsed rows (or a document) for an import job. Shared by the Imports screen and the AI's files.import_records (v1.6). */
+export async function importParsed(
+  q: Q,
+  t: { orgId: string; workspaceId: string; userId: string },
+  actor: { kind: 'user' | 'agent'; id: string },
+  job: { id: string; file_id: string; file_name: string; mapping: unknown },
+  parsed: Parsed,
+): Promise<{ ok: number; skipped: number; errors: { row: number; message: string }[] }> {
+  const src = { kind: 'import', ref: `import:${job.id}`, importJobId: job.id };
+  let ok = 0;
+  let skipped = 0;
+  const errors: { row: number; message: string }[] = [];
+  if (parsed.kind === 'document') {
+    const title = job.file_name.replace(/\.[^.]+$/, '');
+    await q.exec(
+      `insert into documents (org_id, workspace_id, file_id, kind, title, body, folder, source_kind, source_ref, import_job_id, created_by) values ($1,$2,$3,'document',$4,$5,'Imported','import',$6,$7,$8)`,
+      [t.orgId, t.workspaceId, job.file_id, title, parsed.text ?? '', `import:${job.id}`, job.id, `user:${t.userId}`],
+    );
+    ok = 1;
+  } else {
+    const m = job.mapping as { target: Target; fields: Record<string, string>; duplicates: 'skip' | 'create' };
+    const get = (row: Record<string, string>, f: string) => (m.fields[f] ? (row[m.fields[f]] ?? '').toString().trim() : '');
+    const seen = new Set<string>();
+    const existingEmails = new Set<string>(
+      m.target === 'contacts' ? (await q.many(`select lower(email) as e from contacts where deleted_at is null and email is not null`)).map((r) => r.e) : [],
+    );
+    const existingCompanies = new Map<string, string>((await q.many(`select id, lower(name) as n from companies where deleted_at is null`)).map((r) => [r.n, r.id]));
+    for (let i = 0; i < parsed.rows.length; i++) {
+      const row = parsed.rows[i];
+      try {
+        if (m.target === 'contacts') {
+          const email = get(row, 'email').toLowerCase() || null;
+          if (email && m.duplicates === 'skip' && (existingEmails.has(email) || seen.has(email))) {
+            skipped++;
+            continue;
+          }
+          let companyId: string | null = null;
+          const companyName = get(row, 'company');
+          if (companyName) {
+            companyId = existingCompanies.get(companyName.toLowerCase()) ?? null;
+            if (!companyId) {
+              const co = await q.one(`insert into companies (org_id, workspace_id, name, source_kind, source_ref, import_job_id, created_by) values ($1,$2,$3,'import',$4,$5,$6) returning id`, [
+                t.orgId,
+                t.workspaceId,
+                companyName,
+                `import:${job.id}`,
+                job.id,
+                `user:${t.userId}`,
+              ]);
+              companyId = co.id;
+              existingCompanies.set(companyName.toLowerCase(), co.id);
+            }
+          }
+          const input = contactInput.safeParse({
+            name: get(row, 'name'),
+            email: email || undefined,
+            phone: get(row, 'phone') || undefined,
+            title: get(row, 'title') || undefined,
+            stage: get(row, 'stage') || undefined,
+            notes: get(row, 'notes') || undefined,
+            companyId,
+          });
+          if (!input.success) throw new Error(input.error.issues.map((x) => `${x.path.join('.')}: ${x.message}`).join('; '));
+          await createContact(q, t, actor, input.data, src);
+          if (email) seen.add(email);
+        } else if (m.target === 'companies') {
+          const name = get(row, 'name');
+          if (!name) throw new Error('name is empty');
+          if (m.duplicates === 'skip' && existingCompanies.has(name.toLowerCase())) {
+            skipped++;
+            continue;
+          }
+          const co = await q.one(`insert into companies (org_id, workspace_id, name, domain, notes, source_kind, source_ref, import_job_id, created_by) values ($1,$2,$3,$4,$5,'import',$6,$7,$8) returning id`, [
+            t.orgId,
+            t.workspaceId,
+            name,
+            get(row, 'domain') || null,
+            get(row, 'notes') || null,
+            `import:${job.id}`,
+            job.id,
+            `user:${t.userId}`,
+          ]);
+          existingCompanies.set(name.toLowerCase(), co.id);
+        } else {
+          const title = get(row, 'title');
+          if (!title) throw new Error('title is empty');
+          const pr = get(row, 'priority').toLowerCase();
+          await createTask(
+            q,
+            t,
+            actor,
+            {
+              title: title.slice(0, 300),
+              description: get(row, 'description') || null,
+              status: get(row, 'status') ? get(row, 'status').toLowerCase().replace(/\s+/g, '_') : undefined,
+              priority: (['low', 'normal', 'high', 'urgent'].includes(pr) ? pr : undefined) as any,
+              dueAt: parseDate(get(row, 'dueAt')),
+            },
+            src,
+          );
+        }
+        ok++;
+      } catch (e) {
+        if (errors.length < 500) errors.push({ row: i + 2, message: (e as Error).message.slice(0, 200) });
+      }
+    }
+    if (!ok && errors.length) {
+      // nothing imported: still a completed job with a clear report
+    }
+    await audit(q, { orgId: t.orgId, actorKind: actor.kind, actorId: actor.id, action: 'import.completed', targetRef: `import:${job.id}`, detail: { ok, skipped, failed: errors.length, target: m.target } });
+    return { ok, skipped, errors };
+  }
+  await audit(q, { orgId: t.orgId, actorKind: actor.kind, actorId: actor.id, action: 'import.completed', targetRef: `import:${job.id}`, detail: { ok, target: 'documents' } });
+  return { ok, skipped, errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -293,115 +423,8 @@ importRoutes.post('/imports/:id/run', async (c) => {
   try {
     const bytes = await getObject(job.storage_key);
     const parsed = await parseFile(job.format, bytes);
-    const src = { kind: 'import', ref: `import:${job.id}`, importJobId: job.id };
     const actor = { kind: 'user' as const, id: t.userId };
-    const result = await tx(t, async (q) => {
-      let ok = 0;
-      let skipped = 0;
-      const errors: { row: number; message: string }[] = [];
-      if (parsed.kind === 'document') {
-        const title = job.file_name.replace(/\.[^.]+$/, '');
-        await q.exec(
-          `insert into documents (org_id, workspace_id, file_id, kind, title, body, folder, source_kind, source_ref, import_job_id, created_by) values ($1,$2,$3,'document',$4,$5,'Imported','import',$6,$7,$8)`,
-          [t.orgId, t.workspaceId, job.file_id, title, parsed.text ?? '', `import:${job.id}`, job.id, `user:${t.userId}`],
-        );
-        ok = 1;
-      } else {
-        const m = job.mapping as { target: Target; fields: Record<string, string>; duplicates: 'skip' | 'create' };
-        const get = (row: Record<string, string>, f: string) => (m.fields[f] ? (row[m.fields[f]] ?? '').toString().trim() : '');
-        const seen = new Set<string>();
-        const existingEmails = new Set<string>(
-          m.target === 'contacts' ? (await q.many(`select lower(email) as e from contacts where deleted_at is null and email is not null`)).map((r) => r.e) : [],
-        );
-        const existingCompanies = new Map<string, string>((await q.many(`select id, lower(name) as n from companies where deleted_at is null`)).map((r) => [r.n, r.id]));
-        for (let i = 0; i < parsed.rows.length; i++) {
-          const row = parsed.rows[i];
-          try {
-            if (m.target === 'contacts') {
-              const email = get(row, 'email').toLowerCase() || null;
-              if (email && m.duplicates === 'skip' && (existingEmails.has(email) || seen.has(email))) {
-                skipped++;
-                continue;
-              }
-              let companyId: string | null = null;
-              const companyName = get(row, 'company');
-              if (companyName) {
-                companyId = existingCompanies.get(companyName.toLowerCase()) ?? null;
-                if (!companyId) {
-                  const co = await q.one(`insert into companies (org_id, workspace_id, name, source_kind, source_ref, import_job_id, created_by) values ($1,$2,$3,'import',$4,$5,$6) returning id`, [
-                    t.orgId,
-                    t.workspaceId,
-                    companyName,
-                    `import:${job.id}`,
-                    job.id,
-                    `user:${t.userId}`,
-                  ]);
-                  companyId = co.id;
-                  existingCompanies.set(companyName.toLowerCase(), co.id);
-                }
-              }
-              const input = contactInput.safeParse({
-                name: get(row, 'name'),
-                email: email || undefined,
-                phone: get(row, 'phone') || undefined,
-                title: get(row, 'title') || undefined,
-                stage: get(row, 'stage') || undefined,
-                notes: get(row, 'notes') || undefined,
-                companyId,
-              });
-              if (!input.success) throw new Error(input.error.issues.map((x) => `${x.path.join('.')}: ${x.message}`).join('; '));
-              await createContact(q, t, actor, input.data, src);
-              if (email) seen.add(email);
-            } else if (m.target === 'companies') {
-              const name = get(row, 'name');
-              if (!name) throw new Error('name is empty');
-              if (m.duplicates === 'skip' && existingCompanies.has(name.toLowerCase())) {
-                skipped++;
-                continue;
-              }
-              const co = await q.one(`insert into companies (org_id, workspace_id, name, domain, notes, source_kind, source_ref, import_job_id, created_by) values ($1,$2,$3,$4,$5,'import',$6,$7,$8) returning id`, [
-                t.orgId,
-                t.workspaceId,
-                name,
-                get(row, 'domain') || null,
-                get(row, 'notes') || null,
-                `import:${job.id}`,
-                job.id,
-                `user:${t.userId}`,
-              ]);
-              existingCompanies.set(name.toLowerCase(), co.id);
-            } else {
-              const title = get(row, 'title');
-              if (!title) throw new Error('title is empty');
-              const pr = get(row, 'priority').toLowerCase();
-              await createTask(
-                q,
-                t,
-                actor,
-                {
-                  title: title.slice(0, 300),
-                  description: get(row, 'description') || null,
-                  status: get(row, 'status') ? get(row, 'status').toLowerCase().replace(/\s+/g, '_') : undefined,
-                  priority: (['low', 'normal', 'high', 'urgent'].includes(pr) ? pr : undefined) as any,
-                  dueAt: parseDate(get(row, 'dueAt')),
-                },
-                src,
-              );
-            }
-            ok++;
-          } catch (e) {
-            if (errors.length < 500) errors.push({ row: i + 2, message: (e as Error).message.slice(0, 200) });
-          }
-        }
-        if (!ok && errors.length) {
-          // nothing imported: still a completed job with a clear report
-        }
-        await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'import.completed', targetRef: `import:${job.id}`, detail: { ok, skipped, failed: errors.length, target: m.target } });
-        return { ok, skipped, errors };
-      }
-      await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'import.completed', targetRef: `import:${job.id}`, detail: { ok, target: 'documents' } });
-      return { ok, skipped, errors };
-    });
+    const result = await tx(t, (q) => importParsed(q, t, actor, job, parsed));
     const done = await tx(t, (q) =>
       q.one(`update import_jobs set status='completed', rows_ok=$2, rows_skipped=$3, rows_failed=$4, errors=$5, completed_at=now() where id=$1 returning *`, [
         job.id,

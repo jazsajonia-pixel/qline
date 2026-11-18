@@ -142,3 +142,20 @@ describe('v1.6 automatic agent switching', () => {
     expect(routeAgent('Research our competitors', ['ceo', 'sales'])).toBe('ceo');
   });
 });
+
+describe('v1.6 file and chart tools', () => {
+  const ceo = defaultAllowlist('ceo');
+  const research = defaultAllowlist('research');
+  it('reading files and showing charts or images never needs approval', () => {
+    for (const tool of ['files.read', 'chart.business', 'chart.create', 'image.show', 'files.save_to_library']) {
+      expect(decideTool({ tool, allowlist: research, userRole: 'member' }).decision).toBe('allow');
+    }
+  });
+  it('importing rows from a file asks first unless autopilot, and needs the imports permission', () => {
+    expect(research).not.toContain('files.import_records');
+    expect(decideTool({ tool: 'files.import_records', allowlist: ceo, userRole: 'owner' }).decision).toBe('require_approval');
+    expect(decideTool({ tool: 'files.import_records', allowlist: ceo, userRole: 'owner', autonomy: 'autopilot' }).decision).toBe('allow');
+    expect(decideTool({ tool: 'files.import_records', allowlist: ceo, userRole: 'member', autonomy: 'full' }).decision).toBe('deny');
+    expect(decideTool({ tool: 'files.import_records', allowlist: ceo, userRole: 'owner', autonomy: 'full', stopped: true }).decision).toBe('deny');
+  });
+});

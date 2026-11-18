@@ -17,8 +17,15 @@ export interface ToolSpec {
   parameters: Record<string, unknown>; // JSON schema
 }
 
+/** An image sent with a user message (v1.6). Base64 without the data: prefix. */
+export interface ChatImage {
+  mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+  data: string;
+}
+
 export type ChatMessage =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string; images?: ChatImage[] }
   | { role: 'assistant'; content: string | null; tool_calls?: ToolCallReq[]; reasoning_content?: string }
   | { role: 'tool'; tool_call_id: string; content: string };
 
@@ -59,7 +66,7 @@ export class ProviderError extends Error {
 
 export interface ChatProvider {
   id: string;
-  capabilities: { tools: boolean; streaming: boolean };
+  capabilities: { tools: boolean; streaming: boolean; vision?: boolean };
   stream(req: ChatRequest, signal?: AbortSignal): AsyncIterable<ChatEvent>;
 }
 
@@ -201,18 +208,26 @@ export interface OpenAICompatOptions {
   tokenParam?: 'max_tokens' | 'max_completion_tokens';
   /** Send back assistant reasoning_content on tool-call turns (DeepSeek thinking mode). */
   echoReasoning?: boolean;
+  /** Accepts image parts in user messages (default true). */
+  vision?: boolean;
   fetchImpl?: typeof fetch;
 }
 
 export class OpenAICompatProvider implements ChatProvider {
   id: string;
-  capabilities = { tools: true, streaming: true };
+  capabilities: { tools: boolean; streaming: boolean; vision: boolean };
   constructor(private o: OpenAICompatOptions) {
     this.id = o.id;
+    this.capabilities = { tools: true, streaming: true, vision: o.vision !== false };
   }
 
   buildBody(req: ChatRequest): Record<string, unknown> {
     const messages = req.messages.map((m) => {
+      if (m.role === 'user') {
+        // Images go as content parts; providers without vision get the text only.
+        if (!m.images?.length || !this.capabilities.vision) return { role: 'user', content: m.content };
+        return { role: 'user', content: [{ type: 'text', text: m.content || ' ' }, ...m.images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.data}` } }))] };
+      }
       if (m.role !== 'assistant') return m;
       const out: Record<string, unknown> = { role: 'assistant', content: m.content ?? '' };
       if (m.tool_calls?.length) {
@@ -300,7 +315,7 @@ export class NeonGatewayProvider extends OpenAICompatProvider {
 
 export class AnthropicProvider implements ChatProvider {
   id = 'anthropic';
-  capabilities = { tools: true, streaming: true };
+  capabilities = { tools: true, streaming: true, vision: true };
   constructor(
     private apiKey: string,
     private fetchImpl: typeof fetch = fetch,
@@ -317,7 +332,10 @@ export class AnthropicProvider implements ChatProvider {
     };
     for (const m of req.messages) {
       if (m.role === 'system') continue;
-      if (m.role === 'user') push('user', { type: 'text', text: m.content || ' ' });
+      if (m.role === 'user') {
+        for (const i of m.images ?? []) push('user', { type: 'image', source: { type: 'base64', media_type: i.mime, data: i.data } });
+        push('user', { type: 'text', text: m.content || ' ' });
+      }
       else if (m.role === 'tool') push('user', { type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content || ' ' });
       else if (m.role === 'assistant') {
         if (m.content) push('assistant', { type: 'text', text: m.content });
@@ -404,7 +422,7 @@ export function createProviderFor(id: ProviderId, apiKey: string, fetchImpl: typ
     case 'openai':
       return new OpenAICompatProvider({ id, name, baseUrl: BASE_URLS.openai, apiKey, tokenParam: 'max_completion_tokens', fetchImpl });
     case 'deepseek':
-      return new OpenAICompatProvider({ id, name, baseUrl: BASE_URLS.deepseek, apiKey, echoReasoning: true, fetchImpl });
+      return new OpenAICompatProvider({ id, name, baseUrl: BASE_URLS.deepseek, apiKey, echoReasoning: true, vision: false, fetchImpl });
     default:
       return new OpenAICompatProvider({ id, name, baseUrl: BASE_URLS[id], apiKey, fetchImpl });
   }
@@ -464,7 +482,7 @@ export type MockScript = (req: ChatRequest) => ChatEvent[];
 
 export class MockProvider implements ChatProvider {
   id = 'mock';
-  capabilities = { tools: true, streaming: true };
+  capabilities = { tools: true, streaming: true, vision: true };
   calls: ChatRequest[] = [];
   constructor(private script: MockScript) {}
   async *stream(req: ChatRequest): AsyncIterable<ChatEvent> {

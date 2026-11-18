@@ -146,3 +146,26 @@ describe('model lists', () => {
     expect(keyHint('  sk-abcdefgh1234 ')).toBe('1234');
   });
 });
+
+describe('v1.6 images in user messages', () => {
+  const img = { mime: 'image/png' as const, data: 'iVBORw0KGgo=' };
+  const req = { model: 'm', messages: [{ role: 'system' as const, content: 's' }, { role: 'user' as const, content: 'What is this?', images: [img] }] };
+  it('OpenAI-compatible providers send image_url parts', () => {
+    const b: any = (createProviderFor('openai', 'sk-test') as OpenAICompatProvider).buildBody(req);
+    expect(b.messages[1].content).toEqual([{ type: 'text', text: 'What is this?' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }]);
+  });
+  it('DeepSeek has no vision: the text goes alone and no image field leaks', () => {
+    const p = createProviderFor('deepseek', 'sk-test') as OpenAICompatProvider;
+    expect(p.capabilities.vision).toBe(false);
+    const b: any = p.buildBody(req);
+    expect(b.messages[1]).toEqual({ role: 'user', content: 'What is this?' });
+  });
+  it('Anthropic sends a base64 image block before the text', () => {
+    const b: any = new AnthropicProvider('k').buildBody(req);
+    expect(b.messages[0].content).toEqual([{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }, { type: 'text', text: 'What is this?' }]);
+  });
+  it('plain user messages are unchanged', () => {
+    const b: any = (createProviderFor('openai', 'sk-test') as OpenAICompatProvider).buildBody({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+    expect(b.messages[0]).toEqual({ role: 'user', content: 'hi' });
+  });
+});
