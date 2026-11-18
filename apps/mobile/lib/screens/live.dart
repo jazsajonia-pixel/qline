@@ -24,9 +24,15 @@ class _Step {
 }
 
 class _Msg {
-  _Msg(this.role, this.text, {this.steps, this.error});
+  _Msg(this.role, this.text, {this.steps, this.error, this.speech, this.suggestions = const [], this.agentName, this.template});
   final String role;
   String text;
+  /// v1.6: what the voice says (short), separate from the written answer.
+  String? speech;
+  /// v1.6: follow-up prompts shown under the latest answer.
+  List<String> suggestions;
+  /// v1.6: which agent answered (automatic switching can change it per message).
+  String? agentName, template;
   List<_Step>? steps;
   Map<String, dynamic>? approval;
   String? error;
@@ -92,6 +98,10 @@ class _LiveState extends ConsumerState<_Live> {
   }
 
   Map<String, dynamic>? get _agentAi => items(_ai, 'agents').where((a) => a['id'] == _agent?['id']).firstOrNull;
+  /// v1.6: Auto picks the right specialist for each message (the server routes it); on by default.
+  bool _auto = true;
+  /// The agent whose colours the core shows: the one answering now.
+  String? _liveTemplate;
   bool get _agentReady => _agentAi?['ready'] == true;
 
   @override
@@ -196,7 +206,10 @@ class _LiveState extends ConsumerState<_Live> {
     _agent = _agents.where((a) => a['id'] == c['agent_id']).firstOrNull ?? _agent;
     _msgs
       ..clear()
-      ..addAll(items(c, 'messages').map((m) => _Msg(m['role'] as String, m['content'] as String)));
+      ..addAll(items(c, 'messages').map((m) {
+        final meta = (m['meta'] as Map?)?.cast<String, dynamic>() ?? const {};
+        return _Msg(m['role'] as String, m['content'] as String, speech: meta['speech'] as String?, suggestions: ((meta['suggestions'] as List?) ?? const []).whereType<String>().toList());
+      }));
     if (mounted) setState(() {});
     _toBottom();
   }
@@ -221,9 +234,10 @@ class _LiveState extends ConsumerState<_Live> {
     _toBottom();
     try {
       _convId ??= ((await _api.post('/conversations', {if (_agent != null) 'agentId': _agent!['id']})) as Map)['id'] as String;
-      final r = await _api.post('/conversations/$_convId/messages', {'content': content}) as Map;
+      final r = await _api.post('/conversations/$_convId/messages', {'content': content, if (_auto) 'agent': 'auto'}) as Map;
       _runId = r['runId'] as String;
-      _stream(_runId!);
+      final routed = (r['agent'] as Map?)?.cast<String, dynamic>();
+      _stream(_runId!, agentName: routed?['name'] as String?, template: routed?['template'] as String?);
     } on ApiException catch (e) {
       setState(() {
         _msgs.add(_Msg('system_notice', '', error: e.message));
@@ -234,9 +248,15 @@ class _LiveState extends ConsumerState<_Live> {
     }
   }
 
-  void _stream(String runId, {String? lastId}) {
-    final reply = _Msg('assistant', '', steps: []);
-    setState(() => _msgs.add(reply));
+  void _stream(String runId, {String? lastId, String? agentName, String? template}) {
+    final reply = _Msg('assistant', '', steps: [], agentName: agentName, template: template);
+    setState(() {
+      for (final m in _msgs) {
+        m.suggestions = const [];
+      }
+      _msgs.add(reply);
+      _liveTemplate = template;
+    });
     String? last = lastId;
     _sub = _api.sse('/runs/$runId/stream', lastEventId: lastId).listen(
       (e) {
@@ -248,7 +268,11 @@ class _LiveState extends ConsumerState<_Live> {
               _core = d['state'] == 'thinking' ? CoreState.thinking : _core;
             case 'token':
               reply.text += d['text'] as String? ?? '';
-              _core = (_handsFree || ref.read(prefsProvider).speak) ? CoreState.thinking : CoreState.speaking;
+              // Writing is not speaking: the core only shows "speaking" while the voice is actually playing.
+              _core = CoreState.thinking;
+            case 'meta':
+              reply.speech = d['speech'] as String?;
+              reply.suggestions = ((d['suggestions'] as List?) ?? const []).whereType<String>().take(3).toList();
             case 'tool.planned':
               reply.steps!.add(_Step(d['stepId'] as String?, d['tool'] as String? ?? 'tool', d['summary'] as String? ?? '', d['decision'] as String? ?? 'allow'));
               _core = CoreState.tool;
@@ -288,7 +312,8 @@ class _LiveState extends ConsumerState<_Live> {
         final voiceOn = _handsFree || ref.read(prefsProvider).speak;
         if (_core == CoreState.success) {
           if (voiceOn && reply.text.isNotEmpty) {
-            await _speakReply(reply.text);
+            // Speak the short spoken line, not the whole written answer.
+            await _speakReply(spokenLine(reply.speech, reply.text));
           } else {
             await Future<void>.delayed(const Duration(milliseconds: 900));
             if (mounted && _core == CoreState.success) setState(() => _core = CoreState.idle);
@@ -454,10 +479,19 @@ class _LiveState extends ConsumerState<_Live> {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
-        title: _AgentPicker(agents: _agents, selected: _agent, model: _agentAi?['effective'] == null ? null : (_agentAi!['effective'] as Map)['model'] as String?, onPick: _runId != null ? null : (a) => setState(() {
-              _agent = a;
-              _newChat();
-            })),
+        title: _AgentPicker(
+            agents: _agents,
+            selected: _agent,
+            auto: _auto,
+            model: _auto ? null : (_agentAi?['effective'] == null ? null : (_agentAi!['effective'] as Map)['model'] as String?),
+            onPick: _runId != null
+                ? null
+                : (a) => setState(() {
+                      _auto = a['id'] == 'auto';
+                      _agent = _auto ? (_agents.where((x) => x['template'] == 'ceo').firstOrNull ?? _agent) : a;
+                      _liveTemplate = null;
+                      _newChat();
+                    })),
         actions: [
           IconButton(tooltip: prefs.speak ? 'Spoken replies on' : 'Spoken replies off', icon: Icon(prefs.speak ? Icons.volume_up_outlined : Icons.volume_off_outlined), onPressed: () => ref.read(prefsProvider.notifier).set(speak: !prefs.speak)),
           IconButton(
@@ -498,7 +532,7 @@ class _LiveState extends ConsumerState<_Live> {
                     onTap: _tapCore,
                     child: EnergyCore(
                       state: _core,
-                      agent: template,
+                      agent: _liveTemplate ?? template,
                       reduceMotion: prefs.reduceMotion,
                       level: _listening ? _level : (_core == CoreState.speaking ? _speakLevel : 0),
                       word: _core == CoreState.speaking ? _word : -1,
@@ -510,7 +544,13 @@ class _LiveState extends ConsumerState<_Live> {
               ),
               Padding(
                 padding: const EdgeInsets.only(bottom: 6, top: 2),
-                child: Semantics(liveRegion: true, child: Text(coreLabel(_core), textAlign: TextAlign.center, style: qs(13, w: FontWeight.w600, c: q.text2, ls: .4))),
+                child: Semantics(
+                  liveRegion: true,
+                  child: _core == CoreState.speaking && _spoken.isNotEmpty
+                      // While speaking, show the spoken line (it is shorter than, and differs from, the written answer).
+                      ? Padding(padding: const EdgeInsets.symmetric(horizontal: 24), child: Text(_spoken, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: qs(13, c: q.text2, h: 1.35)))
+                      : Text(coreLabel(_core), textAlign: TextAlign.center, style: qs(13, w: FontWeight.w600, c: q.text2, ls: .4)),
+                ),
               ),
             ]),
           ),
@@ -537,7 +577,12 @@ class _LiveState extends ConsumerState<_Live> {
                       controller: _scroll,
                       padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
                       itemCount: _msgs.length,
-                      itemBuilder: (_, i) => _Bubble(msg: _msgs[i], agentName: _agent?['name'] as String? ?? 'Assistant', template: template),
+                      itemBuilder: (_, i) => _Bubble(
+                        msg: _msgs[i],
+                        agentName: _msgs[i].agentName ?? _agent?['name'] as String? ?? 'Assistant',
+                        template: _msgs[i].template ?? template,
+                        onSuggestion: i == _msgs.length - 1 && _runId == null && aiOk ? _send : null,
+                      ),
                     ),
                   ),
           ),
@@ -595,8 +640,9 @@ class _AiBanner extends StatelessWidget {
 }
 
 class _AgentPicker extends StatelessWidget {
-  const _AgentPicker({required this.agents, required this.selected, required this.onPick, this.model});
+  const _AgentPicker({required this.agents, required this.selected, required this.onPick, this.model, this.auto = false});
   final String? model;
+  final bool auto;
   final List<Map<String, dynamic>> agents;
   final Map<String, dynamic>? selected;
   final ValueChanged<Map<String, dynamic>>? onPick;
@@ -608,6 +654,11 @@ class _AgentPicker extends StatelessWidget {
       tooltip: 'Choose agent',
       onSelected: onPick,
       itemBuilder: (_) => [
+        PopupMenuItem(
+          value: const {'id': 'auto', 'name': 'Auto', 'template': 'ceo', 'status': 'active'},
+          child: Row(children: [const Icon(Icons.auto_awesome, size: 20), const SizedBox(width: 10), const Text('Auto'), Text('  · picks the right agent', style: qs(12, c: q.text3))]),
+        ),
+        const PopupMenuDivider(),
         for (final a in agents)
           PopupMenuItem(
             value: a,
@@ -616,12 +667,12 @@ class _AgentPicker extends StatelessWidget {
           ),
       ],
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        AgentOrb(selected?['template'] as String?, size: 24),
+        auto ? const Icon(Icons.auto_awesome, size: 22) : AgentOrb(selected?['template'] as String?, size: 24),
         const SizedBox(width: 10),
         Flexible(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-            Text(selected?['name'] as String? ?? 'Assistant', overflow: TextOverflow.ellipsis, style: qs(15, w: FontWeight.w600, c: q.text)),
-            Text(model == null ? AgentStyle.of(selected?['template'] as String?).role : model!, overflow: TextOverflow.ellipsis, style: qs(11, c: q.text3, family: model == null ? ui : mono)),
+            Text(auto ? 'Auto' : selected?['name'] as String? ?? 'Assistant', overflow: TextOverflow.ellipsis, style: qs(15, w: FontWeight.w600, c: q.text)),
+            Text(auto ? 'Picks the right agent' : (model == null ? AgentStyle.of(selected?['template'] as String?).role : model!), overflow: TextOverflow.ellipsis, style: qs(11, c: q.text3, family: model == null || auto ? ui : mono)),
           ]),
         ),
         Icon(Icons.expand_more, size: 18, color: q.text3),
@@ -658,8 +709,9 @@ class _Starters extends StatelessWidget {
 }
 
 class _Bubble extends StatelessWidget {
-  const _Bubble({required this.msg, required this.agentName, required this.template});
+  const _Bubble({required this.msg, required this.agentName, required this.template, this.onSuggestion});
   final _Msg msg;
+  final ValueChanged<String>? onSuggestion;
   final String agentName;
   final String template;
   @override
@@ -699,6 +751,19 @@ class _Bubble extends StatelessWidget {
           ),
         if (msg.text.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 6), child: SelectableText(msg.text, style: qs(15, c: q.text, h: 1.5))),
         if (msg.approval != null) _InlineApproval(data: msg.approval!),
+        if (onSuggestion != null && msg.role == 'assistant' && msg.suggestions.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final s in msg.suggestions)
+                ActionChip(
+                  avatar: Icon(Icons.subdirectory_arrow_right, size: 16, color: q.text2),
+                  label: Text(s, style: qs(13, c: q.text)),
+                  onPressed: () => onSuggestion!(s),
+                  tooltip: 'Ask: $s',
+                ),
+            ]),
+          ),
         if (msg.error != null)
           Container(
             margin: const EdgeInsets.only(top: 8),

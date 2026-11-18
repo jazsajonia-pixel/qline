@@ -68,6 +68,8 @@ class _Model {
   double t = 0, flash = 0;
   /// Per-word speech pulse 0..1 (decays), and expanding ripples [age 0..1, strength].
   double pulse = 0, pulsePhase = 0;
+  /// Smoothed loudness 0..1 that the painter draws (follows widget.level).
+  double lvl = 0;
   final List<List<double>> ripples = [];
 }
 
@@ -150,6 +152,9 @@ class _EnergyCoreState extends State<EnergyCore> with SingleTickerProviderStateM
     _m.hue = Color.lerp(_m.hue, ag.hue, k)!;
     _m.flash = math.max(0, _m.flash - dt * 2.5);
     _m.pulse = math.max(0, _m.pulse - dt * 4.2);
+    // Smooth the loudness: fast attack, slower release, so the core follows the voice without jitter.
+    final target = widget.level.clamp(0.0, 1.0).toDouble();
+    _m.lvl += (target - _m.lvl) * math.min(1.0, dt * (target > _m.lvl ? 28 : 9));
     for (final r in _m.ripples) {
       r[0] += dt * 1.6;
     }
@@ -169,7 +174,7 @@ class _EnergyCoreState extends State<EnergyCore> with SingleTickerProviderStateM
         label: 'Assistant status: ${coreLabel(widget.state)}',
         child: RepaintBoundary(
           child: CustomPaint(
-            painter: _CorePainter(_m, _repaint, widget.agent, widget.compact, widget.level, widget.state, widget.background),
+            painter: _CorePainter(_m, _repaint, widget.agent, widget.compact, widget.state == CoreState.listening ? widget.level : _m.lvl, widget.state, widget.background),
             size: Size.infinite,
           ),
         ),
@@ -195,7 +200,9 @@ class _CorePainter extends CustomPainter {
     final cx = w / 2, cy = h * .5, R = math.min(w, h) * (compact ? .3 : .22);
     final synth = .35 + .35 * math.sin(t * 7.3) * math.sin(t * 2.1) + .3 * math.sin(t * 13.7).abs();
     final talk = state == CoreState.speaking ? m.pulse : 0.0;
-    final micAmp = p.amp * (level > 0 ? level : synth) * (state == CoreState.speaking ? .6 : 1) + talk * .9;
+    // Speaking follows the real voice only: silence between words and sentences means a calm core,
+    // never the synthetic idle wobble (that made the core move when nothing was being said).
+    final micAmp = state == CoreState.speaking ? p.amp * level * .75 + talk * .6 : p.amp * (level > 0 ? level : synth);
     final ctr = Offset(cx, cy);
     final paint = Paint();
 
