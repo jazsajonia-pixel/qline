@@ -58,35 +58,125 @@ export interface DriveFile {
   name: string;
   mimeType: string;
   modifiedTime?: string;
+  createdTime?: string;
   webViewLink?: string;
   size?: string;
   owners?: string[];
 }
 
-const driveFields = 'id,name,mimeType,modifiedTime,webViewLink,size,owners(displayName)';
-const toFile = (f: any): DriveFile => ({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, webViewLink: f.webViewLink, size: f.size, owners: (f.owners ?? []).map((o: any) => o.displayName) });
+const driveFields = 'id,name,mimeType,modifiedTime,createdTime,webViewLink,size,owners(displayName)';
+const toFile = (f: any): DriveFile => ({
+  id: f.id,
+  name: f.name,
+  mimeType: f.mimeType,
+  modifiedTime: f.modifiedTime,
+  createdTime: f.createdTime,
+  webViewLink: f.webViewLink,
+  size: f.size,
+  owners: (f.owners ?? []).map((o: any) => o.displayName),
+});
 
 /** Escapes a value for Drive's `q` language (single-quoted strings). */
 export const driveQuote = (s: string) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 
-export async function driveSearch(token: string, text: string | null, limit = 10): Promise<DriveFile[]> {
+/** Phase 5 / M7: file type filters, as Drive `q` clauses. */
+export const DRIVE_KINDS = {
+  image: "mimeType contains 'image/'",
+  video: "mimeType contains 'video/'",
+  pdf: "mimeType = 'application/pdf'",
+  document: `(mimeType = '${GDOC}' or mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or mimeType = 'text/plain' or mimeType = 'text/markdown')`,
+  spreadsheet: `(mimeType = '${GSHEET}' or mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType = 'text/csv')`,
+  presentation: `(mimeType = '${GSLIDES}' or mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation')`,
+  folder: `mimeType = '${FOLDER}'`,
+} as const;
+export type DriveKind = keyof typeof DRIVE_KINDS;
+
+export interface DriveSearch {
+  text?: string | null;
+  kind?: DriveKind | null;
+  /** 'modified' / 'created': newest first by that time (guaranteed by Drive's orderBy). Omitted with text: relevance. */
+  newest?: 'modified' | 'created' | null;
+  limit?: number;
+  pageToken?: string | null;
+}
+
+/**
+ * Searches Drive. Drive does not allow orderBy together with full-text search, so a time-ordered search matches the
+ * text against file names only; that is reported back in `ordering` so the model can say what "latest" means.
+ */
+export async function driveSearch(token: string, input: DriveSearch | string | null, legacyLimit = 10): Promise<{ files: DriveFile[]; nextPageToken: string | null; ordering: string }> {
+  const o: DriveSearch = typeof input === 'string' || input === null ? { text: input, limit: legacyLimit } : input;
+  const text = o.text?.trim() || null;
   const parts = ['trashed = false'];
-  if (text?.trim()) parts.push(`(name contains ${driveQuote(text.trim())} or fullText contains ${driveQuote(text.trim())})`);
+  if (o.kind) parts.push(DRIVE_KINDS[o.kind]);
+  const ordered = o.newest ?? (text ? null : 'modified');
+  if (text) parts.push(ordered ? `name contains ${driveQuote(text)}` : `(name contains ${driveQuote(text)} or fullText contains ${driveQuote(text)})`);
   const u = new URL(`${DRIVE}/files`);
   u.searchParams.set('q', parts.join(' and '));
-  u.searchParams.set('pageSize', String(Math.min(limit, 25)));
-  u.searchParams.set('orderBy', text?.trim() ? 'relevance' : 'modifiedTime desc');
-  u.searchParams.set('fields', `files(${driveFields})`);
+  u.searchParams.set('pageSize', String(Math.min(o.limit ?? 10, 25)));
+  if (ordered) u.searchParams.set('orderBy', ordered === 'created' ? 'createdTime desc' : 'modifiedTime desc');
+  u.searchParams.set('fields', `nextPageToken,files(${driveFields})`);
   u.searchParams.set('supportsAllDrives', 'true');
   u.searchParams.set('includeItemsFromAllDrives', 'true');
-  if (text?.trim()) u.searchParams.delete('orderBy'); // relevance ordering is the default for fullText queries
+  if (o.pageToken) u.searchParams.set('pageToken', o.pageToken);
   const j = await call(u.toString(), { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
-  return (j.files ?? []).map(toFile);
+  const ordering = ordered === 'created' ? 'newest first by when the file was added to Drive (createdTime)' : ordered === 'modified' ? 'newest first by last change (modifiedTime)' : 'by relevance to the search words';
+  return { files: (j?.files ?? []).map(toFile), nextPageToken: j?.nextPageToken ?? null, ordering };
 }
 
 export async function driveMeta(token: string, id: string): Promise<DriveFile> {
   const j = await call(`${DRIVE}/files/${encodeURIComponent(id)}?fields=${encodeURIComponent(driveFields)}&supportsAllDrives=true`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
   return toFile(j);
+}
+
+/**
+ * Phase 5 / M7: the bytes of a file to bring into the chat as a copy. Google Docs and Slides come as PDF, Sheets as
+ * XLSX; other files as they are. Refuses folders, unexportable Google types and anything over `maxBytes`, checking
+ * the declared size first so huge files are never downloaded.
+ */
+export async function driveDownload(token: string, f: DriveFile, maxBytes: number): Promise<{ bytes: Uint8Array; name: string; mime: string }> {
+  const exportAs: Record<string, [string, string]> = {
+    [GDOC]: ['application/pdf', '.pdf'],
+    [GSLIDES]: ['application/pdf', '.pdf'],
+    [GSHEET]: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
+  };
+  if (f.mimeType === FOLDER) throw new ProviderHttpError('That is a folder, not a file.', 400);
+  if (f.mimeType.startsWith('application/vnd.google-apps.') && !exportAs[f.mimeType]) throw new ProviderHttpError('This Google file type cannot be downloaded. Open it in Drive instead.', 415);
+  const mb = Math.round(maxBytes / 1024 / 1024);
+  if (f.size && Number(f.size) > maxBytes) throw new ProviderHttpError(`The file is larger than ${mb} MB. Open it in Drive instead.`, 413);
+  const ex = exportAs[f.mimeType];
+  const url = ex ? `${DRIVE}/files/${encodeURIComponent(f.id)}/export?mimeType=${encodeURIComponent(ex[0])}` : `${DRIVE}/files/${encodeURIComponent(f.id)}?alt=media&supportsAllDrives=true`;
+  const r = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS) });
+  if (!r.ok) throw new ProviderHttpError(r.status === 403 && ex ? 'Google could not export this file (it may be too large to export). Open it in Drive instead.' : `Drive download failed (HTTP ${r.status})`, r.status);
+  const declared = Number(r.headers.get('content-length') ?? 0);
+  if (declared > maxBytes) {
+    await r.body?.cancel().catch(() => {});
+    throw new ProviderHttpError(`The file is larger than ${mb} MB. Open it in Drive instead.`, 413);
+  }
+  // Streamed with a running count, so an export with no declared size cannot grow past the limit in memory.
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = r.body?.getReader();
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new ProviderHttpError(`The file is larger than ${mb} MB. Open it in Drive instead.`, 413);
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    bytes.set(c, off);
+    off += c.byteLength;
+  }
+  const name = ex && !f.name.toLowerCase().endsWith(ex[1]) ? `${f.name}${ex[1]}` : f.name;
+  return { bytes, name, mime: ex ? ex[0] : f.mimeType };
 }
 
 /** Google files are exported (Docs → text, Sheets → CSV, Slides → text); other files are downloaded. */

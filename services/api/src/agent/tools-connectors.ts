@@ -1,10 +1,12 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { audit } from '../core/audit';
 import type { Q } from '../core/db';
 import { accessToken } from '../integrations/oauth';
 import {
   driveContent,
+  driveDownload,
+  DRIVE_KINDS,
   driveCreate,
   driveMeta,
   driveSearch,
@@ -25,9 +27,11 @@ import {
   stripeList,
   stripeSummary,
 } from '../integrations/connectors';
-import { detectFormat, parseFile } from '../modules/imports';
+import { detectFormat, parseFile, putObject } from '../modules/imports';
+import { detectImage, extractFrom, IMAGE_MAX_BYTES, type Extracted } from '../modules/files';
+import { DRIVE_READ_MAX_BYTES } from '../integrations/connectors';
 import { connection, fail } from './tools-apps';
-import type { ToolCtx, ToolDef, ToolResult } from './tools';
+import type { Artifact, ToolCtx, ToolDef, ToolResult } from './tools';
 
 /**
  * v1.6 run 3 connector tools: Google Drive, Notion, GitHub and Stripe.
@@ -78,17 +82,90 @@ const by = (ctx: ToolCtx) => ({ orgId: ctx.orgId, actorKind: ctx.actor.kind, act
 export const connectorTools = {
   // ---- Google Drive ----
   'drive.search': {
-    description: 'Search the connected Google Drive by file name and contents. Returns name, type, last change and link. Leave query empty for recent files.',
-    schema: z.object({ query: z.string().max(200).optional(), limit: z.number().int().min(1).max(25).optional() }),
+    description:
+      'Search the connected Google Drive. Filter by kind (image, video, pdf, document, spreadsheet, presentation, folder). For "latest" or "last" files set newest to "modified" (last changed) or "created" (added to Drive) and say which one you used; results are then strictly newest first. Without newest, a text search is by relevance. Pass nextPageToken back as pageToken for more.',
+    schema: z.object({
+      query: z.string().max(200).optional(),
+      kind: z.enum(Object.keys(DRIVE_KINDS) as [keyof typeof DRIVE_KINDS, ...(keyof typeof DRIVE_KINDS)[]]).optional(),
+      newest: z.enum(['modified', 'created']).optional(),
+      limit: z.number().int().min(1).max(25).optional(),
+      pageToken: z.string().max(500).optional(),
+    }),
     async execute(q, _ctx, a) {
       const c = await connection(q, ['google'], () => DRIVE_READ);
       if (typeof c === 'string') return fail(c);
       return guard('Google Drive', async () => {
-        const files = await driveSearch(c.token, a.query ?? null, a.limit ?? 10);
-        return { ok: true, summary: `${files.length} Drive file${files.length === 1 ? '' : 's'} found`, refs: [], data: files };
+        const r = await driveSearch(c.token, { text: a.query ?? null, kind: a.kind ?? null, newest: a.newest ?? null, limit: a.limit ?? 10, pageToken: a.pageToken ?? null });
+        return {
+          ok: true,
+          summary: `${r.files.length} Drive file${r.files.length === 1 ? '' : 's'} found`,
+          refs: [],
+          data: { ordering: r.ordering, files: r.files, nextPageToken: r.nextPageToken },
+        };
       });
     },
-    preview: (a) => ({ title: 'Search Google Drive', lines: [a.query || 'recent files'] }),
+    preview: (a) => ({ title: 'Search Google Drive', lines: [[a.query || (a.kind ? `${a.kind} files` : 'recent files'), a.newest ? `newest by ${a.newest} time` : null].filter(Boolean).join(' · ')] }),
+  } satisfies ToolDef<any>,
+
+  'drive.fetch': {
+    description:
+      'Bring one Google Drive file into this chat by id from drive.search: images are shown inline, other files appear as a file card the user can open or save. Docs and Slides come as PDF, Sheets as XLSX. Limits: 5 MB for images, 10 MB for other files. It makes a private copy in Qline; the Drive file is not shared or changed.',
+    schema: z.object({ fileId: z.string().trim().min(5).max(200), caption: z.string().max(200).optional() }),
+    async execute(q, ctx, a) {
+      const c = await connection(q, ['google'], () => DRIVE_READ);
+      if (typeof c === 'string') return fail(c);
+      return guard('Google Drive', async () => {
+        const meta = await driveMeta(c.token, a.fileId);
+        const imageLike = meta.mimeType.startsWith('image/');
+        const { bytes, name, mime } = await driveDownload(c.token, meta, imageLike ? IMAGE_MAX_BYTES : DRIVE_READ_MAX_BYTES);
+        const img = detectImage(bytes);
+        const safeName = name.replace(/[^\w.\- ()]/g, '_').slice(0, 120) || 'drive-file';
+        let extracted: Extracted;
+        if (img) extracted = { kind: 'image' };
+        else if (imageLike) return fail(`“${meta.name}” is an image type Qline cannot show (PNG, JPEG, WebP and GIF work). Open it in Drive: ${meta.webViewLink ?? ''}`.trim());
+        else {
+          try {
+            extracted = extractFrom(await parseFile(detectFormat(safeName, bytes), bytes));
+          } catch {
+            extracted = { kind: 'document', text: '', chars: 0, truncated: false, note: 'Qline cannot read the contents of this file type; it can still be opened or saved.' };
+          }
+        }
+        const sha = createHash('sha256').update(bytes).digest('hex');
+        // The same Drive file brought in again in this workspace reuses its copy.
+        let file = await q.one<{ id: string }>(`select id from files where workspace_id=$1 and source='drive' and sha256=$2 and name=$3 limit 1`, [ctx.workspaceId, sha, safeName]);
+        if (!file) {
+          const id = randomUUID();
+          const key = `org/${ctx.orgId}/ws/${ctx.workspaceId}/drive/${id}`;
+          await putObject(key, bytes, img ?? (mime || 'application/octet-stream'));
+          file = await q.one<{ id: string }>(
+            `insert into files (id, org_id, workspace_id, name, mime, size_bytes, sha256, storage_key, created_by, source, extracted)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'drive',$10) returning id`,
+            [id, ctx.orgId, ctx.workspaceId, safeName, img ?? (mime || 'application/octet-stream'), bytes.length, sha, key, ctx.userId, JSON.stringify(extracted)],
+          );
+        }
+        await audit(q, { ...by(ctx), action: 'drive.file_fetched', targetRef: `file:${file!.id}`, detail: { drive: meta.id, name: meta.name, size: bytes.length } });
+        const when = { modified: meta.modifiedTime, created: meta.createdTime };
+        const artifact: Artifact = img
+          ? { type: 'image', fileId: file!.id, name: safeName, caption: a.caption }
+          : { type: 'file', fileId: file!.id, name: safeName, kind: extracted.kind === 'records' ? 'records' : 'document', size: bytes.length, source: 'Google Drive' };
+        return {
+          ok: true,
+          summary: `Brought “${meta.name}” from Google Drive`,
+          refs: [{ type: 'file', id: file!.id, title: meta.name }],
+          artifacts: [artifact],
+          data: {
+            fileId: file!.id,
+            name: meta.name,
+            kind: img ? 'image' : extracted.kind,
+            size: bytes.length,
+            ...when,
+            driveLink: meta.webViewLink,
+            preview: !img && extracted.kind === 'document' ? (extracted.text ?? '').slice(0, 1500) : undefined,
+          },
+        };
+      });
+    },
+    preview: (a) => ({ title: 'Bring a file from Google Drive', lines: [a.fileId] }),
   } satisfies ToolDef<any>,
 
   'drive.read': {

@@ -41,7 +41,8 @@ export type Artifact =
       source: string;
       computed: boolean;
     }
-  | { type: 'image'; fileId: string; name: string; caption?: string };
+  | { type: 'image'; fileId: string; name: string; caption?: string }
+  | { type: 'file'; fileId: string; name: string; kind: string; size: number; source?: string };
 
 export interface ToolDef<S extends z.ZodTypeAny> {
   description: string;
