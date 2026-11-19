@@ -62,9 +62,23 @@ export interface DriveFile {
   webViewLink?: string;
   size?: string;
   owners?: string[];
+  // Content handoff (docs/22 ADR-C1): boundary checks and asset metadata.
+  parents?: string[];
+  trashed?: boolean;
+  driveId?: string;
+  md5Checksum?: string;
+  sha256Checksum?: string;
+  version?: string;
+  headRevisionId?: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
 }
 
-const driveFields = 'id,name,mimeType,modifiedTime,createdTime,webViewLink,size,owners(displayName)';
+const driveFields =
+  'id,name,mimeType,modifiedTime,createdTime,webViewLink,size,owners(displayName),parents,trashed,driveId,md5Checksum,sha256Checksum,version,headRevisionId,' +
+  'videoMediaMetadata(width,height,durationMillis),imageMediaMetadata(width,height)';
+const num = (v: unknown) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v));
 const toFile = (f: any): DriveFile => ({
   id: f.id,
   name: f.name,
@@ -74,7 +88,33 @@ const toFile = (f: any): DriveFile => ({
   webViewLink: f.webViewLink,
   size: f.size,
   owners: (f.owners ?? []).map((o: any) => o.displayName),
+  parents: Array.isArray(f.parents) ? f.parents : undefined,
+  trashed: f.trashed,
+  driveId: f.driveId,
+  md5Checksum: f.md5Checksum,
+  sha256Checksum: f.sha256Checksum,
+  version: f.version,
+  headRevisionId: f.headRevisionId,
+  width: num(f.videoMediaMetadata?.width ?? f.imageMediaMetadata?.width),
+  height: num(f.videoMediaMetadata?.height ?? f.imageMediaMetadata?.height),
+  durationMs: num(f.videoMediaMetadata?.durationMillis),
 });
+
+export const DRIVE_FOLDER = FOLDER;
+export const DRIVE_SHORTCUT = 'application/vnd.google-apps.shortcut';
+
+/** One page of a folder's direct children (read-only; trashed items excluded by Drive). */
+export async function driveChildren(token: string, folderId: string, pageToken?: string | null): Promise<{ files: DriveFile[]; nextPageToken: string | null }> {
+  const u = new URL(`${DRIVE}/files`);
+  u.searchParams.set('q', `${driveQuote(folderId)} in parents and trashed = false`);
+  u.searchParams.set('pageSize', '100');
+  u.searchParams.set('fields', `nextPageToken,files(${driveFields})`);
+  u.searchParams.set('supportsAllDrives', 'true');
+  u.searchParams.set('includeItemsFromAllDrives', 'true');
+  if (pageToken) u.searchParams.set('pageToken', pageToken);
+  const j = await call(u.toString(), { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+  return { files: (j?.files ?? []).map(toFile), nextPageToken: j?.nextPageToken ?? null };
+}
 
 /** Escapes a value for Drive's `q` language (single-quoted strings). */
 export const driveQuote = (s: string) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;

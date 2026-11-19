@@ -22,6 +22,7 @@ import { googleSignInRoutes } from './modules/google-signin';
 import { voiceRoutes } from './modules/voice';
 import { knowledgeRoutes } from './modules/knowledge';
 import { proposalRoutes } from './modules/proposals';
+import { contentRoutes } from './modules/content';
 
 export const app = new Hono<Env>();
 
@@ -126,3 +127,4 @@ app.route('/v1', fileRoutes);
 app.route('/v1', integrationRoutes);
 app.route('/v1', voiceRoutes);
 app.route('/v1', knowledgeRoutes);
+app.route('/v1', contentRoutes);

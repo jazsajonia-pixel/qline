@@ -270,6 +270,21 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
 | 6 | 4 | Mobile: Content Studio under Command Center, folder setup screen, Handoff Monitor list + filters, job detail (two state labels, timeline, inputs, outputs, findings, safe actions), notifications deep links | Widget tests (empty/loading/error/stale/permission/offline, 390 px, light/dark, semantics); screenshots |
 | 7 | 5 | Docs (09 integrations, external editor handoff spec with exact examples, setup, API examples, release notes draft); full diff review; full CI; PR description with verified / unverified lists | CI green; PR ready for review (not merged) |
 
+### Progress
+
+- **Run 1 (Slice 0), 2026-11-19:** this document. Docs only.
+- **Run 2 (Slice 1), 2026-11-20:** built, tested with a mocked Drive only.
+  - Migration `0020_content_drive.sql`: `content_drive_config` (including the run-5 cursor and channel columns) and `content_assets`, both with RLS `tenant_isolation`.
+  - `services/api/src/modules/content.ts`: `GET`/`PUT /content/drive-config`, `POST /content/drive-config/validate`, `POST /content/sync`, `GET /content/assets`.
+  - `driveFields` now also asks for `parents`, `trashed`, `driveId`, checksums, `version`, `headRevisionId` and video/image metadata; new read-only `driveChildren`.
+  - Decisions made in this run:
+    - A role folder cannot be the root, and one folder cannot have two roles (400).
+    - Required roles: `assets` (1–10 folders) and `ready_for_qa`.
+    - Changing the mapping marks every indexed asset `removed` and needs validation again. Switching the Google account also needs validation again.
+    - Missing files are marked `removed` only after a complete listing (not after a truncated or failed one).
+    - Sync now runs inline in the request with no automatic retry. Run 5 moves it to a durable job with backoff.
+  - Tests: `services/api/test/content-drive.integration.test.ts` (12 tests). Not verified with a real Google account.
+
 ## H. Owner actions (later, not in this task)
 
 - Arrange the Drive folders, then map them in Qline (setup screen, run 6).
