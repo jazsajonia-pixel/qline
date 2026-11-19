@@ -5,11 +5,14 @@ import 'api.dart';
 import 'chat_resume.dart';
 
 class Org {
-  Org(this.id, this.name, this.role);
+  Org(this.id, this.name, this.role, {this.kind = 'business'});
   final String id;
   final String name;
   final String role;
-  factory Org.fromJson(Map j) => Org(j['id'] as String, j['name'] as String, j['role'] as String);
+  /// 'personal' (your own space, ADR-1) or 'business' (a company or team).
+  final String kind;
+  bool get personal => kind == 'personal';
+  factory Org.fromJson(Map j) => Org(j['id'] as String, j['name'] as String, j['role'] as String, kind: j['kind'] as String? ?? 'business');
 }
 
 class SessionState {
@@ -26,6 +29,8 @@ class SessionState {
   String get role => org?.role ?? 'viewer';
   bool get canManage => role == 'owner' || role == 'admin';
   bool get canWrite => role != 'viewer';
+  bool get personal => org?.personal ?? false;
+  bool get hasPersonal => orgs.any((o) => o.personal);
 
   SessionState copy({bool? loading, String? token, String? userName, String? email, List<Org>? orgs, String? orgId, bool clearOrg = false}) => SessionState(
         loading: loading ?? this.loading,
@@ -113,6 +118,13 @@ class SessionNotifier extends Notifier<SessionState> {
     _api.token = token;
     await _storage.write(key: 'token', value: token);
     await _loadMe(token);
+  }
+
+  /// Your own space: no business name needed, one per person (asking again returns it).
+  Future<void> createPersonal() async {
+    final r = await _api.post('/orgs', {'kind': 'personal'}) as Map;
+    await _storage.write(key: 'org', value: r['id'] as String);
+    await _loadMe(state.token!, preferredOrg: r['id'] as String);
   }
 
   Future<void> createOrg(String name) async {

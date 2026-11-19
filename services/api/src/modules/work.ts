@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
 import type { Q } from '../core/db';
-import { notFound } from '../core/errors';
+import { badRequest, notFound } from '../core/errors';
 import { publish } from '../core/events';
 import { relayAndKick } from '../runtime/outbox';
 import { body, query, limitParam } from '../core/validate';
@@ -21,7 +21,13 @@ export const taskInput = z.object({
   dueAt: z.string().datetime({ offset: true }).optional().nullable(),
   projectId: z.string().uuid().optional().nullable(),
   assigneeId: z.string().optional().nullable(),
+  domainId: z.string().uuid().optional().nullable(),
 });
+
+/** Domains are checked under RLS (a foreign key alone would accept another organization's id). */
+async function checkDomain(q: Q, id: string | null | undefined) {
+  if (id && !(await q.one('select 1 from domains where id=$1', [id]))) throw badRequest('That domain does not exist here.', { domainId: 'Unknown' });
+}
 
 export async function createTask(
   q: Q,
@@ -30,9 +36,10 @@ export async function createTask(
   input: z.infer<typeof taskInput>,
   source: { kind: string; ref?: string | null; importJobId?: string | null } = { kind: 'user' },
 ) {
+  await checkDomain(q, input.domainId);
   const row = await q.one(
-    `insert into tasks (org_id, workspace_id, project_id, title, description, status, priority, due_at, assignee_id, source_kind, source_ref, import_job_id, created_by)
-     values ($1,$2,$3,$4,$5,coalesce($6,'todo'),coalesce($7,'normal'),$8,$9,$10,$11,$12,$13) returning *`,
+    `insert into tasks (org_id, workspace_id, project_id, title, description, status, priority, due_at, assignee_id, source_kind, source_ref, import_job_id, created_by, domain_id)
+     values ($1,$2,$3,$4,$5,coalesce($6,'todo'),coalesce($7,'normal'),$8,$9,$10,$11,$12,$13,$14) returning *`,
     [
       t.orgId,
       t.workspaceId,
@@ -47,6 +54,7 @@ export async function createTask(
       source.ref ?? null,
       source.importJobId ?? null,
       `${actor.kind}:${actor.id}`,
+      input.domainId ?? null,
     ],
   );
   await audit(q, { orgId: t.orgId, actorKind: actor.kind, actorId: actor.id, action: 'task.created', targetRef: `task:${row.id}`, detail: { title: row.title } });
@@ -57,8 +65,9 @@ export async function updateTask(q: Q, t: Pick<TenantCtx, 'orgId'>, actor: { kin
   const cur = await q.one('select * from tasks where id=$1 and deleted_at is null', [id]);
   if (!cur) throw notFound('Task');
   const status = patch.status ?? cur.status;
+  await checkDomain(q, patch.domainId);
   const row = await q.one(
-    `update tasks set title=$2, description=$3, status=$4, priority=$5, due_at=$6, project_id=$7, assignee_id=$8,
+    `update tasks set title=$2, description=$3, status=$4, priority=$5, due_at=$6, project_id=$7, assignee_id=$8, domain_id=$9,
        completed_at = case when $4='done' and status<>'done' then now() when $4<>'done' then null else completed_at end,
        updated_at=now() where id=$1 returning *`,
     [
@@ -70,6 +79,7 @@ export async function updateTask(q: Q, t: Pick<TenantCtx, 'orgId'>, actor: { kin
       patch.dueAt !== undefined ? patch.dueAt : cur.due_at,
       patch.projectId !== undefined ? patch.projectId : cur.project_id,
       patch.assigneeId !== undefined ? patch.assigneeId : cur.assignee_id,
+      patch.domainId !== undefined ? patch.domainId : cur.domain_id,
     ],
   );
   await audit(q, { orgId: t.orgId, actorKind: actor.kind, actorId: actor.id, action: 'task.updated', targetRef: `task:${id}`, detail: patch as any });
@@ -188,6 +198,7 @@ workRoutes.get('/tasks', async (c) => {
     z.object({
       status: z.string().optional(),
       projectId: z.string().uuid().optional(),
+      domainId: z.string().uuid().optional(),
       q: z.string().max(200).optional(),
       due: z.enum(['overdue', 'today', 'week']).optional(),
       limit: limitParam,
@@ -203,6 +214,7 @@ workRoutes.get('/tasks', async (c) => {
   if (p.status === 'open') where.push(`status <> 'done'`);
   else if (p.status) add('status = ?', p.status);
   if (p.projectId) add('project_id = ?', p.projectId);
+  if (p.domainId) add('domain_id = ?', p.domainId);
   if (p.q) add('title ilike ?', `%${p.q}%`);
   if (p.due === 'overdue') where.push(`due_at < now() and status <> 'done'`);
   if (p.due === 'today') where.push(`due_at::date = (now() at time zone 'utc')::date`);
@@ -533,4 +545,56 @@ workRoutes.post('/notifications/:id/read', async (c) => {
   const t = c.get('tenant');
   await tx(t, (q) => q.exec(`update notifications set read_at=now() where id=$1 and user_id=$2`, [c.req.param('id'), t.userId]));
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Domains (phase 7, ADR-1): labels inside a workspace (Personal, Work, Learning, ...). Rename, hide, reorder, add.
+// ---------------------------------------------------------------------------
+const DOMAIN_ICON = z.string().regex(/^[a-z_]{1,40}$/);
+const MAX_DOMAINS = 20;
+
+workRoutes.get('/domains', async (c) => {
+  const t = need(c, 'tasks.read');
+  const items = await tx(t, (q) =>
+    q.many(
+      `select d.id, d.name, d.icon, d.enabled, d.position, (select count(*)::int from tasks k where k.domain_id=d.id and k.deleted_at is null and k.status <> 'done') as open_tasks
+         from domains d where d.workspace_id=$1 order by d.position, d.created_at`,
+      [t.workspaceId],
+    ),
+  );
+  return c.json({ items });
+});
+
+workRoutes.post('/domains', async (c) => {
+  const t = need(c, 'tasks.write');
+  const input = await body(c, z.object({ name: z.string().trim().min(1).max(40), icon: DOMAIN_ICON.optional() }));
+  const row = await tx(t, async (q) => {
+    const n = await q.one<{ n: number }>('select count(*)::int as n from domains where workspace_id=$1', [t.workspaceId]);
+    if ((n?.n ?? 0) >= MAX_DOMAINS) throw badRequest(`You can have up to ${MAX_DOMAINS} domains.`);
+    if (await q.one('select 1 from domains where workspace_id=$1 and lower(name)=lower($2)', [t.workspaceId, input.name])) throw badRequest('A domain with that name already exists.', { name: 'Taken' });
+    const r = await q.one(
+      `insert into domains (org_id, workspace_id, name, icon, position, created_by) values ($1,$2,$3,coalesce($4,'label'),$5,$6) returning id, name, icon, enabled, position`,
+      [t.orgId, t.workspaceId, input.name, input.icon ?? null, n?.n ?? 0, `user:${t.userId}`],
+    );
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'domain.created', targetRef: `domain:${r.id}`, detail: { name: input.name } });
+    return r;
+  });
+  return c.json(row, 201);
+});
+
+workRoutes.patch('/domains/:id', async (c) => {
+  const t = need(c, 'tasks.write');
+  const input = await body(c, z.object({ name: z.string().trim().min(1).max(40).optional(), icon: DOMAIN_ICON.optional(), enabled: z.boolean().optional(), position: z.number().int().min(0).max(100).optional() }));
+  const row = await tx(t, async (q) => {
+    const d = await q.one('select id from domains where id=$1 and workspace_id=$2', [c.req.param('id'), t.workspaceId]);
+    if (!d) throw notFound('Domain');
+    if (input.name && (await q.one('select 1 from domains where workspace_id=$1 and lower(name)=lower($2) and id<>$3', [t.workspaceId, input.name, d.id]))) throw badRequest('A domain with that name already exists.', { name: 'Taken' });
+    const r = await q.one(
+      `update domains set name=coalesce($2,name), icon=coalesce($3,icon), enabled=coalesce($4,enabled), position=coalesce($5,position), updated_at=now() where id=$1 returning id, name, icon, enabled, position`,
+      [d.id, input.name ?? null, input.icon ?? null, input.enabled ?? null, input.position ?? null],
+    );
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'domain.updated', targetRef: `domain:${d.id}`, detail: input });
+    return r;
+  });
+  return c.json(row);
 });

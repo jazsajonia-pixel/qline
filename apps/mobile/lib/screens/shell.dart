@@ -62,7 +62,7 @@ class _ShellState extends ConsumerState<Shell> {
       child: Scaffold(
         appBar: AppBar(
           titleSpacing: 12,
-          title: _OrgSwitcher(title: _titles[_tab], session: s),
+          title: _OrgSwitcher(title: _tab == 3 && s.personal ? 'Personal' : _titles[_tab], session: s),
           actions: [
             IconButton(
               tooltip: pending > 0 ? '$pending approvals waiting' : 'Approvals',
@@ -112,18 +112,31 @@ class _OrgSwitcher extends ConsumerWidget {
                 ListTile(
                   leading: Icon(o.id == session.orgId ? Icons.radio_button_checked : Icons.radio_button_off, color: o.id == session.orgId ? q.halo : q.text3),
                   title: Text(o.name),
-                  subtitle: Text(cap(o.role)),
+                  subtitle: Text(o.personal ? 'Personal space' : cap(o.role)),
                   onTap: () {
                     ref.read(sessionProvider.notifier).switchOrg(o.id);
                     Navigator.pop(ctx);
                   },
                 ),
+              if (!session.hasPersonal)
+                ListTile(
+                  leading: const Icon(Icons.person_outline),
+                  title: const Text('Add my personal space'),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    try {
+                      await ref.read(sessionProvider.notifier).createPersonal();
+                    } catch (e) {
+                      if (context.mounted) toastError(context, e);
+                    }
+                  },
+                ),
               ListTile(
                 leading: const Icon(Icons.add),
-                title: const Text('Create or join another'),
+                title: const Text('Add a business space'),
                 onTap: () async {
                   Navigator.pop(ctx);
-                  final name = await promptText(context, title: 'New organisation', label: 'Business name', action: 'Create');
+                  final name = await promptText(context, title: 'New business space', label: 'Business name', action: 'Create');
                   if (name != null && name.isNotEmpty && context.mounted) {
                     try {
                       await ref.read(sessionProvider.notifier).createOrg(name);
@@ -174,6 +187,7 @@ class _BottomNav extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final q = context.q;
     final reduce = ref.watch(prefsProvider).reduceMotion;
+    final personal = ref.watch(sessionProvider.select((s) => s.personal));
     Widget item(int i, IconData icon, IconData active, String label) {
       final sel = index == i;
       return Expanded(
@@ -243,7 +257,7 @@ class _BottomNav extends ConsumerWidget {
                 ),
               ),
             ),
-            item(3, Icons.business_center_outlined, Icons.business_center, 'Business'),
+            personal ? item(3, Icons.person_outline, Icons.person, 'Personal') : item(3, Icons.business_center_outlined, Icons.business_center, 'Business'),
             item(4, Icons.folder_outlined, Icons.folder, 'Library'),
           ],
         ),
