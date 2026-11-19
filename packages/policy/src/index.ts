@@ -690,6 +690,7 @@ export const TOOL_FAMILY_NOUNS: Record<string, string> = {
   business: 'your business overview',
   slack: 'Slack',
   agents: 'your AI team',
+  missions: 'your missions',
   files: 'the file',
   chart: 'a chart',
   image: 'an image',
