@@ -212,20 +212,29 @@ class OrgSetupScreen extends ConsumerStatefulWidget {
 }
 
 class _OrgSetupState extends ConsumerState<OrgSetupScreen> {
-  bool _join = false, _busy = false;
+  /// 'me' (personal space, the default), 'business' or 'join'.
+  String _mode = 'me';
+  bool _busy = false;
   String? _error;
   final _c = TextEditingController();
 
   Future<void> _go() async {
     final v = _c.text.trim();
-    if (v.isEmpty) return setState(() => _error = _join ? 'Enter the invite code' : 'Enter your business name');
+    if (_mode != 'me' && v.isEmpty) return setState(() => _error = _mode == 'join' ? 'Enter the invite code' : 'Enter your business name');
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
       final s = ref.read(sessionProvider.notifier);
-      _join ? await s.joinOrg(v) : await s.createOrg(v);
+      switch (_mode) {
+        case 'join':
+          await s.joinOrg(v);
+        case 'business':
+          await s.createOrg(v);
+        default:
+          await s.createPersonal();
+      }
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } finally {
@@ -236,27 +245,47 @@ class _OrgSetupState extends ConsumerState<OrgSetupScreen> {
   @override
   Widget build(BuildContext context) {
     final q = context.q;
+    final (title, body, action) = switch (_mode) {
+      'join' => ('Join your team', 'Paste the invite code a teammate shared with you.', 'Join'),
+      'business' => ('Name your business', 'You\'ll be the owner. Your AI agents start paused on anything risky until you approve it. Your personal space stays separate.', 'Create business space'),
+      _ => ('Your personal space', 'Notes, goals, projects, files and your AI, just for you. You can add a business or join a team any time.', 'Start'),
+    };
     return Scaffold(
       appBar: AppBar(actions: [TextButton(onPressed: () => ref.read(sessionProvider.notifier).signOut(), child: Text('Sign out', style: qs(14, c: q.text2)))]),
       body: SafeArea(
         child: ListView(padding: const EdgeInsets.all(24), children: [
-          Text(_join ? 'Join your team' : 'Name your business', style: Theme.of(context).textTheme.displaySmall),
+          Text(title, style: Theme.of(context).textTheme.displaySmall),
           const SizedBox(height: 8),
-          Text(_join ? 'Paste the invite code a teammate shared with you.' : 'You\'ll be the owner. Your AI agents start paused on anything risky until you approve it.', style: qs(15, c: q.text2)),
+          Text(body, style: qs(15, c: q.text2)),
           const SizedBox(height: 24),
-          SegmentedButton<bool>(
-            segments: const [ButtonSegment(value: false, label: Text('Create'), icon: Icon(Icons.add_business_outlined)), ButtonSegment(value: true, label: Text('Join'), icon: Icon(Icons.group_add_outlined))],
-            selected: {_join},
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'me', label: Text('Just me'), icon: Icon(Icons.person_outline)),
+              ButtonSegment(value: 'business', label: Text('Business'), icon: Icon(Icons.add_business_outlined)),
+              ButtonSegment(value: 'join', label: Text('Join'), icon: Icon(Icons.group_add_outlined)),
+            ],
+            selected: {_mode},
             onSelectionChanged: (s) => setState(() {
-              _join = s.first;
+              _mode = s.first;
               _error = null;
               _c.clear();
             }),
           ),
           const SizedBox(height: 20),
-          TextField(controller: _c, autofocus: true, textCapitalization: _join ? TextCapitalization.none : TextCapitalization.words, decoration: InputDecoration(labelText: _join ? 'Invite code' : 'Business name', errorText: _error), onSubmitted: (_) => _go()),
-          const SizedBox(height: 20),
-          QButton(_join ? 'Join organisation' : 'Create organisation', kind: QBtn.halo, expand: true, busy: _busy, onPressed: _go),
+          if (_mode != 'me') ...[
+            TextField(
+              controller: _c,
+              autofocus: true,
+              textCapitalization: _mode == 'join' ? TextCapitalization.none : TextCapitalization.words,
+              decoration: InputDecoration(labelText: _mode == 'join' ? 'Invite code' : 'Business name', errorText: _error),
+              onSubmitted: (_) => _go(),
+            ),
+            const SizedBox(height: 20),
+          ] else if (_error != null) ...[
+            Text(_error!, style: qs(13, c: q.bad)),
+            const SizedBox(height: 12),
+          ],
+          QButton(action, kind: QBtn.halo, expand: true, busy: _busy, onPressed: _go),
         ]),
       ),
     );

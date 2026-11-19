@@ -90,7 +90,7 @@ orgRoutes.get('/me', requireUser, async (c) => {
   const u = c.get('user');
   const orgs = await tx({ orgId: null, userId: u.userId }, (q) =>
     q.many(
-      `select o.id, o.name, o.status, m.role from organization_members m join organizations o on o.id = m.org_id
+      `select o.id, o.name, o.status, m.role, coalesce(o.settings->>'kind', 'business') as kind from organization_members m join organizations o on o.id = m.org_id
        where m.user_id = $1 and m.status = 'active' order by m.joined_at`,
       [u.userId],
     ),
@@ -102,7 +102,7 @@ orgRoutes.get('/orgs', requireUser, async (c) => {
   const u = c.get('user');
   const orgs = await tx({ orgId: null, userId: u.userId }, (q) =>
     q.many(
-      `select o.id, o.name, o.status, m.role from organization_members m join organizations o on o.id = m.org_id
+      `select o.id, o.name, o.status, m.role, coalesce(o.settings->>'kind', 'business') as kind from organization_members m join organizations o on o.id = m.org_id
        where m.user_id = $1 and m.status='active' order by m.joined_at`,
       [u.userId],
     ),
@@ -110,16 +110,50 @@ orgRoutes.get('/orgs', requireUser, async (c) => {
   return c.json({ items: orgs });
 });
 
+/** Default domains for a personal space (ADR-1). People rename, hide, reorder or add their own. */
+export const PERSONAL_DOMAINS: { name: string; icon: string }[] = [
+  { name: 'Personal', icon: 'person' },
+  { name: 'Work', icon: 'work' },
+  { name: 'Learning', icon: 'school' },
+  { name: 'Projects', icon: 'folder' },
+  { name: 'Health', icon: 'favorite' },
+  { name: 'Money', icon: 'savings' },
+];
+
+/**
+ * Creates an organization with its workspace. kind 'personal' (ADR-1 option B) is the person's own space: one per
+ * person, sole owner, no invitations, seeded with domains. Asking for a second personal space returns the first.
+ */
 orgRoutes.post('/orgs', requireUser, async (c) => {
   const u = c.get('user');
-  const { name } = await body(c, z.object({ name: z.string().trim().min(1).max(120) }));
+  const input = await body(c, z.object({ name: z.string().trim().min(1).max(120).optional(), kind: z.enum(['business', 'personal']).default('business') }));
+  if (input.kind === 'business' && !input.name) throw badRequest('Give the business a name.', { name: 'Required' });
+  if (input.kind === 'personal') {
+    const existing = await tx({ orgId: null, userId: u.userId }, (q) =>
+      q.one<{ id: string; name: string }>(
+        `select o.id, o.name from organization_members m join organizations o on o.id = m.org_id
+          where m.user_id = $1 and m.role = 'owner' and o.settings->>'kind' = 'personal' and o.status = 'active' limit 1`,
+        [u.userId],
+      ),
+    );
+    if (existing) {
+      const ws = await tx({ orgId: existing.id, userId: u.userId }, (q) => q.one<{ id: string }>('select id from workspaces where org_id=$1 order by created_at limit 1', [existing.id]));
+      return c.json({ id: existing.id, name: existing.name, role: 'owner', kind: 'personal', workspaceId: ws?.id }, 200);
+    }
+  }
+  const name = input.name ?? 'Personal';
   const orgId = randomUUID();
   const result = await tx({ orgId, userId: u.userId }, async (q) => {
-    await q.exec(`insert into organizations (id, name, created_by) values ($1,$2,$3)`, [orgId, name, u.userId]);
+    await q.exec(`insert into organizations (id, name, created_by, settings) values ($1,$2,$3,$4)`, [orgId, name, u.userId, JSON.stringify(input.kind === 'personal' ? { kind: 'personal' } : {})]);
     await q.exec(`insert into organization_members (org_id, user_id, role) values ($1,$2,'owner')`, [orgId, u.userId]);
     const workspaceId = await seedWorkspace(q, orgId, u.userId);
-    await audit(q, { orgId, actorKind: 'user', actorId: u.userId, action: 'org.created', targetRef: `org:${orgId}`, detail: { name } });
-    return { id: orgId, name, role: 'owner', workspaceId };
+    if (input.kind === 'personal') {
+      for (const [i, d] of PERSONAL_DOMAINS.entries()) {
+        await q.exec(`insert into domains (org_id, workspace_id, name, icon, position, created_by) values ($1,$2,$3,$4,$5,$6)`, [orgId, workspaceId, d.name, d.icon, i, `user:${u.userId}`]);
+      }
+    }
+    await audit(q, { orgId, actorKind: 'user', actorId: u.userId, action: 'org.created', targetRef: `org:${orgId}`, detail: { name, kind: input.kind } });
+    return { id: orgId, name, role: 'owner', kind: input.kind, workspaceId };
   });
   return c.json(result, 201);
 });
@@ -152,7 +186,7 @@ export const memberRoutes = new Hono<Env>();
 memberRoutes.get('/org', async (c) => {
   const t = c.get('tenant');
   const org = await tx(t, (q) => q.one('select id, name, status, settings, created_at from organizations where id=$1', [t.orgId]));
-  return c.json({ ...org, role: t.role, workspaceId: t.workspaceId });
+  return c.json({ ...org, kind: org?.settings?.kind === 'personal' ? 'personal' : 'business', role: t.role, workspaceId: t.workspaceId });
 });
 
 memberRoutes.patch('/org', async (c) => {
@@ -183,6 +217,8 @@ memberRoutes.get('/members', async (c) => {
 memberRoutes.post('/invitations', async (c) => {
   const t = need(c, 'members.manage');
   const input = await body(c, z.object({ role: z.enum(['admin', 'manager', 'member', 'viewer']), email: z.string().email().optional() }));
+  const org = await tx(t, (q) => q.one<{ kind: string | null }>(`select settings->>'kind' as kind from organizations where id=$1`, [t.orgId]));
+  if (org?.kind === 'personal') throw forbidden('Your personal space is just for you. Create a business or team space to invite people.');
   if (!canAssignRole(t.role, input.role)) throw forbidden(`A ${t.role} cannot invite a ${input.role}.`);
   // Readable one-time code; only its hash is stored.
   const code = randomBytes(6).toString('base64url').toUpperCase().replace(/[^A-Z0-9]/g, 'X').slice(0, 8);

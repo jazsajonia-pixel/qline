@@ -8,6 +8,7 @@ import 'agent_studio.dart';
 import 'ai.dart';
 import 'import.dart';
 import 'integrations.dart';
+import 'domains.dart';
 import 'leads.dart';
 import 'proposals.dart';
 import 'settings.dart';
@@ -34,20 +35,23 @@ class BusinessScreen extends ConsumerWidget {
             ]),
           ),
         );
+    // Phase 7 (ADR-1): a personal space shows the same tools with personal wording, and no business-only items.
+    final personal = ref.watch(sessionProvider.select((s) => s.personal));
     return ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 32), children: [
       const SectionLabel('Your AI team'),
       const _AgentStrip(),
       const SizedBox(height: 8),
       const ProposalsSection(kind: 'agent_change'),
-      const SectionLabel('Run the business'),
-      tile(Icons.people_outline, 'Clients & contacts', 'People and companies you work with', const ContactsScreen()),
+      SectionLabel(personal ? 'Your life and work' : 'Run the business'),
+      tile(Icons.label_outline, 'Domains', personal ? 'Personal, Work, Learning and your own areas' : 'Areas your work is grouped into', const DomainsScreen()),
+      tile(Icons.people_outline, personal ? 'People' : 'Clients & contacts', personal ? 'People you keep in touch with' : 'People and companies you work with', const ContactsScreen()),
       tile(Icons.account_tree_outlined, 'Workflows', 'Automations with approval steps', const WorkflowsScreen()),
       tile(Icons.upload_file_outlined, 'Import data', 'Spreadsheets and documents into Qline', const ImportScreen()),
-      tile(Icons.hub_outlined, 'Integrations', 'Gmail, Sheets, Forms, Calendar, Outlook, Slack', const IntegrationsScreen()),
-      tile(Icons.inbox_outlined, 'Lead inbox', 'New enquiries from email and forms, rated by urgency', const LeadInboxScreen()),
+      tile(Icons.hub_outlined, 'Integrations', 'Gmail, Drive, Calendar, Notion, GitHub and more', const IntegrationsScreen()),
+      if (!personal) tile(Icons.inbox_outlined, 'Lead inbox', 'New enquiries from email and forms, rated by urgency', const LeadInboxScreen()),
       const SectionLabel('Configure'),
-      tile(Icons.auto_awesome_outlined, 'Business setup', 'Guided interview and configuration history', const SetupScreen()),
-      tile(Icons.settings_outlined, 'Settings', 'Account, team, audit log, export', const SettingsScreen()),
+      if (!personal) tile(Icons.auto_awesome_outlined, 'Business setup', 'Guided interview and configuration history', const SetupScreen()),
+      tile(Icons.settings_outlined, 'Settings', personal ? 'Account, privacy, export' : 'Account, team, audit log, export', const SettingsScreen()),
     ]);
   }
 }
