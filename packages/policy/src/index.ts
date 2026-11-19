@@ -174,6 +174,9 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'drive.search': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
   'drive.read': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
   // Phase 5 / M7: a private copy in Qline for this chat; nothing in Drive changes.
+  // Personal AI OS phase 6: proposals only; applying needs a person with agents.use (missions) or agents.manage (agents).
+  'missions.propose': { risk: 'L1', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'agents.use' },
+  'agents.propose_change': { risk: 'L1', templates: T('ceo'), decision: 'allow', requires: 'agents.use' },
   'drive.fetch': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'documents.read' },
   'drive.save_to_library': { risk: 'L1', templates: NON_RESEARCH, decision: 'allow', requires: 'documents.write' },
   'drive.create': { risk: 'L2', templates: NON_RESEARCH, decision: 'require_approval', requires: 'documents.write', relaxable: true },

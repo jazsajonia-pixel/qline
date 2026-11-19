@@ -9,6 +9,7 @@ import { v16Tools } from './tools-v16';
 import { fileTools } from './tools-files';
 import { knowledgeTools } from './tools-knowledge';
 import { connectorTools } from './tools-connectors';
+import { proposalTools } from './tools-proposals';
 
 export interface ToolCtx {
   orgId: string;
@@ -42,7 +43,8 @@ export type Artifact =
       computed: boolean;
     }
   | { type: 'image'; fileId: string; name: string; caption?: string }
-  | { type: 'file'; fileId: string; name: string; kind: string; size: number; source?: string };
+  | { type: 'file'; fileId: string; name: string; kind: string; size: number; source?: string }
+  | { type: 'proposal'; id: string; kind: 'mission' | 'agent_change'; title: string };
 
 export interface ToolDef<S extends z.ZodTypeAny> {
   description: string;
@@ -231,6 +233,7 @@ const defs = {
   ...fileTools,
   ...knowledgeTools,
   ...connectorTools,
+  ...proposalTools,
 };
 
 export type ToolName = keyof typeof defs;

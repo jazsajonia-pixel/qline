@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { canDecideApproval, can, routeAgent, TOOL_POLICIES, toolLabels, type AgentTemplate, type Risk } from '@qline/policy';
 import { audit } from '../core/audit';
 import { need, requireTenant, requireUser, tx, type Env, type TenantCtx } from '../core/context';
-import { withTenant } from '../core/db';
+import { withTenant, type Q } from '../core/db';
 import { isStopped } from '../core/controls';
 import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, query } from '../core/validate';
@@ -90,38 +90,41 @@ function versionChanges(input: { instructions?: string; toolAllowlist?: string[]
   return ch;
 }
 
+export const AGENT_PATCH = z.object({
+  status: z.enum(['active', 'paused']).optional(),
+  name: z.string().trim().min(1).max(80).optional(),
+  description: z.string().trim().max(300).nullable().optional(),
+  icon: ICON.nullable().optional(),
+  accent: ACCENT.nullable().optional(),
+  instructions: z.string().trim().min(1).max(8000).optional(),
+  toolAllowlist: z.array(z.string()).max(40).optional(),
+  ...BUDGETS,
+});
+export type AgentPatch = z.infer<typeof AGENT_PATCH>;
+
+/** Applies a person's change to an agent (a new version when versioned fields change). Shared by PATCH and approved proposals. */
+export async function updateAgent(q: Q, t: TenantCtx, id: string, input: AgentPatch, via?: string) {
+  const a = await loadAgent(q, id);
+  if (!a || a.status === 'archived') throw notFound('Agent');
+  if (input.toolAllowlist) checkAllowlist(a, input.toolAllowlist);
+  const ch = versionChanges(input);
+  if (Object.keys(ch).length) await newVersion(q, t.orgId, a, ch, `user:${t.userId}`);
+  if (input.status || input.name) await q.exec('update agents set status=coalesce($2,status), name=coalesce($3,name) where id=$1', [a.id, input.status ?? null, input.name ?? null]);
+  if (input.description !== undefined || input.icon !== undefined || input.accent !== undefined) {
+    await q.exec(
+      `update agents set description = case when $2 then $3 else description end, icon = case when $4 then $5 else icon end, accent = case when $6 then $7 else accent end where id=$1`,
+      [a.id, input.description !== undefined, input.description ?? null, input.icon !== undefined, input.icon ?? null, input.accent !== undefined, input.accent ?? null],
+    );
+  }
+  await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'agent.updated', targetRef: `agent:${a.id}`, detail: { ...input, instructions: input.instructions ? '[changed]' : undefined, ...(via ? { via } : {}) } });
+  return q.one('select * from agents where id=$1', [a.id]);
+}
+
 /** Humans only: agents never reach this route (invariant 4, docs/07 §4). */
 agentRoutes.patch('/agents/:id', async (c) => {
   const t = need(c, 'agents.manage');
-  const input = await body(
-    c,
-    z.object({
-      status: z.enum(['active', 'paused']).optional(),
-      name: z.string().trim().min(1).max(80).optional(),
-      description: z.string().trim().max(300).nullable().optional(),
-      icon: ICON.nullable().optional(),
-      accent: ACCENT.nullable().optional(),
-      instructions: z.string().trim().min(1).max(8000).optional(),
-      toolAllowlist: z.array(z.string()).max(40).optional(),
-      ...BUDGETS,
-    }),
-  );
-  const row = await tx(t, async (q) => {
-    const a = await loadAgent(q, c.req.param('id'));
-    if (!a || a.status === 'archived') throw notFound('Agent');
-    if (input.toolAllowlist) checkAllowlist(a, input.toolAllowlist);
-    const ch = versionChanges(input);
-    if (Object.keys(ch).length) await newVersion(q, t.orgId, a, ch, `user:${t.userId}`);
-    if (input.status || input.name) await q.exec('update agents set status=coalesce($2,status), name=coalesce($3,name) where id=$1', [a.id, input.status ?? null, input.name ?? null]);
-    if (input.description !== undefined || input.icon !== undefined || input.accent !== undefined) {
-      await q.exec(
-        `update agents set description = case when $2 then $3 else description end, icon = case when $4 then $5 else icon end, accent = case when $6 then $7 else accent end where id=$1`,
-        [a.id, input.description !== undefined, input.description ?? null, input.icon !== undefined, input.icon ?? null, input.accent !== undefined, input.accent ?? null],
-      );
-    }
-    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'agent.updated', targetRef: `agent:${a.id}`, detail: { ...input, instructions: input.instructions ? '[changed]' : undefined } });
-    return q.one('select * from agents where id=$1', [a.id]);
-  });
+  const input = await body(c, AGENT_PATCH);
+  const row = await tx(t, (q) => updateAgent(q, t, c.req.param('id'), input));
   return c.json(row);
 });
 

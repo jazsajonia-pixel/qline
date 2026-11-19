@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/api.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'proposals.dart';
 
 /// v1.5 AI CEO missions (docs/13 §10): goal → CEO plan → your approval → specialist tasks.
 /// Nothing runs before you approve the plan. Pause and emergency stop live at the top.
@@ -56,6 +57,7 @@ class _MissionsState extends ConsumerState<MissionsScreen> {
             child: ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 96), children: [
               ControlsCard(controls: controls, onChanged: reload),
               const SizedBox(height: 8),
+              ProposalsSection(kind: 'mission', onChanged: reload),
               if (list.isEmpty)
                 const Padding(
                   padding: EdgeInsets.only(top: 24),
