@@ -39,7 +39,15 @@ flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --da
 
 Release signing reads `apps/mobile/android/key.properties`. That file and the keystore are gitignored and are never committed.
 
-## Honest status (v1.4.0)
+## Honest status (v1.8.0)
+
+v1.8.0 adds personal spaces with life domains, custom agents, several keys per AI provider, AI proposals you approve, Google Drive files in chat, safer OAuth refresh, upload limits, shared sign-in limits, and an adaptive voice end-of-turn.
+
+- What is implemented, tested and not verified: [docs/21](docs/21-PERSONAL_AI_OS_BUILD.md).
+- Earlier releases: [docs/releases](docs/releases).
+- No release has had device QA.
+
+### Earlier notes (v1.4.0)
 
 Working end to end against production: sign-up/sign-in (email and password), organisations, invitations and roles, tasks, projects, comments, contacts, documents and notes, memory confirm/supersede/forget, search, approvals, guided setup with config versions and rollback, CSV/XLSX import with mapping and rollback, workflows (dry run, publish, enable, run), audit log verification, data export.
 
