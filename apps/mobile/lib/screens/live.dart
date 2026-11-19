@@ -600,7 +600,8 @@ class _LiveState extends ConsumerState<_Live> {
         cancelOnError: true,
         listenMode: ListenMode.dictation,
         listenFor: Duration(seconds: _handsFree ? 60 : 30),
-        pauseFor: Duration(milliseconds: _handsFree ? 2200 : 3000),
+        // The recogniser's own pause must outlast the adaptive gate (max 2.6 s) so the gate decides.
+        pauseFor: const Duration(milliseconds: 3000),
       ),
     );
   }
