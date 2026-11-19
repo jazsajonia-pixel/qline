@@ -104,7 +104,9 @@ export const MAX_PDF_PAGES = 300;
 /** Parses an upload within time, size and shape bounds (M1). Office files are checked for zip bombs first. */
 export async function parseFile(format: Format, bytes: Uint8Array): Promise<Parsed> {
   if (format === 'xlsx' || format === 'docx') checkZipBounds(bytes);
-  return withDeadline(PARSE_DEADLINE_MS, parseUnbounded(format, bytes), 'The file');
+  // Parsers get their own copy: the PDF parser transfers (detaches) the buffer it is given on newer Node versions,
+  // which would leave callers storing or hashing an empty file afterwards.
+  return withDeadline(PARSE_DEADLINE_MS, parseUnbounded(format, bytes.slice()), 'The file');
 }
 
 async function parseUnbounded(format: Format, bytes: Uint8Array): Promise<Parsed> {

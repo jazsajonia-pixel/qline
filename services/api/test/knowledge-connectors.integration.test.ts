@@ -70,7 +70,7 @@ type Seen = { url: string; method: string; headers: Record<string, string>; body
 const realFetch = globalThis.fetch;
 let seen: Seen[] = [];
 /** Replaces fetch for external hosts only; routes return canned JSON. */
-function stub(routes: [RegExp, (s: Seen) => { status?: number; json?: unknown; text?: string }][]) {
+function stub(routes: [RegExp, (s: Seen) => { status?: number; json?: unknown; text?: string; bytes?: Uint8Array; headers?: Record<string, string> }][]) {
   seen = [];
   globalThis.fetch = (async (input: any, init: any = {}) => {
     const url = typeof input === 'string' ? input : input.url;
@@ -81,7 +81,7 @@ function stub(routes: [RegExp, (s: Seen) => { status?: number; json?: unknown; t
     const r = routes.find(([re]) => re.test(`${s.method} ${url}`));
     if (!r) return new Response(JSON.stringify({ error: { message: `unstubbed ${s.method} ${url}` } }), { status: 599 });
     const out = r[1](s);
-    return new Response(out.text ?? JSON.stringify(out.json ?? {}), { status: out.status ?? 200, headers: { 'content-type': 'application/json' } });
+    return new Response((out.bytes as BodyInit | undefined) ?? out.text ?? JSON.stringify(out.json ?? {}), { status: out.status ?? 200, headers: { 'content-type': 'application/json', ...(out.headers ?? {}) } });
   }) as typeof fetch;
 }
 
@@ -345,7 +345,7 @@ d('v1.6 run 3: Knowledge OS and connectors (integration)', () => {
       [/POST https:\/\/www\.googleapis\.com\/upload\/drive\/v3\/files/, () => ({ json: { id: 'new1', name: 'Plan', mimeType: 'application/vnd.google-apps.document', webViewLink: 'https://docs.google.com/x' } })],
     ]);
     const s = await run(A, 'drive.search', { query: "o'brien menu" });
-    expect(s.data).toEqual([expect.objectContaining({ id: 'docid1', name: 'Menu 2026' })]);
+    expect((s.data as any).files).toEqual([expect.objectContaining({ id: 'docid1', name: 'Menu 2026' })]);
     expect(new URL(seen[0]!.url).searchParams.get('q')).toContain("name contains 'o\\'brien menu'");
     const r = await run(A, 'drive.read', { fileId: 'docid1' });
     expect(r.ok).toBe(true);
@@ -360,6 +360,72 @@ d('v1.6 run 3: Knowledge OS and connectors (integration)', () => {
     const up = seen.find((x) => x.url.includes('/upload/drive/v3/files'))!;
     expect(up.headers['content-type']).toMatch(/^multipart\/related; boundary=/);
     expect(up.body).toContain('"mimeType":"application/vnd.google-apps.document"');
+  });
+
+  it('Phase 5: newest image by a stated time, pagination, inline image and file cards, limits, isolation', async () => {
+    await connect(A, 'google', ['openid', 'https://www.googleapis.com/auth/drive.readonly']);
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Array(200).fill(7)]);
+    stub([
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\?/, (x) =>
+        new URL(x.url).searchParams.get('pageToken') === 'p2'
+          ? { json: { files: [{ id: 'img-older', name: 'old.jpg', mimeType: 'image/jpeg', createdTime: '2026-01-01T00:00:00Z' }] } }
+          : { json: { nextPageToken: 'p2', files: [{ id: 'img-new', name: 'beach.png', mimeType: 'image/png', size: '208', createdTime: '2026-11-18T09:00:00Z', modifiedTime: '2026-11-18T09:00:00Z' }] } }],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/img-new\?alt=media/, () => ({ bytes: png })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/img-new\?fields/, () => ({ json: { id: 'img-new', name: 'beach.png', mimeType: 'image/png', size: '208', createdTime: '2026-11-18T09:00:00Z', webViewLink: 'https://drive.google.com/file/d/img-new' } })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/doc-1\/export/, () => ({ bytes: new TextEncoder().encode('%PDF-1.4 fake') })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/doc-1\?fields/, () => ({ json: { id: 'doc-1', name: 'Budget', mimeType: 'application/vnd.google-apps.document' } })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/big-1\?fields/, () => ({ json: { id: 'big-1', name: 'movie.mp4', mimeType: 'video/mp4', size: String(500 * 1024 * 1024) } })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/nosize\?fields/, () => ({ json: { id: 'nosize', name: 'huge.bin', mimeType: 'application/octet-stream' } })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/nosize\?alt=media/, () => ({ bytes: new Uint8Array(11 * 1024 * 1024) })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/form-1\?fields/, () => ({ json: { id: 'form-1', name: 'Survey', mimeType: 'application/vnd.google-apps.form' } })],
+      [/GET https:\/\/www\.googleapis\.com\/drive\/v3\/files\/gone-file\?fields/, () => ({ status: 404, json: { error: { message: 'File not found' } } })],
+    ]);
+    // "Last picture saved": images only, ordered by createdTime (Drive guarantees the order), with a next page.
+    const s = await run(A, 'drive.search', { kind: 'image', newest: 'created', limit: 1 });
+    const u = new URL(seen[0]!.url);
+    expect(u.searchParams.get('orderBy')).toBe('createdTime desc');
+    expect(u.searchParams.get('q')).toContain("mimeType contains 'image/'");
+    expect((s.data as any).ordering).toMatch(/createdTime/);
+    expect((s.data as any).files[0].id).toBe('img-new');
+    expect((s.data as any).nextPageToken).toBe('p2');
+    const p2 = await run(A, 'drive.search', { kind: 'image', newest: 'created', limit: 1, pageToken: 'p2' });
+    expect((p2.data as any).files[0].id).toBe('img-older');
+    // Text + newest: names only (Drive refuses orderBy with fullText), and the ordering says so.
+    await run(A, 'drive.search', { query: 'beach', newest: 'modified' });
+    const q3 = new URL(seen.at(-1)!.url).searchParams;
+    expect(q3.get('orderBy')).toBe('modifiedTime desc');
+    expect(q3.get('q')).not.toContain('fullText');
+    // Fetch: inline image artifact backed by a private Qline copy, downloadable with its name.
+    const f = await run(A, 'drive.fetch', { fileId: 'img-new' });
+    expect(f.ok).toBe(true);
+    expect(f.artifacts).toEqual([expect.objectContaining({ type: 'image', name: 'beach.png' })]);
+    const fileId = (f.artifacts![0] as any).fileId;
+    const content = await app.fetch(new Request(`http://localhost/v1/files/${fileId}/content`, { headers: { authorization: `Bearer ${A.token}`, 'x-qline-org': A.org! } }));
+    expect(content.headers.get('content-type')).toBe('image/png');
+    expect(new Uint8Array(await content.arrayBuffer()).length).toBe(png.length);
+    // Fetching the same file again reuses the copy.
+    expect(((await run(A, 'drive.fetch', { fileId: 'img-new' })).artifacts![0] as any).fileId).toBe(fileId);
+    // A Google Doc comes as a PDF file card; the download keeps the filename.
+    const doc = await run(A, 'drive.fetch', { fileId: 'doc-1' });
+    expect(doc.artifacts).toEqual([expect.objectContaining({ type: 'file', name: 'Budget.pdf', source: 'Google Drive' })]);
+    expect(seen.some((x) => x.url.includes('/export?mimeType=application%2Fpdf'))).toBe(true);
+    const dl = await app.fetch(new Request(`http://localhost/v1/files/${(doc.artifacts![0] as any).fileId}/download`, { headers: { authorization: `Bearer ${A.token}`, 'x-qline-org': A.org! } }));
+    expect({ status: dl.status, body: dl.status === 200 ? '' : await dl.text() }).toEqual({ status: 200, body: '' });
+    expect(dl.headers.get('content-disposition')).toBe('attachment; filename="Budget.pdf"');
+    // The stored copy is the whole file (the PDF parser must not consume the bytes that get stored).
+    expect(new TextDecoder().decode(await dl.arrayBuffer())).toBe('%PDF-1.4 fake');
+    // Large, undeclared-size, unsupported and deleted files fail in plain words; the 500 MB one is never downloaded.
+    const big = await run(A, 'drive.fetch', { fileId: 'big-1' });
+    expect(big.ok).toBe(false);
+    expect(big.summary).toMatch(/larger than 10 MB/);
+    expect(seen.some((x) => x.url.includes('big-1?alt=media'))).toBe(false);
+    expect((await run(A, 'drive.fetch', { fileId: 'nosize' })).summary).toMatch(/larger than 10 MB/);
+    expect((await run(A, 'drive.fetch', { fileId: 'form-1' })).summary).toMatch(/cannot be downloaded/);
+    expect((await run(A, 'drive.fetch', { fileId: 'gone-file' })).summary).toMatch(/could not find/i);
+    // Another organization cannot open the copy.
+    const B = await setup('Drivecheck');
+    const other = await app.fetch(new Request(`http://localhost/v1/files/${fileId}/download`, { headers: { authorization: `Bearer ${B.token}`, 'x-qline-org': B.org! } }));
+    expect(other.status).toBe(404);
   });
 
   it('provider failures become plain-language tool failures, never crashes', async () => {

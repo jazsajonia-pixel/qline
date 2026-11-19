@@ -382,7 +382,7 @@ describe('v1.6 run 3: untrusted data, connector helpers and policies', async () 
       expect(TOOL_POLICIES[t]).toMatchObject({ risk: 'L3', decision: 'require_approval' });
       expect(TOOL_POLICIES[t]!.relaxable).toBeFalsy();
     }
-    for (const t of ['drive.search', 'drive.read', 'notion.search', 'notion.read', 'github.repos', 'github.issues', 'github.read', 'stripe.summary', 'stripe.list', 'knowledge.search']) expect(TOOL_POLICIES[t]!.risk).toBe('L0');
+    for (const t of ['drive.search', 'drive.read', 'drive.fetch', 'notion.search', 'notion.read', 'github.repos', 'github.issues', 'github.read', 'stripe.summary', 'stripe.list', 'knowledge.search']) expect(TOOL_POLICIES[t]!.risk).toBe('L0');
   });
 });
 
