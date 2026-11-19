@@ -412,6 +412,8 @@ d('v1.6 run 3: Knowledge OS and connectors (integration)', () => {
     const dl = await app.fetch(new Request(`http://localhost/v1/files/${(doc.artifacts![0] as any).fileId}/download`, { headers: { authorization: `Bearer ${A.token}`, 'x-qline-org': A.org! } }));
     expect({ status: dl.status, body: dl.status === 200 ? '' : await dl.text() }).toEqual({ status: 200, body: '' });
     expect(dl.headers.get('content-disposition')).toBe('attachment; filename="Budget.pdf"');
+    // The stored copy is the whole file (the PDF parser must not consume the bytes that get stored).
+    expect(new TextDecoder().decode(await dl.arrayBuffer())).toBe('%PDF-1.4 fake');
     // Large, undeclared-size, unsupported and deleted files fail in plain words; the 500 MB one is never downloaded.
     const big = await run(A, 'drive.fetch', { fileId: 'big-1' });
     expect(big.ok).toBe(false);
