@@ -85,6 +85,33 @@ String spokenLine(String? speech, String text, {int maxChars = 220}) {
   return out;
 }
 
+/// Words that usually mean the speaker has more to say.
+const _trailing = {
+  'and', 'but', 'or', 'so', 'because', 'cause', 'the', 'a', 'an', 'to', 'of', 'with', 'for', 'if', 'then', 'um', 'uh', 'erm',
+  'like', 'my', 'your', 'about', 'in', 'on', 'at', 'is', 'are', 'was', 'that', 'which', 'also', 'plus', 'maybe', 'i',
+};
+
+/// How long to wait for more speech after [words] before sending (M6 adaptive end-of-turn).
+/// Waits longer after a dangling word ("…and", "um") or a short fragment, and less after a long,
+/// complete-sounding request. Clamped to 800–2600 ms.
+Duration waitFor(String words, Duration base) {
+  final w = words.trim().toLowerCase();
+  final list = w.split(RegExp(r'\s+')).where((x) => x.isNotEmpty).toList();
+  var ms = base.inMilliseconds;
+  if (list.isEmpty) return base;
+  final last = list.last.replaceAll(RegExp(r"[^a-z']"), '');
+  if (w.endsWith(',') || w.endsWith('...') || _trailing.contains(last)) {
+    ms += 900;
+  } else if (RegExp(r'[.?!]$').hasMatch(w)) {
+    ms -= 400;
+  } else if (list.length <= 2) {
+    ms += 400;
+  } else if (list.length >= 8) {
+    ms -= 250;
+  }
+  return Duration(milliseconds: ms.clamp(800, 2600));
+}
+
 class UtteranceGate {
   UtteranceGate({required this.onCommit, this.silence = const Duration(milliseconds: 1500)});
   final void Function(String words) onCommit;
@@ -113,7 +140,7 @@ class UtteranceGate {
     if (isFinal) return commit();
     if (changed) {
       _timer?.cancel();
-      _timer = Timer(silence, commit);
+      _timer = Timer(waitFor(w, silence), commit);
     }
   }
 
