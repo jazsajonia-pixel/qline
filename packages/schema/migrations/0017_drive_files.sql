@@ -6,3 +6,9 @@
 --   alter table files add constraint files_source_check check (source in ('import','chat'));
 alter table files drop constraint if exists files_source_check;
 alter table files add constraint files_source_check check (source in ('import','chat','drive'));
+
+-- drive.fetch joins each built-in agent's current version (same pattern as 0012). Custom agents keep their own lists.
+update agent_versions v
+   set tool_allowlist = array(select distinct t from unnest(v.tool_allowlist || array['drive.fetch']) t order by t)
+  from agents a
+ where a.id = v.agent_id and v.version = a.current_version and a.template <> 'custom' and 'drive.search' = any(v.tool_allowlist);
