@@ -280,6 +280,8 @@ export interface DecideInput {
   tightened?: readonly string[];
   /** v1.5: workspace emergency stop. When on, every agent and workflow tool is denied. */
   stopped?: boolean;
+  /** Phase 4 / M9: the agent version's approval mode is "ask_all". */
+  askAll?: boolean;
   /** v1.6: owner-chosen autonomy level (see AUTONOMY_LEVELS). Defaults to supervised. */
   autonomy?: Autonomy;
   /** v1.6: true when the workspace has used up today's external-action allowance (full autopilot only). */
@@ -306,7 +308,14 @@ export const ALWAYS_ASK = new Set(['config.propose']);
 const AUTOPILOT_ASK = new Set(['records.delete']);
 export const DEFAULT_DAILY_EXTERNAL_LIMIT = 25;
 
+/** Phase 4 / M9: an agent set to "ask before every change" turns every allowed non-read action into an approval. */
 export function decideTool(input: DecideInput): DecideResult {
+  const r = decideBase(input);
+  if (input.askAll && r.decision === 'allow' && r.risk !== 'L0') return { ...r, decision: 'require_approval', reason: 'This agent asks before every change.' };
+  return r;
+}
+
+function decideBase(input: DecideInput): DecideResult {
   const { tool } = input;
   if (HARD_DENY_PREFIXES.some((p) => tool.startsWith(p))) {
     return { decision: 'deny', risk: 'L4', reason: 'Money movement is not implemented and is always denied.' };

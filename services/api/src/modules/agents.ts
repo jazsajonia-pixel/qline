@@ -9,7 +9,12 @@ import { withTenant } from '../core/db';
 import { isStopped } from '../core/controls';
 import { ApiError, forbidden, notFound } from '../core/errors';
 import { body, query } from '../core/validate';
-import { executeRun, makeEmitter } from '../agent/runner';
+import { complete, ProviderError } from '@qline/ai';
+import { executeRun, makeEmitter, MAX_TOOL_CALLS } from '../agent/runner';
+import { reportKey } from '../agent/keys';
+import { stripMeta } from '../agent/meta';
+import { resolveModel } from '../agent/models';
+import { checkAllowlist, entitlement, loadAgent, newVersion, readOnlyTools, type VersionFields } from '../agent/versions';
 import { ledgerStats } from '../agent/context-ledger';
 import { getTool, IMPLEMENTED_TOOLS } from '../agent/tools';
 import { applyWorkflowDecision, resumeWorkflowAfterDecision } from './workflows';
@@ -25,11 +30,12 @@ agentRoutes.get('/agents', async (c) => {
   const t = c.get('tenant');
   const items = await tx(t, (q) =>
     q.many(
-      `select a.id, a.template, a.name, a.status, a.current_version, v.instructions, v.model, v.provider, v.tool_allowlist,
+      `select a.id, a.template, a.name, a.status, a.current_version, a.description, a.icon, a.accent, a.based_on,
+              v.instructions, v.model, v.provider, v.tool_allowlist, v.key_id, v.approval_mode, v.max_tool_calls, v.daily_runs, v.max_concurrent,
               (select count(*)::int from agent_runs r where r.agent_id=a.id and r.created_at > now() - interval '7 days') as runs_week,
               (select max(r.created_at) from agent_runs r where r.agent_id=a.id) as last_run_at
        from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version
-       where a.status <> 'archived' order by case a.template when 'ceo' then 0 else 1 end, a.name`,
+       where a.status <> 'archived' order by case a.template when 'ceo' then 0 when 'custom' then 2 else 1 end, a.name`,
     ),
   );
   return c.json({
@@ -48,17 +54,41 @@ agentRoutes.get('/agents', async (c) => {
 agentRoutes.get('/agents/:id', async (c) => {
   const t = c.get('tenant');
   const data = await tx(t, async (q) => {
-    const a = await q.one(
-      `select a.*, v.instructions, v.model, v.provider, v.tool_allowlist from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version where a.id=$1`,
-      [c.req.param('id')],
-    );
+    const a = await loadAgent(q, c.req.param('id'));
     if (!a) throw notFound('Agent');
-    const versions = await q.many('select version, created_by, created_at from agent_versions where agent_id=$1 order by version desc', [a.id]);
+    const versions = await q.many(
+      `select v.version, v.created_by, v.created_at, left(v.instructions, 200) as instructions_preview, v.model, v.provider, v.approval_mode, v.max_tool_calls, k.alias as key_alias
+         from agent_versions v left join ai_keys k on k.id=v.key_id where v.agent_id=$1 order by v.version desc limit 50`,
+      [a.id],
+    );
+    const key = a.key_id ? await q.one('select id, alias, provider, enabled, status from ai_keys where id=$1', [a.key_id]) : null;
     const runs = await q.many('select id, status, trigger, input_tokens, output_tokens, created_at, ended_at, error from agent_runs where agent_id=$1 order by created_at desc limit 20', [a.id]);
-    return { ...a, versions, runs };
+    return { ...a, entitlement: entitlement(a), key, versions, runs };
   });
   return c.json(data);
 });
+
+const ICON = z.string().regex(/^[a-z_]{1,40}$/);
+const ACCENT = z.enum(['violet', 'mint', 'citrine', 'coral', 'sky', 'rose']);
+const PROFILE = z.enum(['ceo', 'sales', 'marketing', 'finance', 'operations', 'research']);
+const BUDGETS = {
+  approvalMode: z.enum(['policy', 'ask_all']).optional(),
+  maxToolCalls: z.number().int().min(0).max(MAX_TOOL_CALLS).optional(),
+  dailyRuns: z.number().int().min(1).max(1000).nullable().optional(),
+  maxConcurrent: z.number().int().min(1).max(5).nullable().optional(),
+};
+export const MAX_CUSTOM_AGENTS = 20;
+
+function versionChanges(input: { instructions?: string; toolAllowlist?: string[]; approvalMode?: 'policy' | 'ask_all'; maxToolCalls?: number; dailyRuns?: number | null; maxConcurrent?: number | null }) {
+  const ch: Partial<VersionFields> = {};
+  if (input.instructions !== undefined) ch.instructions = input.instructions;
+  if (input.toolAllowlist !== undefined) ch.tool_allowlist = [...new Set(input.toolAllowlist)];
+  if (input.approvalMode !== undefined) ch.approval_mode = input.approvalMode;
+  if (input.maxToolCalls !== undefined) ch.max_tool_calls = input.maxToolCalls;
+  if (input.dailyRuns !== undefined) ch.daily_runs = input.dailyRuns;
+  if (input.maxConcurrent !== undefined) ch.max_concurrent = input.maxConcurrent;
+  return ch;
+}
 
 /** Humans only: agents never reach this route (invariant 4, docs/07 §4). */
 agentRoutes.patch('/agents/:id', async (c) => {
@@ -68,33 +98,179 @@ agentRoutes.patch('/agents/:id', async (c) => {
     z.object({
       status: z.enum(['active', 'paused']).optional(),
       name: z.string().trim().min(1).max(80).optional(),
+      description: z.string().trim().max(300).nullable().optional(),
+      icon: ICON.nullable().optional(),
+      accent: ACCENT.nullable().optional(),
       instructions: z.string().trim().min(1).max(8000).optional(),
       toolAllowlist: z.array(z.string()).max(40).optional(),
+      ...BUDGETS,
     }),
   );
   const row = await tx(t, async (q) => {
-    const a = await q.one(`select a.*, v.instructions, v.model, v.provider, v.tool_allowlist from agents a join agent_versions v on v.agent_id=a.id and v.version=a.current_version where a.id=$1`, [c.req.param('id')]);
-    if (!a) throw notFound('Agent');
-    if (input.toolAllowlist) {
-      // Only tools that the template is entitled to (policy floor); never widen beyond it.
-      for (const tool of input.toolAllowlist) {
-        const p = TOOL_POLICIES[tool];
-        if (!p || !p.templates.includes(a.template)) throw forbidden(`${tool} is not available to the ${a.template} agent.`);
-      }
-    }
-    if (input.instructions || input.toolAllowlist) {
-      const next = a.current_version + 1;
-      await q.exec(
-        `insert into agent_versions (org_id, agent_id, version, instructions, model, provider, tool_allowlist, created_by) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [t.orgId, a.id, next, input.instructions ?? a.instructions, a.model, a.provider, input.toolAllowlist ?? a.tool_allowlist, `user:${t.userId}`],
-      );
-      await q.exec('update agents set current_version=$2 where id=$1', [a.id, next]);
-    }
+    const a = await loadAgent(q, c.req.param('id'));
+    if (!a || a.status === 'archived') throw notFound('Agent');
+    if (input.toolAllowlist) checkAllowlist(a, input.toolAllowlist);
+    const ch = versionChanges(input);
+    if (Object.keys(ch).length) await newVersion(q, t.orgId, a, ch, `user:${t.userId}`);
     if (input.status || input.name) await q.exec('update agents set status=coalesce($2,status), name=coalesce($3,name) where id=$1', [a.id, input.status ?? null, input.name ?? null]);
+    if (input.description !== undefined || input.icon !== undefined || input.accent !== undefined) {
+      await q.exec(
+        `update agents set description = case when $2 then $3 else description end, icon = case when $4 then $5 else icon end, accent = case when $6 then $7 else accent end where id=$1`,
+        [a.id, input.description !== undefined, input.description ?? null, input.icon !== undefined, input.icon ?? null, input.accent !== undefined, input.accent ?? null],
+      );
+    }
     await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'agent.updated', targetRef: `agent:${a.id}`, detail: { ...input, instructions: input.instructions ? '[changed]' : undefined } });
     return q.one('select * from agents where id=$1', [a.id]);
   });
   return c.json(row);
+});
+
+/**
+ * Phase 4 / M9: a person creates their own agent, from scratch or as a copy. It starts paused, with least privilege:
+ * its tools can only come from the built-in profile it is based on, and a new one from scratch gets read-only tools.
+ */
+agentRoutes.post('/agents', async (c) => {
+  const t = need(c, 'agents.manage');
+  const input = await body(
+    c,
+    z.object({
+      name: z.string().trim().min(1).max(80),
+      description: z.string().trim().max(300).optional(),
+      icon: ICON.optional(),
+      accent: ACCENT.optional(),
+      basedOn: PROFILE.optional(),
+      cloneFrom: z.string().uuid().optional(),
+      instructions: z.string().trim().min(1).max(8000).optional(),
+      toolAllowlist: z.array(z.string()).max(40).optional(),
+      ...BUDGETS,
+    }),
+  );
+  const row = await tx(t, async (q) => {
+    const count = await q.one<{ n: number }>(`select count(*)::int as n from agents where workspace_id=$1 and template='custom' and status <> 'archived'`, [t.workspaceId]);
+    if (count!.n >= MAX_CUSTOM_AGENTS) throw new ApiError(409, 'AGENT_LIMIT', `You can have up to ${MAX_CUSTOM_AGENTS} of your own agents`, 'Archive one you no longer use first.');
+    const src = input.cloneFrom ? await loadAgent(q, input.cloneFrom) : null;
+    if (input.cloneFrom && (!src || src.status === 'archived')) throw notFound('Agent');
+    const profile = (input.basedOn ?? (src ? entitlement(src) : 'research')) as AgentTemplate;
+    const draft = { template: 'custom', based_on: profile };
+    const tools = input.toolAllowlist ?? (src && entitlement(src) === profile ? src.tool_allowlist : readOnlyTools(profile));
+    checkAllowlist(draft, tools);
+    const instructions = input.instructions ?? src?.instructions;
+    if (!instructions) throw new ApiError(400, 'VALIDATION', 'Write instructions for this agent', 'Say what it should help with and how.');
+    const a = await q.one<{ id: string }>(
+      `insert into agents (org_id, workspace_id, template, name, status, created_by, description, icon, accent, based_on)
+       values ($1,$2,'custom',$3,'paused',$4,$5,$6,$7,$8) returning id`,
+      [t.orgId, t.workspaceId, input.name, t.userId, input.description ?? src?.description ?? null, input.icon ?? src?.icon ?? null, input.accent ?? src?.accent ?? null, profile],
+    );
+    await q.exec(
+      `insert into agent_versions (org_id, agent_id, version, instructions, model, provider, tool_allowlist, key_id, approval_mode, max_tool_calls, daily_runs, max_concurrent, created_by)
+       values ($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        t.orgId,
+        a!.id,
+        instructions,
+        src?.model ?? 'default',
+        src?.provider ?? null,
+        [...new Set(tools)],
+        src?.key_id ?? null,
+        input.approvalMode ?? src?.approval_mode ?? 'policy',
+        input.maxToolCalls ?? src?.max_tool_calls ?? MAX_TOOL_CALLS,
+        input.dailyRuns ?? src?.daily_runs ?? null,
+        input.maxConcurrent ?? src?.max_concurrent ?? null,
+        `user:${t.userId}`,
+      ],
+    );
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'agent.created', targetRef: `agent:${a!.id}`, detail: { name: input.name, basedOn: profile, cloneFrom: input.cloneFrom ?? null, tools: tools.length } });
+    return q.one('select * from agents where id=$1', [a!.id]);
+  });
+  return c.json(row, 201);
+});
+
+/** Restores an earlier version's settings as a new version (history is never rewritten). */
+agentRoutes.post('/agents/:id/revert', async (c) => {
+  const t = need(c, 'agents.manage');
+  const input = await body(c, z.object({ version: z.number().int().min(1) }));
+  const out = await tx(t, async (q) => {
+    const a = await loadAgent(q, c.req.param('id'));
+    if (!a || a.status === 'archived') throw notFound('Agent');
+    const old = await q.one<any>('select * from agent_versions where agent_id=$1 and version=$2', [a.id, input.version]);
+    if (!old) throw notFound('Version');
+    checkAllowlist(a, old.tool_allowlist);
+    const keyOk = old.key_id ? await q.one('select 1 from ai_keys where id=$1', [old.key_id]) : null;
+    const next = await newVersion(
+      q,
+      t.orgId,
+      a,
+      {
+        instructions: old.instructions,
+        model: old.model,
+        provider: old.provider,
+        tool_allowlist: old.tool_allowlist,
+        key_id: keyOk ? old.key_id : null,
+        approval_mode: old.approval_mode,
+        max_tool_calls: old.max_tool_calls,
+        daily_runs: old.daily_runs,
+        max_concurrent: old.max_concurrent,
+      },
+      `user:${t.userId}`,
+    );
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'agent.reverted', targetRef: `agent:${a.id}`, detail: { to: input.version, version: next } });
+    return { id: a.id, version: next, restored: input.version, keyDropped: !!old.key_id && !keyOk };
+  });
+  return c.json(out);
+});
+
+/** Archives one of the person's own agents. Built-in agents can only be paused. Chats with it stay readable. */
+agentRoutes.delete('/agents/:id', async (c) => {
+  const t = need(c, 'agents.manage');
+  await tx(t, async (q) => {
+    const a = await q.one('select id, template, status from agents where id=$1', [c.req.param('id')]);
+    if (!a || a.status === 'archived') throw notFound('Agent');
+    if (a.template !== 'custom') throw new ApiError(409, 'AGENT_BUILT_IN', 'Built-in agents cannot be removed', 'Pause it instead.');
+    await q.exec(`update agents set status='archived' where id=$1`, [a.id]);
+    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'agent.archived', targetRef: `agent:${a.id}` });
+  });
+  return c.json({ ok: true });
+});
+
+/**
+ * Tries an agent's instructions on one message without tools and without saving anything, so a person can see how
+ * it answers before activating it. Works for paused agents. Optional `instructions` previews an unsaved edit.
+ */
+agentRoutes.post('/agents/:id/preview', async (c) => {
+  const t = need(c, 'agents.manage');
+  const input = await body(c, z.object({ message: z.string().trim().min(1).max(2000), instructions: z.string().trim().min(1).max(8000).optional() }));
+  const setup = await tx(t, async (q) => {
+    const a = await loadAgent(q, c.req.param('id'));
+    if (!a || a.status === 'archived') throw notFound('Agent');
+    const resolved = await resolveModel(q, t.orgId, { provider: a.provider, model: a.model, name: a.name, keyId: a.key_id });
+    return { a, resolved };
+  });
+  const { a, resolved } = setup;
+  if (!resolved.ok) throw new ApiError(409, resolved.code, resolved.message);
+  const started = Date.now();
+  try {
+    const r = await complete(
+      resolved.provider,
+      {
+        model: resolved.model,
+        maxTokens: 800,
+        messages: [
+          { role: 'system', content: `You are "${a.name}", an AI agent inside Qline. This is a preview: you have no tools, so do not claim to look anything up or change anything. ${input.instructions ?? a.instructions}` },
+          { role: 'user', content: input.message },
+        ],
+      },
+      AbortSignal.timeout(45_000),
+    );
+    if (resolved.keyId) await tx(t, (q) => reportKey(q, resolved.keyId!, 'ok')).catch(() => {});
+    return c.json({ ok: true, reply: stripMeta(r.text).trim().slice(0, 4000), model: resolved.model, provider: resolved.providerId, key: resolved.keyAlias, latencyMs: Date.now() - started });
+  } catch (e) {
+    const pe = e instanceof ProviderError ? e : new ProviderError('PROVIDER_UNAVAILABLE', (e as Error).message, true);
+    if (resolved.keyId) {
+      const outcome = pe.code === 'PROVIDER_RATE_LIMITED' ? 'rate_limited' : pe.code === 'PROVIDER_AUTH_FAILED' ? 'auth_failed' : 'error';
+      await tx(t, (q) => reportKey(q, resolved.keyId!, outcome, pe.message)).catch(() => {});
+    }
+    return c.json({ ok: false, code: pe.code, message: pe.message.slice(0, 400), key: resolved.keyAlias, latencyMs: Date.now() - started });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -219,7 +395,21 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
         routed = { id: chosen.id, name: chosen.name, template: chosen.template };
       }
     }
-    const v = await q.one('select id from agent_versions where agent_id=$1 and version=$2', [agent.id, agent.version]);
+    const v = await q.one('select id, daily_runs, max_concurrent from agent_versions where agent_id=$1 and version=$2', [agent.id, agent.version]);
+    // Phase 4 / M9: the agent's own run budgets, checked under a per-agent lock so parallel sends cannot overshoot.
+    if (v.daily_runs || v.max_concurrent) {
+      await q.exec(`select pg_advisory_xact_lock(hashtextextended('qline.agent_budget:' || $1::text, 0))`, [agent.id]);
+      const use = await q.one<{ today: number; live: number }>(
+        `select count(*) filter (where created_at >= date_trunc('day', now()))::int as today,
+                count(*) filter (where status in ('queued','running') and coalesce(started_at, created_at) > now() - make_interval(mins => $2))::int as live
+           from agent_runs where agent_id=$1 and created_at >= least(date_trunc('day', now()), now() - make_interval(mins => $2))`,
+        [agent.id, STALE_RUN_MIN],
+      );
+      if (v.daily_runs && use!.today >= v.daily_runs)
+        throw new ApiError(429, 'AGENT_BUDGET_REACHED', `This agent reached its limit of ${v.daily_runs} answers today`, 'The limit resets at 00:00 UTC. You can raise it in the agent settings.');
+      if (v.max_concurrent && use!.live >= v.max_concurrent)
+        throw new ApiError(429, 'AGENT_BUSY', `This agent is already answering ${use!.live} other chat${use!.live === 1 ? '' : 's'}`, 'Wait for one to finish, or raise its limit in the agent settings.');
+    }
     const run = await q.one<{ id: string }>(
       `insert into agent_runs (org_id, conversation_id, agent_id, agent_version_id, initiated_by, trigger) values ($1,$2,$3,$4,$5,'chat') returning id`,
       [t.orgId, conv.id, agent.id, v.id, t.userId],

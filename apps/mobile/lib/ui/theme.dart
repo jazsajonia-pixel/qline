@@ -173,4 +173,22 @@ class AgentStyle {
     'research': AgentStyle(Color(0xFF8EA2FF), .7, .7, 'Market & competitors'),
   };
   static AgentStyle of(String? template) => map[template] ?? map['ceo']!;
+
+  /// Phase 4 / M9: colours a person can give their own agents.
+  static const accents = {
+    'violet': Color(0xFFB08CFF),
+    'mint': Color(0xFF36CDBE),
+    'citrine': Color(0xFFE2C25A),
+    'coral': Color(0xFFFF8A6B),
+    'sky': Color(0xFF3DB8FF),
+    'rose': Color(0xFFF07AC0),
+  };
+
+  /// Style for any agent row from the API: built-ins by template, custom agents by their accent and description.
+  static AgentStyle ofAgent(Map a) {
+    if (a['template'] != 'custom') return of(a['template'] as String?);
+    final base = map[a['based_on']] ?? map['research']!;
+    final d = (a['description'] as String?)?.trim();
+    return AgentStyle(accents[a['accent']] ?? base.hue, base.speed, base.curl, d == null || d.isEmpty ? 'Your agent' : d);
+  }
 }

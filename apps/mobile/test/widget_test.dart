@@ -99,6 +99,6 @@ void main() {
     expect(find.textContaining('Key ending ab12'), findsOneWidget);
     expect(find.text('DeepSeek'), findsOneWidget);
     expect(find.text('Add key'), findsNWidgets(4));
-    expect(find.text('Replace key'), findsOneWidget);
+    expect(find.text('Replace primary key'), findsOneWidget);
   });
 }

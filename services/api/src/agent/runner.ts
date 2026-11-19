@@ -6,6 +6,7 @@ import { autonomyState, isStopped, reserveExternalAction, settleReservation } fr
 import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { currentSnapshot, findReusable, ledgerDigest, ownXid, remember, reusable, type LedgerScope } from './context-ledger';
 import { MetaFilter, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
+import { reportKey } from './keys';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName, type Artifact } from './tools';
 import { attachmentContext, loadAttachments } from '../modules/files';
@@ -74,7 +75,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
 
   const setup = await db(async (q) => {
     const run = await q.one(
-      `select r.*, a.name as agent_name, a.status as agent_status, a.template, v.instructions, v.model, v.provider, v.tool_allowlist
+      `select r.*, a.name as agent_name, a.status as agent_status, a.template, a.based_on, v.instructions, v.model, v.provider, v.tool_allowlist, v.key_id, v.approval_mode, v.max_tool_calls
        from agent_runs r join agents a on a.id = r.agent_id join agent_versions v on v.id = r.agent_version_id where r.id=$1`,
       [runId],
     );
@@ -85,7 +86,8 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     );
     const ws = await q.one('select config from workspaces where id=$1', [ctx.workspaceId]);
     const profile = await q.one('select profile from business_profiles where workspace_id=$1', [ctx.workspaceId]);
-    const resolved = await resolveModel(q, ctx.orgId, { provider: run.provider, model: run.model, name: run.agent_name });
+    const resolved = await resolveModel(q, ctx.orgId, { provider: run.provider, model: run.model, name: run.agent_name, keyId: run.key_id });
+    if (resolved.ok && resolved.keyId) await q.exec('update agent_runs set key_id=$2 where id=$1', [runId, resolved.keyId]);
     const ids = history.flatMap((h: any) => ((h.meta?.attachments ?? []) as { id: string }[]).map((a) => a.id));
     const files = await loadAttachments(q, [...new Set(ids)]);
     // Run 3 / M4: knowledge the person added to a message. Read as this user (RLS), so private entries stay theirs.
@@ -162,7 +164,10 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     await finish('failed', '', { i: 0, o: 0 }, resolved.message);
     return;
   }
-  const { provider, model, providerId } = resolved;
+  let { provider, keyId, keyAlias } = resolved;
+  const { model, providerId, assignedKey } = resolved;
+  const maxCalls = Math.min(MAX_TOOL_CALLS, Number.isInteger(run.max_tool_calls) ? run.max_tool_calls : MAX_TOOL_CALLS);
+  let failedOver = false;
 
   await emit('status', { state: 'thinking', provider: providerId, model });
 
@@ -225,21 +230,53 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
   const artifacts: Artifact[] = [];
 
   try {
-    for (let turn = 0; turn < MAX_TOOL_CALLS + 1; turn++) {
+    for (let turn = 0; turn < maxCalls + 1; turn++) {
       if (Date.now() - started > CHAT_WALL_MS) throw new ProviderError('PROVIDER_UNAVAILABLE', 'The run took too long and was stopped.', true);
       if (signal?.aborted) break;
       const calls: ToolCallReq[] = [];
       let turnText = '';
       let reasoning = '';
       const filter = new MetaFilter();
-      for await (const ev of provider.stream({ model, messages, tools: toolCount < MAX_TOOL_CALLS ? tools : undefined, maxTokens: 4096 }, signal)) {
-        if (ev.type === 'reasoning') reasoning += ev.text;
-        else if (ev.type === 'token') {
-          turnText += ev.text;
-          const show = filter.push(ev.text);
-          if (show) await emit('token', { text: show });
-        } else if (ev.type === 'tool_call') calls.push(ev.call);
-        else if (ev.type === 'usage') usage = { i: usage.i + ev.inputTokens, o: usage.o + ev.outputTokens };
+      let emitted = false;
+      try {
+        for await (const ev of provider.stream({ model, messages, tools: toolCount < maxCalls && tools.length ? tools : undefined, maxTokens: 4096 }, signal)) {
+          if (ev.type === 'reasoning') reasoning += ev.text;
+          else if (ev.type === 'token') {
+            turnText += ev.text;
+            const show = filter.push(ev.text);
+            if (show) {
+              emitted = true;
+              await emit('token', { text: show });
+            }
+          } else if (ev.type === 'tool_call') calls.push(ev.call);
+          else if (ev.type === 'usage') usage = { i: usage.i + ev.inputTokens, o: usage.o + ev.outputTokens };
+        }
+      } catch (e) {
+        // M10: record the key's health. A rate limit or rejected key before anything was shown or done in this turn
+        // is retried once on another eligible key (never for an agent pinned to one key).
+        const pe = e instanceof ProviderError ? e : null;
+        const outcome = pe?.code === 'PROVIDER_RATE_LIMITED' ? 'rate_limited' : pe?.code === 'PROVIDER_AUTH_FAILED' ? 'auth_failed' : 'error';
+        const failed = keyId;
+        if (failed) await db((q) => reportKey(q, failed, outcome, pe?.message)).catch(() => {});
+        if (failed && pe && outcome !== 'error' && !emitted && !calls.length && !assignedKey && !failedOver && !signal?.aborted) {
+          failedOver = true;
+          const next = await db((q) => resolveModel(q, ctx.orgId, { provider: run.provider, model: run.model, name: run.agent_name }, [failed]));
+          if (next.ok && next.keyId && next.providerId === providerId) {
+            provider = next.provider;
+            keyId = next.keyId;
+            keyAlias = next.keyAlias;
+            const id = next.keyId;
+            await db((q) => q.exec('update agent_runs set key_id=$2 where id=$1', [runId, id]));
+            await emit('status', { state: 'thinking', provider: providerId, model, note: 'Switched to another key' });
+            turn -= 1;
+            continue;
+          }
+        }
+        throw e;
+      }
+      if (keyId && turn === 0) {
+        const ok = keyId;
+        await db((q) => reportKey(q, ok, 'ok')).catch(() => {});
       }
       const tail = filter.flush();
       if (tail) await emit('token', { text: tail });
@@ -261,7 +298,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
         }
         messages.push({ role: 'tool', tool_call_id: call.id, content: untrusted(`tool:${name}`, result.forModel) });
       }
-      if (toolCount >= MAX_TOOL_CALLS) {
+      if (toolCount >= maxCalls) {
         // One last turn without tools so the model can summarise.
         continue;
       }
@@ -271,9 +308,9 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     const code = pe.code === 'PROVIDER_NOT_CONFIGURED' ? 'AI_PROVIDER_NOT_CONFIGURED' : pe.code;
     const human =
       pe.code === 'PROVIDER_AUTH_FAILED'
-        ? `The ${providerId} key was rejected (${pe.message}). Replace it in Settings → AI providers.`
+        ? `The ${providerId} key${keyAlias ? ` "${keyAlias}"` : ''} was rejected (${pe.message}). Replace it in Settings → AI providers.`
         : pe.code === 'PROVIDER_RATE_LIMITED'
-          ? `The AI provider is rate limiting this key. Try again shortly, or pick another model. (${pe.message})`
+          ? `The AI provider is rate limiting ${keyAlias ? `the key "${keyAlias}"` : 'this key'}${failedOver ? ' and the other key it tried' : ''}. Try again shortly, or pick another model. (${pe.message})`
           : `The AI provider failed: ${pe.message}`;
     await emit('error', { code, retryable: pe.retryable, message: human, detail: pe.detail });
     await finish('failed', text, usage, human, refs, artifacts.length ? { speech: '', suggestions: [], artifacts } : undefined);
@@ -305,7 +342,7 @@ async function handleToolCall(
     const ws = await q.one('select config from workspaces where id=$1', [ctx.workspaceId]);
     return { stopped: await isStopped(q, ctx.workspaceId), auto: await autonomyState(q, ws?.config, ctx.workspaceId) };
   });
-  let decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, relaxed: policy.relaxed, tightened: policy.tightened, stopped, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
+  let decision = decideTool({ tool: name, allowlist: allow, userRole: ctx.role, askAll: run.approval_mode === 'ask_all', relaxed: policy.relaxed, tightened: policy.tightened, stopped, autonomy: auto.autonomy, externalCapReached: auto.externalCapReached });
   const idem = `run:${run.id}:${index}`;
   let args: unknown = {};
   try {
