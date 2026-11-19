@@ -8,7 +8,9 @@ import 'package:material_ui/material_ui.dart';
 
 import '../core/api.dart';
 import '../core/session.dart';
+import '../screens/proposals.dart';
 import 'theme.dart';
+import 'widgets.dart' show push;
 
 /// Flat, solid data colours (docs/03 §2 "Charts"). Citrine is kept for human actions, so it is
 /// not a series colour. Live AI is always dark, so these are tuned for the dark surfaces.
@@ -23,8 +25,44 @@ class ChatArtifact extends StatelessWidget {
         'chart' => ChatChart(data),
         'image' => ChatImage(fileId: data['fileId'] as String? ?? '', name: data['name'] as String? ?? 'Image', caption: data['caption'] as String?),
         'file' => Padding(padding: const EdgeInsets.only(top: 8), child: FileCard(fileId: data['fileId'] as String? ?? '', name: data['name'] as String? ?? 'File', kind: data['kind'] as String?, size: data['size'] as num?, source: data['source'] as String?)),
+        'proposal' => Padding(padding: const EdgeInsets.only(top: 8), child: ProposalCard(id: data['id'] as String? ?? '', kind: data['kind'] as String? ?? 'mission', title: data['title'] as String? ?? 'Proposal')),
         _ => const SizedBox.shrink(),
       };
+}
+
+/// Phase 6: the AI proposed a mission or an agent change. Opens the review screen; nothing changed yet.
+class ProposalCard extends StatelessWidget {
+  const ProposalCard({super.key, required this.id, required this.kind, required this.title});
+  final String id, kind, title;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    return Material(
+      color: q.surface1,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: id.isEmpty ? null : () => push(context, ProposalScreen(id: id)),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 320, minHeight: 56),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), border: Border.all(color: q.halo.withValues(alpha: .6))),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(kind == 'mission' ? Icons.flag_outlined : Icons.tune, size: 22, color: q.halo),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: qs(13, w: FontWeight.w600, c: q.text)),
+                Text(kind == 'mission' ? 'Proposed mission · Tap to review' : 'Proposed agent change · Tap to review', style: qs(11, c: q.text3)),
+              ]),
+            ),
+            const SizedBox(width: 8),
+            Icon(Icons.chevron_right, size: 18, color: q.text3),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
 class ChartData {

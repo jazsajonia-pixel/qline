@@ -383,6 +383,9 @@ describe('v1.6 run 3: untrusted data, connector helpers and policies', async () 
       expect(TOOL_POLICIES[t]!.relaxable).toBeFalsy();
     }
     for (const t of ['drive.search', 'drive.read', 'drive.fetch', 'notion.search', 'notion.read', 'github.repos', 'github.issues', 'github.read', 'stripe.summary', 'stripe.list', 'knowledge.search']) expect(TOOL_POLICIES[t]!.risk).toBe('L0');
+    // Phase 6: proposal tools are L1 drafts; agent changes are proposed by the CEO only.
+    expect(TOOL_POLICIES['missions.propose']).toMatchObject({ risk: 'L1', decision: 'allow', requires: 'agents.use' });
+    expect(TOOL_POLICIES['agents.propose_change']).toMatchObject({ risk: 'L1', templates: ['ceo'] });
   });
 });
 

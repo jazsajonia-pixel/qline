@@ -9,6 +9,7 @@ import 'ai.dart';
 import 'import.dart';
 import 'integrations.dart';
 import 'leads.dart';
+import 'proposals.dart';
 import 'settings.dart';
 import 'setup.dart';
 import 'workflows.dart';
@@ -36,6 +37,8 @@ class BusinessScreen extends ConsumerWidget {
     return ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 32), children: [
       const SectionLabel('Your AI team'),
       const _AgentStrip(),
+      const SizedBox(height: 8),
+      const ProposalsSection(kind: 'agent_change'),
       const SectionLabel('Run the business'),
       tile(Icons.people_outline, 'Clients & contacts', 'People and companies you work with', const ContactsScreen()),
       tile(Icons.account_tree_outlined, 'Workflows', 'Automations with approval steps', const WorkflowsScreen()),

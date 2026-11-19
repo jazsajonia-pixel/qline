@@ -630,6 +630,25 @@ registerJob('mission.task', taskHandler, {
 const MISSION_COLS = `id, workspace_id, goal, status, created_by, budget_tokens, budget_tool_calls, budget_wall_seconds, spent_tokens, spent_tool_calls,
   max_parallel, current_plan_id, result, result_review, error, started_at, ended_at, created_at, updated_at`;
 
+/** Creates a mission and queues its plan. Used by POST /missions and by applying an approved AI proposal. */
+export async function createMission(
+  q: Q,
+  t: TenantCtx,
+  b: { goal: string; budgetTokens?: number; budgetToolCalls?: number; budgetWallSeconds?: number; maxParallel?: number },
+  via?: string,
+) {
+  if ((await getControls(q, t.workspaceId)).emergency_stop) throw new ApiError(409, 'EMERGENCY_STOP', 'Emergency stop is on', 'Turn off the emergency stop before starting a mission.');
+  const row = await q.one(
+    `insert into missions (org_id, workspace_id, goal, created_by, budget_tokens, budget_tool_calls, budget_wall_seconds, max_parallel)
+     values ($1,$2,$3,$4,coalesce($5,200000),coalesce($6,60),coalesce($7,3600),coalesce($8,2)) returning ${MISSION_COLS}`,
+    [t.orgId, t.workspaceId, b.goal, t.userId, b.budgetTokens ?? null, b.budgetToolCalls ?? null, b.budgetWallSeconds ?? null, b.maxParallel ?? null],
+  );
+  await enqueue(q, { orgId: t.orgId, kind: 'mission.plan', payload: { missionId: row.id, userId: t.userId }, idempotencyKey: `mission.plan:${row.id}:1`, maxAttempts: 3, createdBy: `user:${t.userId}` });
+  await trace(q, t.orgId, row.id, 'mission.created', `user:${t.userId}`, { goal: b.goal.slice(0, 200), ...(via ? { via } : {}) });
+  await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'mission.created', targetRef: `mission:${row.id}`, correlationId: t.correlationId, ...(via ? { detail: { via } } : {}) });
+  return row;
+}
+
 missionRoutes.post('/missions', async (c) => {
   const t = need(c, 'agents.use');
   const b = await body(
@@ -642,18 +661,7 @@ missionRoutes.post('/missions', async (c) => {
       maxParallel: z.number().int().min(1).max(4).optional(),
     }),
   );
-  const m = await tx(t, async (q) => {
-    if ((await getControls(q, t.workspaceId)).emergency_stop) throw new ApiError(409, 'EMERGENCY_STOP', 'Emergency stop is on', 'Turn off the emergency stop before starting a mission.');
-    const row = await q.one(
-      `insert into missions (org_id, workspace_id, goal, created_by, budget_tokens, budget_tool_calls, budget_wall_seconds, max_parallel)
-       values ($1,$2,$3,$4,coalesce($5,200000),coalesce($6,60),coalesce($7,3600),coalesce($8,2)) returning ${MISSION_COLS}`,
-      [t.orgId, t.workspaceId, b.goal, t.userId, b.budgetTokens ?? null, b.budgetToolCalls ?? null, b.budgetWallSeconds ?? null, b.maxParallel ?? null],
-    );
-    await enqueue(q, { orgId: t.orgId, kind: 'mission.plan', payload: { missionId: row.id, userId: t.userId }, idempotencyKey: `mission.plan:${row.id}:1`, maxAttempts: 3, createdBy: `user:${t.userId}` });
-    await trace(q, t.orgId, row.id, 'mission.created', `user:${t.userId}`, { goal: b.goal.slice(0, 200) });
-    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'mission.created', targetRef: `mission:${row.id}`, correlationId: t.correlationId });
-    return row;
-  });
+  const m = await tx(t, (q) => createMission(q, t, b));
   kick();
   return c.json(m, 201);
 });

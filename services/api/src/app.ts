@@ -21,6 +21,7 @@ import { integrationRoutes, oauthPublicRoutes } from './modules/integrations';
 import { googleSignInRoutes } from './modules/google-signin';
 import { voiceRoutes } from './modules/voice';
 import { knowledgeRoutes } from './modules/knowledge';
+import { proposalRoutes } from './modules/proposals';
 
 export const app = new Hono<Env>();
 
@@ -116,6 +117,7 @@ app.route('/v1', agentRoutes);
 app.route('/v1', aiRoutes);
 app.route('/v1', workflowRoutes);
 app.route('/v1', missionRoutes);
+app.route('/v1', proposalRoutes);
 app.route('/v1', actionRoutes);
 app.route('/v1', runtimeRoutes);
 app.route('/v1', onboardingRoutes);
