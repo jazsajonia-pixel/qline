@@ -77,6 +77,15 @@ orgRoutes.delete('/me/sessions/:id', requireUser, async (c) => {
   return c.json({ id: target.id, revoked: true });
 });
 
+/** Sign out every other device; this one stays signed in. */
+orgRoutes.post('/me/sessions/revoke-others', requireUser, async (c) => {
+  const before = (await getAuth().api.listSessions({ headers: c.req.raw.headers })).length;
+  await getAuth().api.revokeOtherSessions({ headers: c.req.raw.headers });
+  const after = (await getAuth().api.listSessions({ headers: c.req.raw.headers })).length;
+  c.header('Cache-Control', 'no-store');
+  return c.json({ revoked: Math.max(0, before - after), remaining: after });
+});
+
 orgRoutes.get('/me', requireUser, async (c) => {
   const u = c.get('user');
   const orgs = await tx({ orgId: null, userId: u.userId }, (q) =>

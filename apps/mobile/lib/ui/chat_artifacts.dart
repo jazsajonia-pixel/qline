@@ -22,6 +22,7 @@ class ChatArtifact extends StatelessWidget {
   Widget build(BuildContext context) => switch (data['type']) {
         'chart' => ChatChart(data),
         'image' => ChatImage(fileId: data['fileId'] as String? ?? '', name: data['name'] as String? ?? 'Image', caption: data['caption'] as String?),
+        'file' => Padding(padding: const EdgeInsets.only(top: 8), child: FileCard(fileId: data['fileId'] as String? ?? '', name: data['name'] as String? ?? 'File', kind: data['kind'] as String?, size: data['size'] as num?, source: data['source'] as String?)),
         _ => const SizedBox.shrink(),
       };
 }
@@ -372,15 +373,85 @@ String fileSize(num? bytes) {
 IconData kindIcon(String? kind) => switch (kind) { 'image' => Icons.image_outlined, 'records' => Icons.table_chart_outlined, _ => Icons.description_outlined };
 
 /// A file attached to a message: pending in the composer (removable) or sent (read-only).
+/// Saves a copy of a stored file to the device (system "Save as" dialog). Used by sent attachments and file cards.
+/// Tests replace [saveFileBytes] so no platform dialog is needed.
+@visibleForTesting
+Future<Object?> Function(String name, Uint8List bytes) saveFileBytes = (name, bytes) => FilePicker.saveFile(fileName: name, bytes: bytes);
+
+Future<void> saveFileCopy(BuildContext context, WidgetRef ref, String fileId, String name) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  try {
+    final bytes = await ref.read(apiProvider).download('/files/$fileId/download');
+    final where = await saveFileBytes(name, bytes);
+    messenger?.showSnackBar(SnackBar(content: Text(where == null ? 'Not saved' : 'Saved $name')));
+  } catch (e) {
+    messenger?.showSnackBar(SnackBar(content: Text('Could not get $name: ${e is ApiException ? e.title : 'try again'}')));
+  }
+}
+
+/// A file the AI found or made (Drive, imports, exports). Tap saves a copy.
+class FileCard extends ConsumerWidget {
+  const FileCard({super.key, required this.fileId, required this.name, this.kind, this.size, this.source});
+  final String fileId, name;
+  final String? kind, source;
+  final num? size;
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    return Semantics(
+      button: true,
+      label: 'File $name${size == null ? '' : ', ${fileSize(size)}'}. Double tap to save a copy.',
+      excludeSemantics: true,
+      child: Material(
+        color: q.surface1,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: fileId.isEmpty ? null : () => saveFileCopy(context, ref, fileId, name),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 320, minHeight: 56),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(borderRadius: BorderRadius.circular(12), border: Border.all(color: q.line)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(kindIcon(kind), size: 22, color: q.text2),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(13, w: FontWeight.w600, c: q.text)),
+                  Text([?source, if (size != null) fileSize(size), 'Tap to save'].join(' · '), style: qs(11, c: q.text3)),
+                ]),
+              ),
+              const SizedBox(width: 8),
+              Icon(Icons.download_outlined, size: 18, color: q.text3),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class AttachmentChip extends StatelessWidget {
-  const AttachmentChip({super.key, required this.name, this.kind, this.size, this.uploading = false, this.onRemove});
+  const AttachmentChip({super.key, required this.name, this.kind, this.size, this.uploading = false, this.onRemove, this.onTap});
   final String name;
   final String? kind;
   final num? size;
   final bool uploading;
   final VoidCallback? onRemove;
+  /// Sent attachments: saves a copy. Null while composing.
+  final VoidCallback? onTap;
   @override
   Widget build(BuildContext context) {
+    final chip = _chip(context);
+    if (onTap == null) return chip;
+    return Semantics(
+      button: true,
+      hint: 'Save a copy',
+      child: InkWell(borderRadius: BorderRadius.circular(10), onTap: onTap, child: ConstrainedBox(constraints: const BoxConstraints(minHeight: 48), child: Center(widthFactor: 1, child: chip))),
+    );
+  }
+
+  Widget _chip(BuildContext context) {
     final q = context.q;
     return Container(
       constraints: const BoxConstraints(maxWidth: 260),

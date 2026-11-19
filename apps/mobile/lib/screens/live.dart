@@ -131,6 +131,7 @@ class _LiveState extends ConsumerState<_Live> {
   void initState() {
     super.initState();
     _convId = widget.conversationId;
+    _input.addListener(_onComposerChanged);
     _init();
   }
 
@@ -224,6 +225,7 @@ class _LiveState extends ConsumerState<_Live> {
         if (r.note != null && mounted) toast(context, r.note!);
       }
       if (!_agentReady) _core = CoreState.error;
+      await _restoreDraft();
     } on ApiException catch (e) {
       _loadError = e.message;
       _core = e.isNetwork ? CoreState.offline : CoreState.error;
@@ -235,6 +237,55 @@ class _LiveState extends ConsumerState<_Live> {
   String? get _pointerKey {
     final s = ref.read(sessionProvider);
     return s.orgId == null || s.email == null ? null : chatPointerKey(s.orgId!, s.email!);
+  }
+
+  // ---- Drafts (phase 3) --------------------------------------------------------------------------------
+  Timer? _draftTimer;
+  bool _restoring = false;
+
+  String? _draftKey(String? conv) {
+    final s = ref.read(sessionProvider);
+    return s.orgId == null || s.email == null ? null : chatDraftKey(s.orgId!, s.email!, conv);
+  }
+
+  Future<void> _restoreDraft() async {
+    final key = _draftKey(_convId);
+    if (key == null) return;
+    final text = await ref.read(chatPointerStoreProvider).read(key).catchError((Object _) => null);
+    if (!mounted || text == null || text.isEmpty || _input.text.isNotEmpty) return;
+    _restoring = true;
+    _input.text = text;
+    _input.selection = TextSelection.collapsed(offset: text.length);
+    _restoring = false;
+  }
+
+  void _onComposerChanged() {
+    if (_restoring) return;
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 600), _saveDraft);
+  }
+
+  void _saveDraft() {
+    _draftTimer?.cancel();
+    final key = _draftKey(_convId);
+    if (key == null) return;
+    final text = _input.text;
+    final store = ref.read(chatPointerStoreProvider);
+    (text.trim().isEmpty ? store.delete(key) : store.write(key, text.length > maxDraftChars ? text.substring(0, maxDraftChars) : text)).catchError((Object _) {});
+  }
+
+  void _clearDraft() {
+    _draftTimer?.cancel();
+    final key = _draftKey(_convId);
+    if (key != null) ref.read(chatPointerStoreProvider).delete(key).catchError((Object _) {});
+  }
+
+  /// Before the composer moves to another conversation: keep what was typed here, then show that one's draft.
+  void _leaveDraft() {
+    _saveDraft();
+    _restoring = true;
+    _input.clear();
+    _restoring = false;
   }
 
   void _remember(String value) {
@@ -330,6 +381,7 @@ class _LiveState extends ConsumerState<_Live> {
     }
     final knowledge = [..._knowledge];
     _knowledge.clear();
+    _clearDraft();
     _input.clear();
     _busy = true;
     _relisten?.cancel();
@@ -568,6 +620,7 @@ class _LiveState extends ConsumerState<_Live> {
 
   /// New chat is always explicit: reopening the app continues the current conversation (M2).
   void _newChat() {
+    _leaveDraft();
     _remember(newChatPointer);
     _sub?.cancel();
     _voice.stop();
@@ -580,6 +633,7 @@ class _LiveState extends ConsumerState<_Live> {
       _files.take();
       _core = _agentReady ? CoreState.idle : CoreState.error;
     });
+    _restoreDraft();
   }
 
   @override
@@ -590,6 +644,8 @@ class _LiveState extends ConsumerState<_Live> {
     _gate.dispose();
     _voice.dispose();
     if (_handsFree) WakelockPlus.disable();
+    if (_draftTimer?.isActive ?? false) _saveDraft();
+    _input.removeListener(_onComposerChanged);
     _input.dispose();
     _scroll.dispose();
     _files.dispose();
@@ -609,7 +665,8 @@ class _LiveState extends ConsumerState<_Live> {
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop || _leaving) return;
-        final unsent = _files.uploading ? 'A file is still uploading and will not be sent.' : (_input.text.trim().isNotEmpty || _pending.isNotEmpty ? 'Your unsent message will be discarded.' : null);
+        // Typed text is kept as a draft (phase 3); only attached files that were not sent would be lost.
+        final unsent = _files.uploading ? 'A file is still uploading and will not be sent.' : (_pending.isNotEmpty ? 'The attached files were not sent and will be removed. Your text is kept as a draft.' : null);
         if (unsent != null) {
           _leaving = true;
           final ok = await confirm(context, title: 'Leave the chat?', body: unsent, action: 'Leave');
@@ -648,8 +705,10 @@ class _LiveState extends ConsumerState<_Live> {
               } else if (id != null) {
                 _sub?.cancel();
                 try {
+                  _leaveDraft();
                   await _loadConversation(id);
                   setState(() => _core = aiOk ? CoreState.idle : CoreState.error);
+                  await _restoreDraft();
                 } catch (e) {
                   if (context.mounted) toastError(context, e);
                 }
@@ -909,7 +968,14 @@ class _Bubble extends StatelessWidget {
               if (a['kind'] == 'image' && a['id'] != null)
                 SizedBox(width: 220, child: ChatImage(fileId: a['id'] as String, name: a['name'] as String? ?? 'Image', height: 160, compact: true))
               else
-                Padding(padding: const EdgeInsets.only(top: 6), child: AttachmentChip(name: a['name'] as String? ?? 'File', kind: a['kind'] as String?, size: a['size'] as num?)),
+                Padding(padding: const EdgeInsets.only(top: 6), child: Consumer(
+                  builder: (context, ref, _) => AttachmentChip(
+                    name: a['name'] as String? ?? 'File',
+                    kind: a['kind'] as String?,
+                    size: a['size'] as num?,
+                    onTap: a['id'] == null ? null : () => saveFileCopy(context, ref, a['id'] as String, a['name'] as String? ?? 'file'),
+                  ),
+                )),
           ]),
         ),
       );

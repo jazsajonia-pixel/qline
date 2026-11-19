@@ -258,6 +258,7 @@ class _KnowledgeGraphViewState extends ConsumerState<KnowledgeGraphView> {
   Widget build(BuildContext context) {
     final c = context.q;
     final org = ref.watch(sessionProvider.select((s) => s.orgId)) ?? 'none';
+    final me = ref.watch(sessionProvider.select((s) => s.email)) ?? '';
     return Load<Map>(
       key: ValueKey(widget.focus),
       fetch: (api) async => await api.get('/knowledge/graph', widget.focus == null ? {'view': 'overview'} : {'view': 'ego', 'focus': widget.focus, 'depth': 2}) as Map,
@@ -333,7 +334,7 @@ class _KnowledgeGraphViewState extends ConsumerState<KnowledgeGraphView> {
                         edges: f.edges,
                         focus: widget.focus,
                         highlight: matches,
-                        storageKey: 'qline.kgpos.$org.${widget.focus ?? 'overview'}',
+                        storageKey: graphPositionsKey(org, me, widget.focus),
                         onTap: _open,
                       ),
           ),
@@ -870,4 +871,16 @@ class _KnowledgeSheetState extends State<_KnowledgeSheet> {
       ),
     ]);
   }
+}
+
+
+/// Phase 3: node positions are kept per person, not per organisation, so one person's arrangement never moves
+/// another's. The account is folded into a short FNV-1a hash so the key holds no email address.
+String graphPositionsKey(String orgId, String email, String? focus) {
+  var h = 0x811c9dc5;
+  for (final c in email.trim().toLowerCase().codeUnits) {
+    h ^= c;
+    h = (h * 0x01000193) & 0xffffffff;
+  }
+  return 'qline.kgpos.$orgId.u${h.toRadixString(16)}.${focus ?? 'overview'}';
 }

@@ -111,6 +111,30 @@ fileRoutes.get('/files/:id/content', async (c) => {
   return new Response(body, { headers: { 'content-type': f.mime, 'x-content-type-options': 'nosniff', 'cache-control': 'private, max-age=3600', 'content-disposition': 'inline' } });
 });
 
+/**
+ * Any file the caller can see (RLS), as a download. Always served as an opaque attachment with nosniff so
+ * nothing is rendered or executed by a browser; the name is sanitised again for the header.
+ */
+fileRoutes.get('/files/:id/download', async (c) => {
+  const t = need(c, 'documents.read');
+  const id = c.req.param('id');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw notFound('File');
+  const f = await tx(t, (q) => q.one('select id, name, storage_key, size_bytes from files where id=$1', [id]));
+  if (!f) throw notFound('File');
+  const bytes = await getObject(f.storage_key);
+  await tx(t, (q) => audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'file.downloaded', targetRef: `file:${f.id}`, detail: { size: f.size_bytes } }));
+  const name = String(f.name).replace(/[^\w.\- ()]/g, '_').slice(0, 120) || 'file';
+  const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return new Response(body, {
+    headers: {
+      'content-type': 'application/octet-stream',
+      'x-content-type-options': 'nosniff',
+      'cache-control': 'private, no-store',
+      'content-disposition': `attachment; filename="${name}"`,
+    },
+  });
+});
+
 /** Loads chat attachments the caller can see (RLS) — used when posting a message and by the runner. */
 export async function loadAttachments(q: Q, ids: string[]) {
   if (!ids.length) return [];

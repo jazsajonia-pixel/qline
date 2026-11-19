@@ -14,7 +14,17 @@ function build() {
     trustedOrigins: env.webOrigins,
     emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128, autoSignIn: true },
     session: { expiresIn: 60 * 60 * 24 * 30, updateAge: 60 * 60 * 24 },
-    rateLimit: { enabled: true, window: 60, max: 30, storage: 'memory' },
+    // Shared across function instances (0015). Tests keep memory storage so parallel suites do not share counters.
+    rateLimit: {
+      enabled: true,
+      window: 60,
+      max: 30,
+      storage: (process.env.QLINE_RATE_LIMIT_STORAGE as 'memory' | 'database' | undefined) ?? (process.env.NODE_ENV === 'test' ? 'memory' : 'database'),
+      customRules: {
+        '/sign-in/email': { window: 300, max: 10 },
+        '/sign-up/email': { window: 3600, max: 20 },
+      },
+    },
     advanced: {
       defaultCookieAttributes: { sameSite: 'none', secure: true },
     },
