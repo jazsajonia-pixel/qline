@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'agent_studio.dart';
 import 'ai.dart';
 import 'import.dart';
 import 'integrations.dart';
@@ -48,21 +49,41 @@ class BusinessScreen extends ConsumerWidget {
   }
 }
 
-class _AgentStrip extends StatelessWidget {
+class _AgentStrip extends ConsumerWidget {
   const _AgentStrip();
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final q = context.q;
+    final canManage = ref.watch(sessionProvider.select((s) => s.canManage));
     return Load<List<Map<String, dynamic>>>(
       skeleton: const SizedBox(height: 120),
       fetch: (api) async => items(await api.get('/agents')),
-      builder: (context, list, _) => SizedBox(
+      builder: (context, list, reload) => SizedBox(
         height: 128,
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
-          itemCount: list.length,
+          itemCount: list.length + (canManage ? 1 : 0),
           separatorBuilder: (_, _) => const SizedBox(width: 8),
           itemBuilder: (_, i) {
+            if (i == list.length) {
+              // Phase 4 / M9: make your own agent.
+              return SizedBox(
+                width: 132,
+                child: QCard(
+                  padding: const EdgeInsets.all(12),
+                  onTap: () async {
+                    final id = await showAgentEditor(context);
+                    if (id != null && context.mounted) push(context, AgentDetail(id: id));
+                  },
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Icon(Icons.add_circle_outline, size: 36, color: q.halo),
+                    const Spacer(),
+                    Text('New agent', style: qs(14, w: FontWeight.w600, c: q.text)),
+                    Text('Make your own', maxLines: 1, style: qs(12, c: q.text3)),
+                  ]),
+                ),
+              );
+            }
             final a = list[i];
             final paused = a['status'] != 'active';
             return SizedBox(
@@ -71,7 +92,7 @@ class _AgentStrip extends StatelessWidget {
                 padding: const EdgeInsets.all(12),
                 onTap: () => push(context, AgentDetail(id: a['id'] as String)),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  AgentOrb(a['template'] as String?, paused: paused),
+                  AgentOrb(a['template'] as String?, paused: paused, accent: a['accent'] as String?),
                   const Spacer(),
                   Text(a['name'] as String, maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(14, w: FontWeight.w600, c: q.text)),
                   Text(paused ? 'Paused' : '${a['runs_week']} runs this week', maxLines: 1, style: qs(12, c: q.text3)),
@@ -102,36 +123,65 @@ class AgentDetail extends ConsumerWidget {
           final tools = items(summary, 'tools');
           final runs = items(a, 'runs');
           final active = a['status'] == 'active';
-          final style = AgentStyle.of(a['template'] as String?);
+          final style = AgentStyle.ofAgent(a);
+          final custom = a['template'] == 'custom';
           return ListView(padding: const EdgeInsets.all(16), children: [
             Row(children: [
-              AgentOrb(a['template'] as String?, size: 52, paused: !active),
+              AgentOrb(a['template'] as String?, size: 52, paused: !active, accent: a['accent'] as String?),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(a['name'] as String, style: Theme.of(context).textTheme.headlineSmall),
-                  Text(style.role, style: qs(14, c: q.text2)),
+                  Text(style.role, maxLines: 2, overflow: TextOverflow.ellipsis, style: qs(14, c: q.text2)),
                 ]),
               ),
               StatusPill(a['status'] as String),
             ]),
             const SizedBox(height: 16),
-            if (canManage)
+            if (canManage) ...[
               Row(children: [
                 Expanded(
                   child: QButton(active ? 'Pause agent' : 'Activate agent', icon: active ? Icons.pause : Icons.play_arrow, onPressed: () => act(context, ref, (api) => api.patch('/agents/$id', {'status': active ? 'paused' : 'active'}), ok: active ? 'Paused' : 'Active').then((_) => reload())),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: QButton('Edit instructions', icon: Icons.edit_note, onPressed: () async {
-                    final v = await promptText(context, title: 'Instructions', label: 'How this agent should work', initial: a['instructions'] as String?, maxLines: 10);
-                    if (v != null && v.isNotEmpty && context.mounted) {
-                      await act(context, ref, (api) => api.patch('/agents/$id', {'instructions': v}), ok: 'Saved as a new version');
-                      reload();
-                    }
+                  child: QButton('Edit', icon: Icons.edit_note, onPressed: () async {
+                    if (await showAgentEditor(context, agent: a) != null) reload();
                   }),
                 ),
               ]),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                QButton('Preview', kind: QBtn.ghost, icon: Icons.chat_bubble_outline, onPressed: () => showAgentPreview(context, a)),
+                QButton('Versions', kind: QBtn.ghost, icon: Icons.history, onPressed: () async {
+                  await push(context, AgentVersionsScreen(agentId: id, canManage: canManage));
+                  reload();
+                }),
+                QButton('Duplicate', kind: QBtn.ghost, icon: Icons.copy_outlined, onPressed: () async {
+                  final nid = await showAgentEditor(context, cloneFrom: a);
+                  if (nid != null && context.mounted) Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => AgentDetail(id: nid)));
+                }),
+                if (custom)
+                  QButton('Archive', kind: QBtn.ghost, icon: Icons.archive_outlined, onPressed: () async {
+                    if (!await confirm(context, title: 'Archive ${a['name']}?', body: 'It stops answering and leaves your agent list. Past chats with it stay readable.', action: 'Archive', destructive: true)) return;
+                    if (!context.mounted) return;
+                    final r = await act(context, ref, (api) => api.delete('/agents/$id'), ok: 'Archived');
+                    if (r != null && context.mounted) Navigator.pop(context);
+                  }),
+              ]),
+            ],
+            if (a['approval_mode'] == 'ask_all' || (a['max_tool_calls'] as num? ?? 8) < 8 || a['daily_runs'] != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  [
+                    if (a['approval_mode'] == 'ask_all') 'Asks before every change',
+                    if ((a['max_tool_calls'] as num? ?? 8) < 8) 'Up to ${a['max_tool_calls']} steps per answer',
+                    if (a['daily_runs'] != null) '${a['daily_runs']} answers a day',
+                  ].join(' · '),
+                  style: qs(12, c: q.text2),
+                ),
+              ),
             const SectionLabel('Instructions'),
             QCard(child: Text(a['instructions'] as String? ?? '', style: qs(14, c: q.text2, h: 1.5))),
             Padding(padding: const EdgeInsets.only(top: 6, left: 4), child: Text('Version ${a['current_version']}', style: qs(11, c: q.text3, family: mono))),

@@ -109,9 +109,13 @@ class _ProviderCard extends ConsumerWidget {
         ]),
         const SizedBox(height: 8),
         if (connected)
-          Text('Key ending ${p['keyHint']} · ${p['modelCount']} models${p['checkedAt'] != null ? ' · checked ${ago(p['checkedAt'] as String?)}' : ''}', style: qs(12, c: q.text2, family: mono)),
+          Text('${items(p, 'keys').length > 1 ? '${items(p, 'keys').length} keys' : 'Key ending ${p['keyHint']}'} · ${p['modelCount']} models${p['checkedAt'] != null ? ' · checked ${ago(p['checkedAt'] as String?)}' : ''}', style: qs(12, c: q.text2, family: mono)),
         if (invalid && p['statusDetail'] != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text(p['statusDetail'] as String, style: qs(12, c: q.bad))),
         if (!connected) Text(p['costNote'] as String? ?? '', style: qs(13, c: q.text2, h: 1.4)),
+        if (connected && items(p, 'keys').isNotEmpty) ...[
+          const SizedBox(height: 10),
+          KeyList(keys: items(p, 'keys'), canManage: canManage, reload: reload),
+        ],
         const SizedBox(height: 10),
         Wrap(spacing: 8, runSpacing: 8, children: [
           if (canManage && !connected)
@@ -142,12 +146,16 @@ class _ProviderCard extends ConsumerWidget {
               await reload();
             }),
           if (connected && canManage)
-            QButton('Replace key', kind: QBtn.ghost, icon: Icons.key_outlined, onPressed: () async {
+            QButton('Add another key', kind: QBtn.ghost, icon: Icons.add, onPressed: () async {
+              if (await showKeySheet(context, ref, p, another: true) == true) await reload();
+            }),
+          if (connected && canManage)
+            QButton('Replace primary key', kind: QBtn.ghost, icon: Icons.key_outlined, onPressed: () async {
               if (await showKeySheet(context, ref, p) == true) await reload();
             }),
           if (connected && canManage)
             QButton('Remove', kind: QBtn.ghost, icon: Icons.delete_outline, onPressed: () async {
-              if (await confirm(context, title: 'Remove ${p['name']}?', body: 'The key is deleted from Qline. Agents set to ${p['name']} will stop answering until you pick another model.', action: 'Remove', destructive: true)) {
+              if (await confirm(context, title: 'Remove ${p['name']}?', body: 'Every ${p['name']} key is deleted from Qline. Agents set to ${p['name']} will stop answering until you pick another model.', action: 'Remove', destructive: true)) {
                 if (context.mounted) await act(context, ref, (api) => api.delete('/ai/providers/$id'), ok: 'Removed');
                 await reload();
               }
@@ -187,6 +195,94 @@ Future<void> _runTest(BuildContext context, WidgetRef ref, String provider, Stri
   );
 }
 
+String keyStateLabel(String? s) => switch (s) {
+      'ready' => 'Ready',
+      'cooling_down' => 'Cooling down',
+      'needs_attention' => 'Needs attention',
+      'off' => 'Off',
+      _ => 'Unknown',
+    };
+
+/// M10: the keys of one provider. Each has a readable name; Qline spreads chats over the ready ones and pauses a
+/// key for a while when the provider says it is busy. Several keys never raise the provider's own limits.
+class KeyList extends ConsumerWidget {
+  const KeyList({super.key, required this.keys, required this.canManage, required this.reload});
+  final List<Map<String, dynamic>> keys;
+  final bool canManage;
+  final Future<void> Function() reload;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final q = context.q;
+    Color tone(String? s) => switch (s) { 'ready' => q.ok, 'cooling_down' => q.warn, 'needs_attention' => q.bad, _ => q.text3 };
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      for (final k in keys)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(children: [
+            Icon(k['primary'] == true ? Icons.star_rounded : Icons.key_outlined, size: 18, color: k['primary'] == true ? q.halo : q.text3),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(k['alias'] as String? ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(14, w: FontWeight.w600, c: q.text)),
+                Text(
+                  [
+                    '…${k['keyHint']}',
+                    if ((k['uses'] as num? ?? 0) > 0) '${k['uses']} uses',
+                    if (k['lastUsedAt'] != null) 'last ${ago(k['lastUsedAt'] as String?)}',
+                    if (k['state'] == 'cooling_down' && k['cooldownUntil'] != null) 'back ${_until(k['cooldownUntil'] as String)}',
+                  ].join(' · '),
+                  style: qs(12, c: q.text3, family: mono),
+                ),
+                if (k['state'] == 'needs_attention' && k['statusDetail'] != null) Text(k['statusDetail'] as String, maxLines: 2, overflow: TextOverflow.ellipsis, style: qs(12, c: q.bad)),
+              ]),
+            ),
+            _Chip(label: keyStateLabel(k['state'] as String?), color: tone(k['state'] as String?)),
+            if (canManage)
+              PopupMenuButton<String>(
+                tooltip: 'Key options',
+                icon: Icon(Icons.more_vert, color: q.text2),
+                onSelected: (v) => _onAction(context, ref, k, v),
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'rename', child: Text('Rename')),
+                  PopupMenuItem(value: 'toggle', child: Text(k['enabled'] == true ? (k['state'] == 'needs_attention' ? 'Check again' : 'Turn off') : 'Turn on')),
+                  if (k['primary'] != true) const PopupMenuItem(value: 'primary', child: Text('Make primary')),
+                  const PopupMenuItem(value: 'remove', child: Text('Remove')),
+                ],
+              ),
+          ]),
+        ),
+    ]);
+  }
+
+  static String _until(String iso) {
+    final d = DateTime.tryParse(iso)?.toLocal();
+    if (d == null) return 'soon';
+    return 'at ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _onAction(BuildContext context, WidgetRef ref, Map<String, dynamic> k, String v) async {
+    final id = k['id'];
+    switch (v) {
+      case 'rename':
+        final name = await promptText(context, title: 'Rename key', label: 'Name', initial: k['alias'] as String?);
+        if (name == null || name.trim().isEmpty || !context.mounted) return;
+        await act(context, ref, (api) => api.patch('/ai/keys/$id', {'alias': name.trim()}), ok: 'Renamed');
+      case 'toggle':
+        // "Check again" re-enables a rejected key; the next chat tries it and marks it again if it is still refused.
+        final on = k['enabled'] != true || k['state'] == 'needs_attention';
+        await act(context, ref, (api) => api.patch('/ai/keys/$id', {'enabled': on}), ok: on ? 'Turned on' : 'Turned off');
+      case 'primary':
+        await act(context, ref, (api) => api.patch('/ai/keys/$id', {'primary': true}), ok: 'Primary key changed');
+      case 'remove':
+        if (!await confirm(context, title: 'Remove "${k['alias']}"?', body: 'The key is deleted from Qline. Agents that use only this key go back to automatic routing.', action: 'Remove', destructive: true)) return;
+        if (!context.mounted) return;
+        await act(context, ref, (api) => api.delete('/ai/keys/$id'), ok: 'Removed');
+    }
+    await reload();
+  }
+}
+
 class _Chip extends StatelessWidget {
   const _Chip({required this.label, required this.color});
   final String label;
@@ -200,19 +296,22 @@ class _Chip extends StatelessWidget {
 }
 
 /// Paste-a-key sheet. Returns true when the key was validated and saved.
-Future<bool?> showKeySheet(BuildContext context, WidgetRef ref, Map<String, dynamic> p) {
-  return showModalBottomSheet<bool>(context: context, isScrollControlled: true, builder: (ctx) => _KeySheet(p: p));
+/// With [another], the key is added next to the existing ones (with an optional name) instead of replacing the primary.
+Future<bool?> showKeySheet(BuildContext context, WidgetRef ref, Map<String, dynamic> p, {bool another = false}) {
+  return showModalBottomSheet<bool>(context: context, isScrollControlled: true, builder: (ctx) => _KeySheet(p: p, another: another));
 }
 
 class _KeySheet extends ConsumerStatefulWidget {
-  const _KeySheet({required this.p});
+  const _KeySheet({required this.p, this.another = false});
   final Map<String, dynamic> p;
+  final bool another;
   @override
   ConsumerState<_KeySheet> createState() => _KeySheetState();
 }
 
 class _KeySheetState extends ConsumerState<_KeySheet> {
   final _c = TextEditingController();
+  final _alias = TextEditingController();
   bool _hidden = true;
   bool _busy = false;
   String? _error;
@@ -220,6 +319,7 @@ class _KeySheetState extends ConsumerState<_KeySheet> {
   @override
   void dispose() {
     _c.dispose();
+    _alias.dispose();
     super.dispose();
   }
 
@@ -231,10 +331,14 @@ class _KeySheetState extends ConsumerState<_KeySheet> {
       _error = null;
     });
     try {
-      final r = await ref.read(apiProvider).put('/ai/providers/${widget.p['id']}', {'apiKey': key}) as Map;
+      final api = ref.read(apiProvider);
+      final alias = _alias.text.trim();
+      final r = widget.another
+          ? await api.post('/ai/providers/${widget.p['id']}/keys', {'apiKey': key, if (alias.isNotEmpty) 'alias': alias}) as Map
+          : await api.put('/ai/providers/${widget.p['id']}', {'apiKey': key}) as Map;
       if (!mounted) return;
       ref.read(refreshTick.notifier).bump();
-      toast(context, '${widget.p['name']} connected · ${r['modelCount']} models');
+      toast(context, widget.another ? 'Added "${r['alias']}"' : '${widget.p['name']} connected · ${r['modelCount']} models');
       Navigator.pop(context, true);
     } catch (e) {
       setState(() {
@@ -251,7 +355,7 @@ class _KeySheetState extends ConsumerState<_KeySheet> {
     return Padding(
       padding: EdgeInsets.fromLTRB(20, 4, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('${p['name']} API key', style: qs(18, w: FontWeight.w600, c: q.text)),
+        Text(widget.another ? 'Add another ${p['name']} key' : '${p['name']} API key', style: qs(18, w: FontWeight.w600, c: q.text)),
         const SizedBox(height: 6),
         Text(p['costNote'] as String? ?? '', style: qs(13, c: q.text2, h: 1.4)),
         const SizedBox(height: 14),
@@ -271,6 +375,14 @@ class _KeySheetState extends ConsumerState<_KeySheet> {
           ),
           onSubmitted: (_) => _save(),
         ),
+        if (widget.another) ...[
+          const SizedBox(height: 10),
+          TextField(
+            controller: _alias,
+            maxLength: 40,
+            decoration: const InputDecoration(labelText: 'Name (optional)', hintText: 'For example "Work account"', counterText: ''),
+          ),
+        ],
         const SizedBox(height: 8),
         Text('Qline checks the key with ${p['name']} before saving it.', style: qs(12, c: q.text3)),
         const SizedBox(height: 14),
@@ -447,7 +559,9 @@ class AgentModelCard extends ConsumerWidget {
                       ? (eff == null ? 'Add a provider key in Settings → AI providers.' : 'That provider isn\'t connected. Pick another model.')
                       : own == null
                           ? 'Workspace default'
-                          : 'Set for this agent',
+                          : a['key'] != null
+                              ? 'Set for this agent · uses only "${(a['key'] as Map)['alias']}"'
+                              : 'Set for this agent',
                   style: qs(12, c: ready ? q.text3 : q.warn),
                 ),
               ]),
@@ -459,14 +573,44 @@ class AgentModelCard extends ConsumerWidget {
                   return;
                 }
                 final pick = await pickModel(context, ref, providers: providers, current: own, allowDefault: true, title: 'Model for ${a['name'] ?? 'this agent'}');
-                if (pick != null && context.mounted) {
-                  await act(context, ref, (api) => api.put('/agents/$agentId/model', pick), ok: 'Saved as a new version');
-                  await reload();
+                if (pick == null || !context.mounted) return;
+                // M10: with several keys for that provider, choose automatic routing or one specific key.
+                final keys = items(providers.where((p) => p['id'] == pick['provider']).firstOrNull ?? {}, 'keys');
+                final body = {...pick};
+                if (pick['provider'] != null && keys.length > 1) {
+                  final k = await pickKeyFor(context, keys, current: (a['key'] as Map?)?['id'] as String?);
+                  if (k == null || !context.mounted) return;
+                  body['keyId'] = k.isEmpty ? null : k;
                 }
+                await act(context, ref, (api) => api.put('/agents/$agentId/model', body), ok: 'Saved as a new version');
+                await reload();
               }),
           ]),
         );
       },
     );
   }
+}
+
+/// Returns '' for automatic routing, a key id, or null when cancelled.
+Future<String?> pickKeyFor(BuildContext context, List<Map<String, dynamic>> keys, {String? current}) {
+  return showDialog<String>(
+    context: context,
+    builder: (ctx) {
+      final q = ctx.q;
+      Widget opt(String value, String title, String sub) => ListTile(
+            leading: Icon((current ?? '') == value ? Icons.radio_button_checked : Icons.radio_button_unchecked, color: q.halo),
+            title: Text(title, style: qs(15, w: FontWeight.w600, c: q.text)),
+            subtitle: Text(sub, style: qs(12, c: q.text3)),
+            onTap: () => Navigator.pop(ctx, value),
+          );
+      return SimpleDialog(
+        title: Text('Which key?', style: qs(18, w: FontWeight.w600, c: q.text)),
+        children: [
+          opt('', 'Automatic', 'Uses the ready key that was used least recently, and moves on if one is busy.'),
+          for (final k in keys) opt(k['id'] as String, k['alias'] as String, '${keyStateLabel(k['state'] as String?)} · only this key, no switching'),
+        ],
+      );
+    },
+  );
 }

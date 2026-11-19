@@ -884,16 +884,16 @@ class _AgentPicker extends StatelessWidget {
           PopupMenuItem(
             value: a,
             enabled: a['status'] == 'active',
-            child: Row(children: [AgentOrb(a['template'] as String?, size: 22, paused: a['status'] != 'active'), const SizedBox(width: 10), Text(a['name'] as String), if (a['status'] != 'active') Text('  · Paused', style: qs(12, c: q.text3))]),
+            child: Row(children: [AgentOrb(a['template'] as String?, size: 22, paused: a['status'] != 'active', accent: a['accent'] as String?), const SizedBox(width: 10), Text(a['name'] as String), if (a['status'] != 'active') Text('  · Paused', style: qs(12, c: q.text3))]),
           ),
       ],
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        auto ? const Icon(Icons.auto_awesome, size: 22) : AgentOrb(selected?['template'] as String?, size: 24),
+        auto ? const Icon(Icons.auto_awesome, size: 22) : AgentOrb(selected?['template'] as String?, size: 24, accent: selected?['accent'] as String?),
         const SizedBox(width: 10),
         Flexible(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
             Text(auto ? 'Auto' : selected?['name'] as String? ?? 'Assistant', overflow: TextOverflow.ellipsis, style: qs(15, w: FontWeight.w600, c: q.text)),
-            Text(auto ? 'Picks the right agent' : (model == null ? AgentStyle.of(selected?['template'] as String?).role : model!), overflow: TextOverflow.ellipsis, style: qs(11, c: q.text3, family: model == null || auto ? ui : mono)),
+            Text(auto ? 'Picks the right agent' : (model == null ? (selected == null ? AgentStyle.of(null) : AgentStyle.ofAgent(selected!)).role : model!), overflow: TextOverflow.ellipsis, style: qs(11, c: q.text3, family: model == null || auto ? ui : mono)),
           ]),
         ),
         Icon(Icons.expand_more, size: 18, color: q.text3),

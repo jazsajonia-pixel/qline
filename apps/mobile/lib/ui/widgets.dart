@@ -308,13 +308,15 @@ class SectionLabel extends StatelessWidget {
 
 /// Small static agent orb.
 class AgentOrb extends StatelessWidget {
-  const AgentOrb(this.template, {super.key, this.size = 36, this.paused = false});
+  const AgentOrb(this.template, {super.key, this.size = 36, this.paused = false, this.accent});
   final String? template;
   final double size;
   final bool paused;
+  /// Custom agents: the colour the person picked.
+  final String? accent;
   @override
   Widget build(BuildContext context) {
-    final hue = paused ? context.q.text3 : AgentStyle.of(template).hue;
+    final hue = paused ? context.q.text3 : (AgentStyle.accents[accent] ?? AgentStyle.of(template).hue);
     return Container(
       width: size,
       height: size,
