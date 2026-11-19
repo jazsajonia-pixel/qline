@@ -512,3 +512,82 @@ describe('M2 context ledger keys', () => {
     expect(reusable('approvals.list')).toBe(false);
   });
 });
+
+// ---- M1 remainder: upload, parser and OAuth guards ------------------------------------------------
+import { checkZipBounds, readLimitedForm, withDeadline } from '../src/core/upload';
+import { isDeadGrant } from '../src/integrations/oauth';
+
+/** A minimal zip: `n` central-directory entries each claiming `size` uncompressed bytes, then the EOCD. */
+function fakeZip(n: number, size: number) {
+  const cd: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const e = new DataView(new ArrayBuffer(46 + 1));
+    e.setUint32(0, 0x02014b50, true);
+    e.setUint32(24, size, true);
+    e.setUint16(28, 1, true);
+    e.setUint8(46, 0x61);
+    cd.push(...new Uint8Array(e.buffer));
+  }
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, n, true);
+  eocd.setUint16(10, n, true);
+  eocd.setUint32(12, cd.length, true);
+  eocd.setUint32(16, 4, true);
+  return new Uint8Array([0x50, 0x4b, 3, 4, ...cd, ...new Uint8Array(eocd.buffer)]);
+}
+
+describe('M1 upload guards', () => {
+  it('accepts a real workbook and refuses zip bombs, huge entry counts and broken archives', async () => {
+    const wb = new ExcelJS.Workbook();
+    wb.addWorksheet('S').addRow(['a', 'b']);
+    const real = new Uint8Array(await wb.xlsx.writeBuffer());
+    expect(checkZipBounds(real).entries).toBeGreaterThan(3);
+    expect(() => checkZipBounds(fakeZip(2, 60 * 1024 * 1024))).toThrow(/100 MB/);
+    expect(() => checkZipBounds(fakeZip(3000, 10))).toThrow();
+    expect(() => checkZipBounds(enc('PK\u0003\u0004 not really a zip'))).toThrow();
+    await expect(parseFile('xlsx', fakeZip(2, 60 * 1024 * 1024))).rejects.toThrow();
+  });
+
+  it('counts the streamed body and refuses it past the limit even without Content-Length', async () => {
+    const big = new Uint8Array(2048);
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(big);
+        c.enqueue(big);
+        c.close();
+      },
+    });
+    const req = new Request('http://x/', { method: 'POST', body: stream, duplex: 'half' } as any);
+    await expect(readLimitedForm(req, 3000, 'too big')).rejects.toMatchObject({ status: 413 });
+    const fd = new FormData();
+    fd.set('file', new File([enc('a,b\n1,2\n')], 'x.csv'));
+    const ok = await readLimitedForm(new Request('http://x/', { method: 'POST', body: fd }), 1_000_000, 'too big');
+    expect((ok?.get('file') as File).name).toBe('x.csv');
+    const lying = new Request('http://x/', { method: 'POST', body: fd, headers: { 'content-length': '99999999' } });
+    await expect(readLimitedForm(lying, 1000, 'too big')).rejects.toMatchObject({ status: 413 });
+  });
+
+  it('answers when a parser overruns its deadline', async () => {
+    await expect(withDeadline(20, new Promise(() => {}), 'The file')).rejects.toMatchObject({ code: 'PARSE_TIMEOUT' });
+    await expect(withDeadline(1000, Promise.resolve(7), 'x')).resolves.toBe(7);
+  });
+
+  it('caps CSV columns', async () => {
+    const header = Array.from({ length: 300 }, (_, i) => `c${i}`).join(',');
+    const p = await parseFile('csv', enc(`${header}\n${'1,'.repeat(299)}1\n`));
+    expect(p.columns.length).toBe(200);
+  });
+});
+
+describe('M1 OAuth refresh classification', () => {
+  it('only dead grants end a connection', () => {
+    expect(isDeadGrant(400, { error: 'invalid_grant' })).toBe(true);
+    expect(isDeadGrant(200, { ok: false, error: 'invalid_refresh_token' })).toBe(true);
+    expect(isDeadGrant(200, { error: 'bad_refresh_token' })).toBe(true);
+    expect(isDeadGrant(0, { error: 'network_error' })).toBe(false);
+    expect(isDeadGrant(503, {})).toBe(false);
+    expect(isDeadGrant(429, { error: 'rate_limited' })).toBe(false);
+    expect(isDeadGrant(500, { error: 'server_error' })).toBe(false);
+  });
+});

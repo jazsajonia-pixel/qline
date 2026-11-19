@@ -4,6 +4,7 @@ import { audit } from '../core/audit';
 import type { Q } from '../core/db';
 import { need, tx, type Env } from '../core/context';
 import { ApiError, badRequest, notFound } from '../core/errors';
+import { readLimitedForm } from '../core/upload';
 import { detectFormat, getObject, MAX_FILE_BYTES, parseFile, putObject, type Parsed } from './imports';
 
 /**
@@ -62,9 +63,7 @@ export const fileRoutes = new Hono<Env>();
 
 fileRoutes.post('/agents/attachments', async (c) => {
   const t = need(c, 'agents.use');
-  const len = Number(c.req.header('content-length') ?? '0');
-  if (len > MAX_FILE_BYTES + 64 * 1024) throw new ApiError(413, 'FILE_TOO_LARGE', 'File too large', 'The limit is 10 MB per file (5 MB for images).');
-  const form = await c.req.formData().catch(() => null);
+  const form = await readLimitedForm(c.req.raw, MAX_FILE_BYTES + 64 * 1024, 'The limit is 10 MB per file (5 MB for images).');
   const file = form?.get('file');
   if (!file || typeof file === 'string') throw badRequest('Send the file as multipart field "file".');
   const bytes = new Uint8Array(await file.arrayBuffer());

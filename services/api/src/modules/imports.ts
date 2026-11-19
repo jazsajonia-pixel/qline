@@ -8,6 +8,7 @@ import type { Q } from '../core/db';
 import { need, requireTenant, requireUser, tx, type Env } from '../core/context';
 import { env } from '../core/env';
 import { ApiError, badRequest, notFound } from '../core/errors';
+import { checkZipBounds, readLimitedForm, withDeadline } from '../core/upload';
 import { dispatch } from '../core/events';
 import { body } from '../core/validate';
 import { contactInput, createContact, createTask } from './work';
@@ -96,11 +97,21 @@ function cellToString(v: any): string {
   return String(v).trim();
 }
 
+export const PARSE_DEADLINE_MS = 25_000;
+export const MAX_COLUMNS = 200;
+export const MAX_PDF_PAGES = 300;
+
+/** Parses an upload within time, size and shape bounds (M1). Office files are checked for zip bombs first. */
 export async function parseFile(format: Format, bytes: Uint8Array): Promise<Parsed> {
+  if (format === 'xlsx' || format === 'docx') checkZipBounds(bytes);
+  return withDeadline(PARSE_DEADLINE_MS, parseUnbounded(format, bytes), 'The file');
+}
+
+async function parseUnbounded(format: Format, bytes: Uint8Array): Promise<Parsed> {
   const text = () => new TextDecoder('utf-8', { fatal: false }).decode(bytes).replace(/^\uFEFF/, '');
   if (format === 'csv') {
     const r = Papa.parse<Record<string, string>>(text(), { header: true, skipEmptyLines: 'greedy', transformHeader: (h) => h.trim() });
-    const columns = (r.meta.fields ?? []).filter(Boolean);
+    const columns = (r.meta.fields ?? []).filter(Boolean).slice(0, MAX_COLUMNS);
     if (!columns.length) throw badRequest('No header row found in the CSV.');
     return { kind: 'records', columns, rows: r.data.slice(0, MAX_ROWS) };
   }
@@ -127,7 +138,7 @@ export async function parseFile(format: Format, bytes: Uint8Array): Promise<Pars
     ws.getRow(1).eachCell({ includeEmpty: true }, (cell, col) => {
       header[col - 1] = cellToString(cell.value);
     });
-    const columns = header.map((h, i) => h || `Column ${i + 1}`);
+    const columns = header.slice(0, MAX_COLUMNS).map((h, i) => h || `Column ${i + 1}`);
     const rows: Record<string, string>[] = [];
     ws.eachRow({ includeEmpty: false }, (row, n) => {
       if (n === 1 || rows.length >= MAX_ROWS) return;
@@ -141,6 +152,7 @@ export async function parseFile(format: Format, bytes: Uint8Array): Promise<Pars
   if (format === 'pdf') {
     const { extractText, getDocumentProxy } = await import('unpdf');
     const pdf = await getDocumentProxy(bytes);
+    if (pdf.numPages > MAX_PDF_PAGES) throw badRequest(`The PDF has ${pdf.numPages} pages; the limit is ${MAX_PDF_PAGES}.`);
     const { text: t } = await extractText(pdf, { mergePages: true });
     const s = (Array.isArray(t) ? t.join('\n') : t).trim();
     return { kind: 'document', columns: [], rows: [], text: s.slice(0, 500_000), note: s ? undefined : 'No text layer found. Scanned PDFs need OCR, which is planned.' };
@@ -328,9 +340,7 @@ export const importRoutes = new Hono<Env>();
 
 importRoutes.post('/files', async (c) => {
   const t = need(c, 'imports.run');
-  const len = Number(c.req.header('content-length') ?? '0');
-  if (len > MAX_FILE_BYTES + 64 * 1024) throw new ApiError(413, 'FILE_TOO_LARGE', 'File too large', 'The limit is 10 MB per file.');
-  const form = await c.req.formData().catch(() => null);
+  const form = await readLimitedForm(c.req.raw, MAX_FILE_BYTES + 64 * 1024, 'The limit is 10 MB per file.');
   const file = form?.get('file');
   if (!file || typeof file === 'string') throw badRequest('Send the file as multipart field "file".');
   const bytes = new Uint8Array(await file.arrayBuffer());
