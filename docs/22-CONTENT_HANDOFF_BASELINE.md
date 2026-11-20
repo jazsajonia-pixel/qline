@@ -298,6 +298,33 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
     - Reissue is refused from `cancelled`, `output_verified` and `awaiting_video_qa`. Cancel is refused from `cancelled` and `expired`.
     - The `ceo` template's instructions still start "You are the AI CEO…". Changing them would change model behaviour, so it is left for Jazz to decide.
   - Tests: `services/api/test/content-jobs.integration.test.ts` (15 tests) and `services/api/test/pdf.test.ts` (3 tests). PDFs are parsed with `unpdf`, which needs Node 22+ (CI uses 24).
+- **Run 4 (Slice 2b), 2026-11-20:** built, tested locally against Postgres with a mocked Drive. Read-only Drive only (files.list, files.get, alt=media); nothing is written to Drive.
+  - Migration `0023_content_reports.sql`: `content_jobs.qa_mission_id` renamed to `qa_task_id`; adds `content_jobs.last_error`, `content_job_outputs.version`, `content_job_acks.report_sha256`, `content_drive_config.last_reports_check_at` / `last_reports_check`.
+  - `modules/content-reports.ts`:
+    - `POST /content/jobs/:id/ingest` (raw `result.json` as the body, max 256 KB),
+    - `POST /content/reports/check` (reads `<code>-r<rev>.result.json` files from the Reports folder; each Drive version is read once; then checks verified outputs for tampering),
+    - `POST /content/jobs/:id/verify` (retries a check that Drive could not finish),
+    - `GET /content/jobs/:id/ack[?version=]` (acknowledgement `qline.content.ack/1`, SHA-256 re-checked).
+  - Report handling:
+    - Strict `qline.content.result/1` schema. Control and bidi characters are stripped. Findings for invalid JSON, invalid shape, unsupported schema, invalid or unknown fields, not UTF-8 and too large. A different job, an old or unknown revision, the wrong nonce (constant-time compare), or a closed or expired job are all rejected.
+    - Every report is an event. Exact replays collapse. A second report claiming a used `sequence` is rejected (`sequence_conflict`).
+    - `external_status` and the Qline state follow the strongest report of the current revision (status rank, then sequence, then time), never arrival order. Reports arriving while a job is being checked, verified, in review, cancelled or expired are recorded only.
+    - External `failed`/`blocked` set those states. An external `cancelled` goes to `needs_manual_review`; only Qline cancels.
+  - Output verification uses Qline's own files.get. The output must:
+    - be directly and only in Ready for QA;
+    - be a `video/*` file of 1 byte to 20 GB;
+    - not be trashed or a shortcut;
+    - not be a source file;
+    - have the same name as in the report, and the expected `<code>-r<rev>.mp4` must be present;
+    - match the reported MD5 and size, when the report gives them.
+
+    Source files must also be unchanged (MD5 and size) and not trashed. Any finding → `needs_manual_review`. All clear → `output_verified` → `awaiting_video_qa`. Drive trouble (429/5xx/401/network) leaves the job in `validating_output` with `last_error`.
+  - Acknowledgements are stored in the DB only, one per decision (rejected reports, terminal reports, every completed check). No Drive copy: the ADR-C3 capability check was not run, because Drive writes are not authorized.
+  - Notifications go to the job creator plus owners and admins, deduplicated by `content:<job>:<event>`. Their text is Qline's own; report text never appears in notifications or tasks.
+  - Deviation from ADR-C7: the QA step is a human **task** (`tasks`, source `content_job:<id>`, assigned to the creator), not a mission. Missions start model planning, and report text must never reach a model. It is created at most once per job: `qa_task_id` is set under the job row lock.
+  - Tamper on outputs: during "Check reports", verified outputs that were renamed, moved, trashed, changed or became unopenable are recorded once (`output.tampered`, source `drive`), and the job goes to `needs_manual_review` with one notification.
+  - Limits and known gaps: 50 reports and 200 verified outputs per check, 10 list pages. An exact duplicate report under a different Drive file is downloaded again on every check (bounded by the 50 limit). Expiry and stale sweeps are run 5.
+  - Tests: `services/api/test/content-reports.integration.test.ts` (15 tests).
 
 ## H. Owner actions (later, not in this task)
 

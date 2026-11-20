@@ -42,7 +42,7 @@ export function jobCode(now = new Date()): string {
   const d = now.toISOString().slice(0, 10).replace(/-/g, '');
   return `QLINE-${d}-${[...randomBytes(6)].map((b) => CROCKFORD[b & 31]).join('')}`;
 }
-const sha256 = (b: string | Uint8Array) => createHash('sha256').update(b).digest('hex');
+export const sha256 = (b: string | Uint8Array) => createHash('sha256').update(b).digest('hex');
 const nonce = () => randomBytes(16).toString('hex');
 const iso = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
@@ -54,7 +54,7 @@ const CONSTRAINTS = z
   })
   .strict();
 // File IDs: the Drive ID alphabet plus '.', only ever used as query parameters and matched against the index.
-const FILE_ID = z.string().trim().regex(/^[A-Za-z0-9._-]{1,200}$/, 'Not a Drive file ID');
+export const FILE_ID = z.string().trim().regex(/^[A-Za-z0-9._-]{1,200}$/, 'Not a Drive file ID');
 const ASSET_IDS = z.array(FILE_ID).min(1).max(50);
 const CREATE = z
   .object({
@@ -169,10 +169,10 @@ function issue(m: Manifest) {
   return { manifestJson, manifestSha: sha256(manifestJson), pdf: Buffer.from(pdf), pdfSha: sha256(pdf) };
 }
 
-const JOB_COLS = `id, job_code, mission_id, title, brief, editor_target, qline_state, external_status, revision, input_file_ids, constraints,
-  expected_outputs, manifest_sha256, pdf_sha256, qa_mission_id, cancel_reason, created_by, created_at, issued_at, dispatched_at,
+export const JOB_COLS = `id, job_code, mission_id, title, brief, editor_target, qline_state, external_status, revision, input_file_ids, constraints,
+  expected_outputs, manifest_sha256, pdf_sha256, qa_task_id, last_error, cancel_reason, created_by, created_at, issued_at, dispatched_at,
   last_activity_at, result_received_at, verified_at, expires_at, updated_at`;
-const jobOut = (r: any) => ({
+export const jobOut = (r: any) => ({
   id: r.id,
   jobCode: r.job_code,
   missionId: r.mission_id,
@@ -187,7 +187,8 @@ const jobOut = (r: any) => ({
   expectedOutputs: r.expected_outputs,
   manifestSha256: r.manifest_sha256,
   pdfSha256: r.pdf_sha256,
-  qaMissionId: r.qa_mission_id,
+  qaTaskId: r.qa_task_id,
+  lastError: r.last_error,
   cancelReason: r.cancel_reason,
   createdBy: r.created_by,
   createdAt: r.created_at,
@@ -206,7 +207,7 @@ const event = (q: Q, t: TenantCtx, jobId: string, revision: number, key: string,
     [t.orgId, jobId, key, revision, type, message, JSON.stringify(detail)],
   );
 
-async function jobOrThrow(q: Q, t: TenantCtx, id: string, lock = false) {
+export async function jobOrThrow(q: Q, t: TenantCtx, id: string, lock = false) {
   if (!z.string().uuid().safeParse(id).success) throw notFound('Content job');
   const r = await q.one<any>(`select * from content_jobs where id=$1 and workspace_id=$2${lock ? ' for update' : ''}`, [id, t.workspaceId]);
   if (!r) throw notFound('Content job');
@@ -268,9 +269,9 @@ contentJobRoutes.get('/content/jobs/:id', async (c) => {
 });
 
 /** Downloads re-check the stored SHA-256, so what leaves Qline is provably what was issued. */
-const download = (bytes: Buffer | string, type: string, name: string) =>
+export const download = (bytes: Buffer | string, type: string, name: string) =>
   new Response(typeof bytes === 'string' ? bytes : new Uint8Array(bytes).buffer, { headers: { 'content-type': type, 'content-disposition': `attachment; filename="${name}"`, 'x-content-type-options': 'nosniff', 'cache-control': 'private, no-store' } });
-const integrity = () => new ApiError(500, 'INTEGRITY_FAILED', 'Stored file does not match its checksum', 'Do not send this job. Reissue it.');
+export const integrity = () => new ApiError(500, 'INTEGRITY_FAILED', 'Stored file does not match its checksum', 'Do not send this job. Reissue it.');
 
 contentJobRoutes.get('/content/jobs/:id/manifest', async (c) => {
   const t = need(c, 'documents.read');

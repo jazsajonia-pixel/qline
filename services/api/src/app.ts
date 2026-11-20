@@ -24,6 +24,7 @@ import { knowledgeRoutes } from './modules/knowledge';
 import { proposalRoutes } from './modules/proposals';
 import { contentRoutes } from './modules/content';
 import { contentJobRoutes } from './modules/content-jobs';
+import { contentReportRoutes } from './modules/content-reports';
 
 export const app = new Hono<Env>();
 
@@ -130,3 +131,4 @@ app.route('/v1', voiceRoutes);
 app.route('/v1', knowledgeRoutes);
 app.route('/v1', contentRoutes);
 app.route('/v1', contentJobRoutes);
+app.route('/v1', contentReportRoutes);

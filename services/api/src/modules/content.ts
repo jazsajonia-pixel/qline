@@ -70,7 +70,7 @@ const publicConfig = (r: any) =>
     : { status: 'unconfigured', rootFolderId: null, roles: null, validation: null, validatedAt: null, lastSyncAt: null, lastSync: null, lastSuccessAt: null, lastError: null, updatedAt: null };
 
 /** A Drive failure as an API error the app can show. 403/404 are handled by the callers (they mean a folder). */
-function driveFailure(e: unknown): ApiError {
+export function driveFailure(e: unknown): ApiError {
   if (e instanceof ApiError) return e;
   const s = e instanceof ProviderHttpError ? e.status : 0;
   if (s === 401) return new ApiError(409, 'RECONNECT_REQUIRED', 'Reconnect Google', 'Google did not accept the saved sign-in. Reconnect Google in Integrations.');
@@ -83,6 +83,16 @@ async function driveToken(t: TenantCtx) {
   const conn = await connOrThrow(t, 'google');
   if (!hasScope(conn, 'drive.readonly')) throw new ApiError(409, 'SCOPE_MISSING', 'Allow Google Drive first', 'Reconnect Google and tick Google Drive.');
   return { conn, token: await tokenFor(t, conn) };
+}
+
+/** A Drive token for a validated mapping. A different Google account than the one that validated it needs validation again. */
+export async function mappedDrive(t: TenantCtx, cfg: any) {
+  const { conn, token } = await driveToken(t);
+  if (cfg.connection_id !== conn.id || (cfg.validation?.accountEmail ?? null) !== (conn.account_email ?? null)) {
+    await tx(t, (q) => q.exec(`update content_drive_config set status='needs_revalidation', last_error=$2, updated_at=now() where workspace_id=$1`, [t.workspaceId, 'The Google account changed. Check the folder mapping again.']));
+    throw conflict('NEEDS_REVALIDATION', 'The Google account changed. Check the folder mapping again.');
+  }
+  return token;
 }
 
 // ---- Validation -------------------------------------------------------------------------------
@@ -303,11 +313,7 @@ contentRoutes.post('/content/sync', async (c) => {
   const cfg = await tx(t, (q) => q.one<any>('select *, validated_at::text as validated_tag from content_drive_config where workspace_id=$1', [t.workspaceId]));
   if (!cfg) throw conflict('NOT_CONFIGURED', 'Map the Drive folders first.');
   if (cfg.status !== 'valid') throw conflict('NOT_VALIDATED', 'Check the folder mapping before syncing.');
-  const { conn, token } = await driveToken(t);
-  if (cfg.connection_id !== conn.id || (cfg.validation?.accountEmail ?? null) !== (conn.account_email ?? null)) {
-    await tx(t, (q) => q.exec(`update content_drive_config set status='needs_revalidation', last_error=$2, updated_at=now() where workspace_id=$1`, [t.workspaceId, 'The Google account changed. Check the folder mapping again.']));
-    throw conflict('NEEDS_REVALIDATION', 'The Google account changed. Check the folder mapping again.');
-  }
+  const token = await mappedDrive(t, cfg);
   const started = new Date();
   const fail = async (msg: string, status?: string) =>
     tx(t, (q) => q.exec(`update content_drive_config set last_sync_at=now(), last_error=$2, status=coalesce($3, status) where workspace_id=$1`, [t.workspaceId, msg, status ?? null]));
