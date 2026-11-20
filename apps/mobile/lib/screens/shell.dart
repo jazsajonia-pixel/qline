@@ -5,8 +5,10 @@ import '../core/alerts.dart';
 import '../core/back_exit.dart';
 import '../core/live_status.dart';
 import '../core/session.dart';
+import '../core/updater.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
+import '../ui/update_banner.dart';
 import '../ui/widgets.dart';
 import 'approvals.dart';
 import 'business.dart';
@@ -133,6 +135,13 @@ class _ShellState extends ConsumerState<Shell> with SingleTickerProviderStateMix
     final pages = [HomeScreen(onTab: (i) => setState(() => _tab = i)), const WorkScreen(), const SizedBox(), const BusinessScreen(), const LibraryScreen()];
     final host = ref.watch(liveHostProvider);
     ref.listen(liveHostProvider, _onHost);
+    // In-app updates: say so once after Qline has updated itself.
+    ref.listen(updaterProvider.select((u) => u.justUpdated), (a, b) {
+      if (b != null && a != b) {
+        toast(context, 'Qline updated to $b');
+        ref.read(updaterProvider.notifier).clearJustUpdated();
+      }
+    });
     // Live AI belongs to one organisation: switching ends it (the answer still finishes on the server).
     ref.listen(sessionProvider.select((s) => s.orgId), (a, b) {
       if (a != b && ref.read(liveHostProvider).mounted) ref.read(liveHostProvider.notifier).end();
@@ -153,6 +162,7 @@ class _ShellState extends ConsumerState<Shell> with SingleTickerProviderStateMix
         }
         confirmExit(context);
       },
+      child: UpdateWatcher(
       child: AlertWatcher(
       onOpen: (payload) {
         final page = pageForRef(payload);
@@ -177,8 +187,9 @@ class _ShellState extends ConsumerState<Shell> with SingleTickerProviderStateMix
             const SizedBox(width: 4),
           ],
         ),
-        body: IndexedStack(index: _tab, children: pages),
+        body: Column(children: [const UpdateBanner(), Expanded(child: IndexedStack(index: _tab, children: pages))]),
         bottomNavigationBar: _BottomNav(index: _tab, orbKey: _orbKey, fly: _fly, onTap: (i) => i == 2 ? _openLive() : setState(() => _tab = i)),
+      ),
       ),
       ),
     );
