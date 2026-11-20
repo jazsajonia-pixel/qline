@@ -376,6 +376,7 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
   - Known limit: there is no "mark as sent" action, so `dispatched` is never reached; a first accepted report moves a job from `prepared` straight on.
   - Versions: app 1.9.0+11, API_VERSION 1.9.0. Production stays on API 1.8.0 until the owner authorizes the deploy and migrations 0020–0024; until then the app shows "not on your server yet".
   - Not verified: a phone, a real Google account and editor, the live server.
+- **Production rollout, 2026-11-20 (owner-authorized):** migrations 0020–0024 plus grants applied to `br-muddy-rain-a1uaplxr` in one transaction (rehearsed first on a fresh local database at 0019; the Neon branch and snapshot limits were full, so the rewind point is the recorded position `0/60369F8` at 03:19:14 UTC, within the history window). Function `api` deployment #15 (bundle SHA-256 `6e4b9449…4770c`, built from main `88aa2a7`, environment unchanged). Live `/v1/health` reports 1.9.0 and `/health/ready` is ok; content routes answer 401 without a session. CI smoke now expects 1.9.0.
 
 ## H. Owner actions (later, not in this task)
 
