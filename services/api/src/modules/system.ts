@@ -14,6 +14,7 @@ import { drain, runtimeStats, workerId } from '../runtime/jobs';
 import { relayOutbox } from '../runtime/outbox';
 import { reconcileStaleActions } from './actions';
 import { purgeLedger } from '../agent/context-ledger';
+import { runContentReconcile } from './content-watch';
 
 // ---------------------------------------------------------------------------
 // Integrations: honest catalogue (docs/09). Nothing is shown as connected
@@ -109,11 +110,12 @@ const tick = async (c: any, key: string | undefined) => {
   const relayed = await step(() => relayOutbox(500));
   const r = await step(() => runScheduledWorkflows());
   const sync = await step(() => runDueSyncs());
+  const content = await step(() => runContentReconcile());
   const drained = await step(() => drain({ worker: workerId('tick'), budgetMs: 45_000 }));
   const reconciled = await step(() => reconcileStaleActions());
   const ledgerPurged = await step(() => purgeLedger());
   const stats = await step(() => runtimeStats());
-  return c.json({ ok: true, relayed, ...(r as object), sync, drained, reconciled, ledgerPurged, stats });
+  return c.json({ ok: true, relayed, ...(r as object), sync, content, drained, reconciled, ledgerPurged, stats });
 };
 // Neon trigger paths cannot carry a query string, so the key is a path segment.
 internalRoutes.all('/tick/:key', (c) => tick(c, c.req.param('key')));

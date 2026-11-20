@@ -6,6 +6,7 @@ import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'approvals.dart';
 import 'missions.dart';
+import 'content.dart';
 import 'business.dart';
 import 'integrations.dart';
 import 'leads.dart';
@@ -54,22 +55,10 @@ class HomeScreen extends ConsumerWidget {
                 ]),
               ),
             ],
-            const SizedBox(height: 12),
-            QCard(
-              onTap: () => push(context, const MissionsScreen()),
-              child: Row(children: [
-                Icon(Icons.flag_outlined, color: q.halo),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('AI CEO missions', style: qs(15, w: FontWeight.w600, c: q.text)),
-                    const SizedBox(height: 2),
-                    Text('Give a goal. Approve the plan. Agents do the work.', style: qs(13, c: q.text2)),
-                  ]),
-                ),
-                Icon(Icons.chevron_right, color: q.text3),
-              ]),
-            ),
+            const SectionLabel('Command Center'),
+            _CommandCard(icon: Icons.flag_outlined, title: 'Missions', body: 'Give a goal. Approve the plan. Agents do the work.', onTap: () => push(context, const MissionsScreen())),
+            const SizedBox(height: 8),
+            _CommandCard(icon: Icons.movie_outlined, title: 'Content Studio', body: 'Send video jobs to your editor through Drive. Qline checks the result.', onTap: () => push(context, const ContentStudioScreen())),
             const _LeadsToday(),
             if (approvals.isNotEmpty) ...[
               SectionLabel('Waiting for you', trailing: TextButton(onPressed: () => push(context, const ApprovalsScreen()), child: Text('See all', style: qs(13, w: FontWeight.w600, c: q.text2)))),
@@ -263,6 +252,32 @@ class _Stat extends StatelessWidget {
           builder: (_, v, _) => Text('${v.round()}', style: qs(26, w: FontWeight.w600, c: alert ? q.bad : q.text, family: mono)),
         ),
         Text(label, style: qs(12, c: q.text2)),
+      ]),
+    );
+  }
+}
+
+class _CommandCard extends StatelessWidget {
+  const _CommandCard({required this.icon, required this.title, required this.body, required this.onTap});
+  final IconData icon;
+  final String title, body;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    final q = context.q;
+    return QCard(
+      onTap: onTap,
+      child: Row(children: [
+        Icon(icon, color: q.halo),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: qs(15, w: FontWeight.w600, c: q.text)),
+            const SizedBox(height: 2),
+            Text(body, style: qs(13, c: q.text2)),
+          ]),
+        ),
+        Icon(Icons.chevron_right, color: q.text3),
       ]),
     );
   }

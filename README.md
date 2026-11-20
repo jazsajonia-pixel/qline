@@ -39,7 +39,11 @@ flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --da
 
 Release signing reads `apps/mobile/android/key.properties`. That file and the keystore are gitignored and are never committed.
 
-## Honest status (v1.8.0)
+## Honest status (v1.9.0)
+
+v1.9.0 adds Content Studio under Command Center: video handoffs to an outside editor through Google Drive, with Qline checking the finished video itself before a person reviews it. It needs API 1.9.0 with migrations 0020–0024; on an older server the app says so. Editor spec: [docs/23](docs/23-EDITOR_HANDOFF_SPEC.md). Verification notes: [docs/22](docs/22-CONTENT_HANDOFF_BASELINE.md).
+
+### Earlier notes (v1.8.0)
 
 v1.8.0 adds personal spaces with life domains, custom agents, several keys per AI provider, AI proposals you approve, Google Drive files in chat, safer OAuth refresh, upload limits, shared sign-in limits, and an adaptive voice end-of-turn.
 

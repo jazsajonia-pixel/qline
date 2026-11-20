@@ -62,9 +62,23 @@ export interface DriveFile {
   webViewLink?: string;
   size?: string;
   owners?: string[];
+  // Content handoff (docs/22 ADR-C1): boundary checks and asset metadata.
+  parents?: string[];
+  trashed?: boolean;
+  driveId?: string;
+  md5Checksum?: string;
+  sha256Checksum?: string;
+  version?: string;
+  headRevisionId?: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
 }
 
-const driveFields = 'id,name,mimeType,modifiedTime,createdTime,webViewLink,size,owners(displayName)';
+const driveFields =
+  'id,name,mimeType,modifiedTime,createdTime,webViewLink,size,owners(displayName),parents,trashed,driveId,md5Checksum,sha256Checksum,version,headRevisionId,' +
+  'videoMediaMetadata(width,height,durationMillis),imageMediaMetadata(width,height)';
+const num = (v: unknown) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v));
 const toFile = (f: any): DriveFile => ({
   id: f.id,
   name: f.name,
@@ -74,7 +88,96 @@ const toFile = (f: any): DriveFile => ({
   webViewLink: f.webViewLink,
   size: f.size,
   owners: (f.owners ?? []).map((o: any) => o.displayName),
+  parents: Array.isArray(f.parents) ? f.parents : undefined,
+  trashed: f.trashed,
+  driveId: f.driveId,
+  md5Checksum: f.md5Checksum,
+  sha256Checksum: f.sha256Checksum,
+  version: f.version,
+  headRevisionId: f.headRevisionId,
+  width: num(f.videoMediaMetadata?.width ?? f.imageMediaMetadata?.width),
+  height: num(f.videoMediaMetadata?.height ?? f.imageMediaMetadata?.height),
+  durationMs: num(f.videoMediaMetadata?.durationMillis),
 });
+
+export const DRIVE_FOLDER = FOLDER;
+export const DRIVE_SHORTCUT = 'application/vnd.google-apps.shortcut';
+
+/** One page of a folder's direct children (read-only; trashed items excluded by Drive). */
+export async function driveChildren(token: string, folderId: string, pageToken?: string | null): Promise<{ files: DriveFile[]; nextPageToken: string | null }> {
+  const u = new URL(`${DRIVE}/files`);
+  u.searchParams.set('q', `${driveQuote(folderId)} in parents and trashed = false`);
+  u.searchParams.set('pageSize', '100');
+  u.searchParams.set('fields', `nextPageToken,files(${driveFields})`);
+  u.searchParams.set('supportsAllDrives', 'true');
+  u.searchParams.set('includeItemsFromAllDrives', 'true');
+  if (pageToken) u.searchParams.set('pageToken', pageToken);
+  const j = await call(u.toString(), { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+  return { files: (j?.files ?? []).map(toFile), nextPageToken: j?.nextPageToken ?? null };
+}
+
+// ---- Drive change tracking (content handoff run 5, docs/22 ADR-C4) ------------------------------
+// changes.getStartPageToken, changes.list and changes.watch and channels.stop are accepted under drive.readonly.
+// watch and stop are POSTs, but they only manage a notification channel; they never change a file.
+
+export interface DriveChange {
+  fileId: string;
+  removed: boolean;
+  changeType: string;
+  time?: string;
+  file: DriveFile | null;
+}
+
+export async function driveStartPageToken(token: string): Promise<string> {
+  const j = await call(`${DRIVE}/changes/startPageToken?supportsAllDrives=true`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+  const t = j?.startPageToken;
+  if (typeof t !== 'string' || !t) throw new ProviderHttpError('Drive did not return a start page token', 502);
+  return t;
+}
+
+/** One page of changes after `pageToken`. Exactly one of nextPageToken / newStartPageToken is set by Drive. */
+export async function driveChanges(token: string, pageToken: string): Promise<{ changes: DriveChange[]; nextPageToken: string | null; newStartPageToken: string | null }> {
+  const u = new URL(`${DRIVE}/changes`);
+  u.searchParams.set('pageToken', pageToken);
+  u.searchParams.set('pageSize', '100');
+  u.searchParams.set('includeRemoved', 'true');
+  u.searchParams.set('supportsAllDrives', 'true');
+  u.searchParams.set('includeItemsFromAllDrives', 'true');
+  u.searchParams.set('fields', `nextPageToken,newStartPageToken,changes(changeType,removed,fileId,time,file(${driveFields}))`);
+  const j = await call(u.toString(), { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+  const changes = (Array.isArray(j?.changes) ? j.changes : [])
+    .filter((c: any) => typeof c?.fileId === 'string' || c?.changeType === 'drive')
+    .map((c: any) => ({ fileId: String(c.fileId ?? ''), removed: c.removed === true, changeType: String(c.changeType ?? 'file'), time: c.time, file: c.file && typeof c.file.id === 'string' ? toFile(c.file) : null }));
+  const next = typeof j?.nextPageToken === 'string' && j.nextPageToken ? j.nextPageToken : null;
+  const fresh = typeof j?.newStartPageToken === 'string' && j.newStartPageToken ? j.newStartPageToken : null;
+  if (!next && !fresh) throw new ProviderHttpError('Drive returned a changes page without a next token', 502);
+  return { changes, nextPageToken: next, newStartPageToken: next ? null : fresh };
+}
+
+/** Opens a push channel for changes after `pageToken`. `expirationMs` is a Unix time in milliseconds. */
+export async function driveWatchChanges(token: string, pageToken: string, ch: { id: string; token: string; address: string; expirationMs: number }) {
+  const u = new URL(`${DRIVE}/changes/watch`);
+  u.searchParams.set('pageToken', pageToken);
+  u.searchParams.set('supportsAllDrives', 'true');
+  u.searchParams.set('includeItemsFromAllDrives', 'true');
+  u.searchParams.set('includeRemoved', 'true');
+  const j = await call(u.toString(), {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify({ id: ch.id, type: 'web_hook', address: ch.address, token: ch.token, expiration: String(ch.expirationMs) }),
+  });
+  if (j?.id !== ch.id || typeof j?.resourceId !== 'string') throw new ProviderHttpError('Drive did not confirm the notification channel', 502);
+  const exp = Number(j.expiration);
+  return { resourceId: j.resourceId as string, expiresAt: new Date(Number.isFinite(exp) && exp > 0 ? exp : ch.expirationMs) };
+}
+
+export async function driveStopChannel(token: string, id: string, resourceId: string) {
+  await call(`${DRIVE}/channels/stop`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ id, resourceId }),
+  });
+}
 
 /** Escapes a value for Drive's `q` language (single-quoted strings). */
 export const driveQuote = (s: string) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;

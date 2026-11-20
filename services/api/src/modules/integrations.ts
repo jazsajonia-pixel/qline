@@ -255,13 +255,13 @@ integrationRoutes.patch('/integrations/:provider/settings', async (c) => {
   return c.json(publicConn(row));
 });
 
-async function connOrThrow(t: any, p: OAuthProvider) {
+export async function connOrThrow(t: any, p: OAuthProvider) {
   const conn = await tx(t, (q) => q.one('select * from integration_connections where provider=$1', [p]));
   if (!conn) throw new ApiError(409, 'NOT_CONNECTED', `${PROVIDER_META[p].name} is not connected`, 'Connect it first in Integrations.');
   if (conn.status !== 'ok') throw new ApiError(409, 'RECONNECT_REQUIRED', `Reconnect ${PROVIDER_META[p].name}`, conn.status_detail ?? 'The connection expired.');
   return conn;
 }
-const tokenFor = (t: any, conn: any) => tx(t, (q) => accessToken(q, conn)).catch((e) => {
+export const tokenFor = (t: any, conn: any) => tx(t, (q) => accessToken(q, conn)).catch((e) => {
   if (e instanceof TokenRefreshUnavailable) throw new ApiError(503, 'PROVIDER_UNAVAILABLE', `${PROVIDER_META[conn.provider as OAuthProvider].name} is not answering`, (e as Error).message);
   throw new ApiError(409, 'RECONNECT_REQUIRED', 'Reconnect needed', (e as Error).message);
 });

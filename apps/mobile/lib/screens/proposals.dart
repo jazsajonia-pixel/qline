@@ -155,7 +155,7 @@ class _ProposalScreenState extends ConsumerState<ProposalScreen> {
                 null,
               ),
               const SizedBox(height: 4),
-              Text('Approving creates the mission. The AI CEO then plans it, and you approve that plan before any task runs.', style: qs(12, c: q.text3)),
+              Text('Approving creates the mission. Command Center then plans it, and you approve that plan before any task runs.', style: qs(12, c: q.text3)),
             ] else
               _AgentDiff(p['diff'] as Map?, reason: payload['reason'] as String?),
             const SizedBox(height: 20),
@@ -174,7 +174,7 @@ class _ProposalScreenState extends ConsumerState<ProposalScreen> {
                     busy: _busy == 'apply',
                     onPressed: _busy != null
                         ? null
-                        : () => _do('apply', (api) => api.post('/proposals/${widget.id}/apply', {'revision': p['revision']}), isMission ? 'Mission created. The CEO is planning it.' : 'Agent updated. You can revert it under Versions.', reload),
+                        : () => _do('apply', (api) => api.post('/proposals/${widget.id}/apply', {'revision': p['revision']}), isMission ? 'Mission created. Command Center is planning it.' : 'Agent updated. You can revert it under Versions.', reload),
                   ),
                 ),
               ]),

@@ -22,6 +22,10 @@ import { googleSignInRoutes } from './modules/google-signin';
 import { voiceRoutes } from './modules/voice';
 import { knowledgeRoutes } from './modules/knowledge';
 import { proposalRoutes } from './modules/proposals';
+import { contentRoutes } from './modules/content';
+import { contentJobRoutes } from './modules/content-jobs';
+import { contentReportRoutes } from './modules/content-reports';
+import { contentHookRoutes } from './modules/content-watch';
 
 export const app = new Hono<Env>();
 
@@ -87,6 +91,8 @@ app.route('/v1', systemRoutes);
 app.route('/v1', orgRoutes);
 app.route('/v1', oauthPublicRoutes);
 app.route('/v1', googleSignInRoutes);
+// Drive change notifications: no session; verified by channel ID and token (content-watch.ts).
+app.route('/v1', contentHookRoutes);
 
 // Everything else is tenant-scoped.
 app.use('/v1/*', requireUser, requireTenant);
@@ -126,3 +132,6 @@ app.route('/v1', fileRoutes);
 app.route('/v1', integrationRoutes);
 app.route('/v1', voiceRoutes);
 app.route('/v1', knowledgeRoutes);
+app.route('/v1', contentRoutes);
+app.route('/v1', contentJobRoutes);
+app.route('/v1', contentReportRoutes);

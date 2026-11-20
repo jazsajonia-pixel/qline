@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/alerts.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'content.dart' show pageForRef;
 
 IconData alertIcon(String? category) => switch (category) {
       'email_important' => Icons.mark_email_unread_outlined,
@@ -12,6 +13,7 @@ IconData alertIcon(String? category) => switch (category) {
       'workflow' => Icons.account_tree_outlined,
       'assistant' => Icons.auto_awesome_outlined,
       'integration' => Icons.link,
+      'content' => Icons.movie_outlined,
       _ => Icons.notifications_none,
     };
 
@@ -43,13 +45,17 @@ class NotificationsScreen extends ConsumerWidget {
               itemBuilder: (_, i) {
                 final n = list[i];
                 final unread = n['read_at'] == null;
+                final page = pageForRef(n['ref']);
                 return QCard(
                   accent: unread ? q.halo : null,
-                  onTap: unread
+                  onTap: unread || page != null
                       ? () async {
-                          await act(context, ref, (api) => api.post('/notifications/${n['id']}/read'));
-                          final left = list.where((x) => x['read_at'] == null).length - 1;
-                          ref.read(unreadAlerts.notifier).set(left < 0 ? 0 : left);
+                          if (unread) {
+                            await act(context, ref, (api) => api.post('/notifications/${n['id']}/read'));
+                            final left = list.where((x) => x['read_at'] == null).length - 1;
+                            ref.read(unreadAlerts.notifier).set(left < 0 ? 0 : left);
+                          }
+                          if (page != null && context.mounted) await push(context, page);
                           await reload();
                         }
                       : null,
@@ -64,7 +70,7 @@ class NotificationsScreen extends ConsumerWidget {
                           Text('${n['body']}', style: qs(13, c: q.text2), maxLines: 4, overflow: TextOverflow.ellipsis),
                         ],
                         const SizedBox(height: 6),
-                        Text(unread ? '${ago(n['created_at'] as String?)} · tap to mark read' : ago(n['created_at'] as String?), style: qs(12, c: q.text3)),
+                        Text(page != null ? '${ago(n['created_at'] as String?)} · tap to open' : unread ? '${ago(n['created_at'] as String?)} · tap to mark read' : ago(n['created_at'] as String?), style: qs(12, c: q.text3)),
                       ]),
                     ),
                   ]),

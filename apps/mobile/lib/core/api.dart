@@ -88,6 +88,8 @@ class Api {
   Future<dynamic> get(String path, [Map<String, dynamic>? query]) => _send(() => _client.get(_uri(path, query), headers: _headers(json: false)));
   Future<dynamic> post(String path, [Object? body, Map<String, String>? headers]) =>
       _send(() => _client.post(_uri(path), headers: _headers(extra: headers), body: jsonEncode(body ?? {})));
+  /// Sends [text] as it is (no JSON re-encoding), for pasted reports whose exact bytes the server checks.
+  Future<dynamic> postRaw(String path, String text) => _send(() => _client.post(_uri(path), headers: _headers(), body: text));
   Future<dynamic> put(String path, [Object? body]) => _send(() => _client.put(_uri(path), headers: _headers(), body: jsonEncode(body ?? {})));
   Future<dynamic> patch(String path, [Object? body]) => _send(() => _client.patch(_uri(path), headers: _headers(), body: jsonEncode(body ?? {})));
   Future<dynamic> delete(String path) => _send(() => _client.delete(_uri(path), headers: _headers(json: false)));

@@ -74,3 +74,28 @@ Every event envelope is `{ id, type, orgId, workspaceId?, occurredAt, correlatio
   `POST /v1/jobs/:id/cancel`. All need `workflows.manage`.
 - Events are written to `outbox_events` in the same transaction as the change and delivered at least once as
   `event.dispatch` jobs; subscribers dedupe by event key.
+
+## 6. v1.9 Content Studio (Drive handoff)
+
+Spec for editors: [docs/23](23-EDITOR_HANDOFF_SPEC.md). Design: [docs/22](22-CONTENT_HANDOFF_BASELINE.md). All routes are tenant-scoped except the Drive hook. Permissions: reads need `documents.read` (every role); folder setup and sync need `integrations.manage` (owner, admin); job changes need `agents.use` (member and up).
+
+| Route | Permission | What it does |
+|---|---|---|
+| `GET /v1/content/drive-config` | read | Mapping, status (`unconfigured`, `valid`, `invalid`, `needs_revalidation`), last check, last sync, change tracking |
+| `PUT /v1/content/drive-config` | manage | `{rootFolderId, roles:{assets:[…], ready_for_qa, external_reports?, incoming?, acknowledged?, completed?, failed?, logs?}}`; any change sets `needs_revalidation` |
+| `POST /v1/content/drive-config/validate` | manage | Walks each folder's parents to the root (depth 20); rejects trashed, shortcut, non-folder, other-drive and outside-root folders |
+| `POST /v1/content/sync` | manage | Indexes every mapped folder now (409 `SYNC_BUSY` while a sync runs) |
+| `GET /v1/content/assets?role=&q=&limit=&offset=` | read | Indexed files |
+| `POST /v1/content/jobs` | use | `{title, brief?, assetIds[1–50], constraints?:{aspectRatio?, maxDurationSec?, notes?}, expiresInDays?, editorTarget?, missionId?}` → 201 job |
+| `GET /v1/content/jobs?filter=active\|awaiting\|attention\|failed\|all` | read | Handoff Monitor list |
+| `GET /v1/content/jobs/:id` | read | Job plus `events`, `outputs`, `acks` |
+| `GET /v1/content/jobs/:id/manifest`, `/pdf` | read | Stored manifest and editor PDF (SHA-256 re-checked; 500 `INTEGRITY_FAILED` otherwise) |
+| `GET /v1/content/jobs/:id/ack?version=` | read | Qline's receipt (`qline.content.ack/1`) |
+| `POST /v1/content/jobs/:id/ingest` | use | Raw body = the editor's result file; validated exactly like one read from Drive. Returns `{outcome: applied\|duplicate\|recorded\|rejected, findings, job}` |
+| `POST /v1/content/jobs/:id/verify` | use | Retry a deferred video check |
+| `POST /v1/content/jobs/:id/reissue` | use | `{revision}` (must be current) → next revision, new nonce |
+| `POST /v1/content/jobs/:id/cancel` | use | `{confirm:true, reason?}` |
+| `POST /v1/content/reports/check` | use | Reads result files from the Reports folder; returns counts (`applied`, `duplicates`, `rejected`, `recorded`, `tampered`, `deferred`, …) |
+| `POST /v1/hooks/drive` | none | Google change notifications; checked by channel ID, token hash, resource and expiry; 404 otherwise |
+
+Notifications use category `content` and `ref = {kind:'content_job', id, jobCode}`; the app opens the job from it.

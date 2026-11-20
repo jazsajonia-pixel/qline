@@ -47,7 +47,7 @@ class SettingsScreen extends ConsumerWidget {
         ),
         nav(Icons.devices_outlined, 'Signed-in devices', 'See where you are signed in, sign out other devices', const SessionsScreen()),
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('Organisation')),
-        nav(Icons.flag_outlined, 'Missions & emergency stop', 'AI CEO plans, pause, stop everything', const MissionsScreen()),
+        nav(Icons.flag_outlined, 'Missions & emergency stop', 'Command Center plans, pause, stop everything', const MissionsScreen()),
         nav(Icons.bolt_outlined, 'AI autonomy', 'What the AI can do without asking', const AutonomyScreen()),
         nav(Icons.memory, 'AI providers', 'Your keys for OpenAI, Claude, Gemini, Grok, DeepSeek', const AiProvidersScreen()),
         nav(Icons.hub_outlined, 'Integrations', 'Gmail, Sheets, Forms, Calendar, Outlook, Slack', const IntegrationsScreen()),
