@@ -32,7 +32,10 @@ The required verification for every row: check current API docs, scopes, quotas 
 | Notion | **v1.6: built.** Search/read shared pages; create pages and append blocks (approval) | OAuth public integration, `owner=user`, Notion-Version `2026-03-11` | Only pages the user picks; block text only (no tables/media) | done | High |
 | GitHub | **v1.10: built.** Browse repos, read and search code, branches, commits, PRs and CI; create working branches, commit files, open/edit/review PRs, open issues and comment (each write needs approval with a diff). Never pushes to the default or a protected branch, merges, force-pushes, changes workflows or reads secrets. See [docs/24](24-GITHUB_INTEGRATION.md) | GitHub App, expiring user tokens | Only repos where the app is installed; no webhooks yet | done | High |
 | Stripe | **v1.6: built.** Balance/charges/invoices summary and lists; create customers and **draft** invoices (approval, `auto_advance=false`) | Restricted key (`rk_` only, `sk_` refused) | No charges, refunds, transfers or sending invoices; no webhooks yet | done | High |
-| Social (Meta, X, LinkedIn, TikTok) | Scheduling and analytics | Varies | App review, frequent policy changes, per-platform limits; never promise universal publishing | 7+ | Low–medium; review per platform |
+| Facebook Pages | Publish supported Page text/image/video formats; reconcile status and available insights | Meta OAuth; Page access token | Page task eligibility; `pages_manage_posts`, `pages_read_engagement`, `pages_show_list`; app review for production | CS-7 | Not implemented; feasibility depends on Meta review |
+| Instagram Professional | Publish supported Professional-account media/Reels and reconcile status/insights | Meta Instagram Login or supported Facebook Login | Professional account eligibility; `instagram_business_basic`, `instagram_business_content_publish`; publishing limits and app review | CS-7 | Not implemented; verify account path and formats |
+| YouTube | Resumable video upload, metadata, supported scheduling and status/analytics | Google OAuth | `youtube.upload` or appropriate scopes; quota, processing and API compliance | CS-8 | Not implemented; quota/review required |
+| TikTok | Creator info, draft upload or Direct Post, status polling | TikTok OAuth / Content Posting API | Approved `video.publish`; unaudited clients are private-only; audit and verified URL requirements | CS-9 | Not implemented; approval/audit gate required |
 | Messaging (WhatsApp, Messenger, Viber) | — | Business APIs only | Personal messaging access is not available through supported APIs; shown as **Unsupported** | — | Unsupported for personal accounts |
 
 The Google scope classifications above (restricted/sensitive) reflect Google's policy as commonly documented. **Re-verify them against Google's current OAuth scope policy before registering the app.** They decide how much verification work Gmail needs.
@@ -54,6 +57,8 @@ The Google scope classifications above (restricted/sensitive) reflect Google's p
 | `stripe.customer.create`, `stripe.invoice.draft` | L3 | approval, never automatic | CEO, Finance, Sales |
 
 Source: `packages/policy/src/index.ts`. Content returned by every connector is wrapped as untrusted data before the model sees it.
+
+Social capability status at Qline v1.9.0: none of Facebook Pages, Instagram Professional, YouTube or TikTok has a native OAuth/publishing implementation yet. The rows above are roadmap requirements, not available connectors. The parent plan and tenant-safe Creator Studio workflow are in [docs/25](25-CREATOR_STUDIO_FRAMEWORK_AND_ROADMAP.md).
 
 ## 3. Integration UX rules
 
