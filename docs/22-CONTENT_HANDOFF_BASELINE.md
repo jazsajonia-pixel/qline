@@ -357,6 +357,18 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
     - Tamper checks still need a Reports folder to be mapped.
   - Not verified: live Google push (needs a public HTTPS domain with a valid certificate, `QLINE_DRIVE_WEBHOOK_URL` and a real account), real Drive change ordering and quota behaviour.
   - Tests: `services/api/test/content-watch.integration.test.ts` (10 tests). They cover paging, folder moves, stale cursor, missed webhook, 429/5xx/401, crash mid-sync, webhook checks, renewal, sweeps and tenant isolation.
+- **Run 6 (Slice 4), 2026-11-20:** mobile screens, tested with widget tests against a mocked API. No server change, no Drive write, no scope change.
+  - Home → Command Center now holds two cards: Missions and Content Studio. "Command Center" is a label only; the `ceo` key is unchanged.
+  - `lib/screens/content.dart`:
+    - Content Studio: Drive status card (opens setup), "Check Drive for reports" (members and up, when a Reports folder is mapped), Handoff Monitor with the server filters (active, awaiting, attention, failed, all), New handoff (members and up, when folders are valid).
+    - New handoff: title, brief, shape (any, 9:16, 16:9, 1:1, 4:5) and up to 50 indexed source files.
+    - Job detail: the "Qline checked" and "Editor says" ledgers are shown apart, with the note that editor reports are untrusted until Qline checks the video. Notes for stale, last error, cancel reason and a failed manifest checksum ("don't send, reissue"). Editor PDF and manifest download, "Open review task" when waiting for review, "Check the video again" for deferred checks, paste a result file (sent as the raw body, so it is validated like a Drive file), reissue and cancel (both confirmed). Editor messages in the timeline are quoted as "Editor wrote".
+    - A 404 on the content routes shows "Content Studio is not on your server yet" (production API 1.8.0 has no content routes).
+  - `lib/screens/content_setup.dart`: folder setup accepts Drive links or IDs, saves then checks, offers Sync now when valid, shows the last check in plain words and is read-only for non-managers. Folders not on the main form are kept on save.
+  - Deep links: notifications with `ref.kind = content_job` open the job from the in-app list and from Android notification taps (payload on `show`, tap handler and launch details).
+  - Deviations: New handoff has no duration, notes or expiry fields (server defaults apply). The asset picker shows the first 100 files without search.
+  - Not verified: a real phone, the system-tray tap path (not unit-testable), the live server (it lacks the content routes until a deploy is authorized).
+  - Tests: `apps/mobile/test/v17_content_test.dart` (29 tests): loading, empty, error, offline, older server, stale, viewer and member permissions, semantics, 390 px light and dark screenshots, 130% text.
 
 ## H. Owner actions (later, not in this task)
 
