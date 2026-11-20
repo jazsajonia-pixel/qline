@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { appsecretProof, checkDraft, classifyGraphError, detectVideo, facebookMessage } from '../src/integrations/facebook';
 import { backoffMs } from '../src/runtime/jobs';
 import ExcelJS from 'exceljs';
 import { detectFormat, parseFile, suggestMapping } from '../src/modules/imports';
@@ -651,5 +652,46 @@ describe('v1.10 GitHub helpers (docs/24)', () => {
     expect(redactSecrets('-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----').text).toBe('[redacted]');
     for (const b of ['qline/fix-1', 'feature.x']) expect(BRANCH.test(b), b).toBe(true);
     for (const b of ['/x', 'a..b', 'a/', 'x.lock', 'a b', 'a@{1}']) expect(BRANCH.test(b), b).toBe(false);
+  });
+});
+
+describe('v1.11 Facebook Pages (pure)', () => {
+  const now = Date.parse('2026-11-20T00:00:00Z');
+  it('classifies Graph errors into one action', () => {
+    const k = (status: number, code: number | null) => classifyGraphError(status, code === null ? {} : { error: { code, message: 'm' } }).kind;
+    expect(k(400, 190)).toBe('reconnect');
+    expect(k(400, 102)).toBe('reconnect');
+    expect(k(403, 200)).toBe('permission');
+    expect(k(400, 10)).toBe('permission');
+    expect(k(400, 4)).toBe('rate_limit');
+    expect(k(400, 32)).toBe('rate_limit');
+    expect(k(400, 80001)).toBe('rate_limit');
+    expect(k(400, 368)).toBe('blocked');
+    expect(k(400, 506)).toBe('duplicate');
+    expect(k(500, 2)).toBe('unavailable');
+    expect(k(400, 100)).toBe('invalid');
+    expect(facebookMessage(classifyGraphError(400, { error: { code: 190 } }))).toMatch(/Reconnect Facebook/);
+  });
+  it('checks drafts before anyone is asked to approve', () => {
+    const base = { kind: 'text' as const, message: 'Hi' };
+    expect(checkDraft(base, now)).toBeNull();
+    expect(checkDraft({ ...base, message: '  ' }, now)).toMatch(/Write the post/);
+    expect(checkDraft({ ...base, message: 'x'.repeat(5001) }, now)).toMatch(/5000/);
+    expect(checkDraft({ kind: 'link', message: '', link: 'ftp://x' }, now)).toMatch(/https/);
+    expect(checkDraft({ kind: 'photo', message: '', mediaMime: 'image/webp', mediaBytes: 10 }, now)).toMatch(/JPEG, PNG or GIF/);
+    expect(checkDraft({ kind: 'photo', message: '', mediaMime: 'image/png', mediaBytes: 11 * 1024 * 1024 }, now)).toMatch(/10 MB/);
+    expect(checkDraft({ kind: 'video', message: '', mediaMime: 'video/mp4', mediaBytes: 10 }, now)).toBeNull();
+    expect(checkDraft({ ...base, scheduleAt: new Date(now + 10 * 60_000) }, now)).toMatch(/at least 10 minutes/);
+    expect(checkDraft({ ...base, scheduleAt: new Date(now + 12 * 60_000) }, now)).toBeNull();
+    expect(checkDraft({ ...base, scheduleAt: new Date(now + 31 * 24 * 3600_000) }, now)).toMatch(/30 days/);
+  });
+  it('detects MP4 and MOV by content and signs tokens with the app secret', () => {
+    const box = (brand: string) => Uint8Array.from([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, ...Buffer.from(brand)]);
+    expect(detectVideo(box('isom'))).toBe('video/mp4');
+    expect(detectVideo(box('qt  '))).toBe('video/quicktime');
+    expect(detectVideo(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0, 0, 0, 0, 0]))).toBeNull();
+    // HMAC-SHA256(token, secret), hex (Meta's appsecret_proof)
+    expect(appsecretProof('token', 'secret')).toBe('e941110e3d2bfe82621f0e3e1434730d7305d106c5f68c87165d0b27a4611a4a');
+    expect(appsecretProof('token', 'secret')).not.toBe(appsecretProof('token', 'other'));
   });
 });

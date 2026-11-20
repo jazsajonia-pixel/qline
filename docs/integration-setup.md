@@ -115,3 +115,15 @@ Uses the Google connection from section 1. No new scope.
 5. Optional push updates: set `QLINE_DRIVE_WEBHOOK_URL=https://<api host>/v1/hooks/drive` on the API (HTTPS with a valid certificate). Without it, Qline checks for changes every 10 minutes.
 
 Server requirement: API 1.9.0 with migrations 0020–0024. On an older server the app shows "Content Studio is not on your server yet".
+
+## 8. Facebook Pages (v1.11: posts with approval)
+
+Facebook only; Instagram is not built. Details and limits: [docs/27](27-FACEBOOK_PAGES.md).
+
+1. Create a Meta app at [developers.facebook.com/apps](https://developers.facebook.com/apps) and add Facebook Login.
+2. Valid OAuth redirect URI: `https://<api host>/v1/integrations/facebook/callback`.
+3. App settings → Advanced: turn on **Require App Secret**.
+4. In Qline: **Integrations → Integration setup → Facebook**, paste the App ID and App Secret (or set `QLINE_FACEBOOK_CLIENT_ID` / `QLINE_FACEBOOK_CLIENT_SECRET`).
+5. While the app is in development mode, only people with a role on the app can connect. Everyone else needs Meta App Review for `pages_show_list`, `pages_read_engagement`, `pages_manage_posts` (and `publish_video` for video) and Business Verification.
+
+Server requirement: API 1.11.0 with migration 0026.

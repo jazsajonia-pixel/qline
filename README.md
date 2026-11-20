@@ -39,7 +39,11 @@ flutter build apk --release --dart-define=QLINE_API=https://<your-api-host> --da
 
 Release signing reads `apps/mobile/android/key.properties`. That file and the keystore are gitignored and are never committed.
 
-## Honest status (v1.10.0)
+## Honest status (v1.11.0, in progress)
+
+On main, not deployed or released yet: Voice v2 and background continuity ([docs/26](docs/26-VOICE_V2_AND_CONTINUITY.md)) and Facebook Pages posting with approval ([docs/27](docs/27-FACEBOOK_PAGES.md)). Both are tested with automated tests only: no device QA, and Facebook has not been tried against a real Page because no Meta app is registered. Production still runs 1.10.0.
+
+### Earlier notes (v1.10.0)
 
 v1.10.0 expands GitHub beyond issues: the AI can browse repositories, read and search code, inspect branches, commits, pull requests and CI, and, only after you approve a diff, create working branches, commit files and open, edit or comment-review pull requests. It never pushes to the default or a protected branch, merges, force-pushes, changes workflows or reads secrets. Production runs API 1.10.0 with migration 0025 (applied 2026-11-20). It needs the GitHub App permissions in [docs/24](docs/24-GITHUB_INTEGRATION.md), which also lists what was and wasn't verified.
 

@@ -11,6 +11,7 @@ import { knowledgeTools } from './tools-knowledge';
 import { connectorTools } from './tools-connectors';
 import { proposalTools } from './tools-proposals';
 import { githubTools } from './tools-github';
+import { facebookTools } from './tools-facebook';
 
 export interface ToolCtx {
   orgId: string;
@@ -249,6 +250,7 @@ const defs = {
   ...connectorTools,
   ...proposalTools,
   ...githubTools,
+  ...facebookTools,
 };
 
 export type ToolName = keyof typeof defs;

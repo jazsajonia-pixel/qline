@@ -382,7 +382,7 @@ d('Qline API (integration)', () => {
   it('integrations: honest until registered, OAuth login stores sealed tokens, Gmail + Sheets sync make leads, triggers workflows', async () => {
     const l = await call(A, 'GET', '/integrations');
     expect(l.status).toBe(200);
-    expect(l.json.providers.map((p: any) => p.id)).toEqual(['google', 'microsoft', 'slack', 'notion', 'github', 'stripe']);
+    expect(l.json.providers.map((p: any) => p.id)).toEqual(['google', 'microsoft', 'slack', 'notion', 'github', 'facebook', 'stripe']);
     expect(l.json.providers.filter((p: any) => p.auth === 'oauth').every((p: any) => !p.registered && !p.connection)).toBe(true);
     // Stripe is key-based: always "registered", never connected until a restricted key is pasted.
     expect(l.json.providers.find((p: any) => p.id === 'stripe')).toMatchObject({ auth: 'key', registered: true, connection: null });
