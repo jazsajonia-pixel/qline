@@ -73,7 +73,7 @@ class StatusPill extends StatelessWidget {
       'failed' || 'dead' || 'rejected' || 'error' || 'cancelled' || 'canceled' || 'expired' || 'rolled_back' => (Icons.error_outline, q.bad, _cap(s.replaceAll('_', ' '))),
       'needs_attention' || 'unknown' => (Icons.report_outlined, q.warn, s == 'unknown' ? 'Outcome unknown' : 'Needs a check'),
       'paused' || 'blocked' || 'disabled' || 'skipped' || 'superseded' || 'archived' || 'not_configured' => (Icons.pause_circle_outline, q.text3, _cap(s.replaceAll('_', ' '))),
-      'running' || 'planning' || 'ready' || 'executing' || 'in_progress' || 'open' || 'todo' => (Icons.radio_button_unchecked, q.info, _cap(s.replaceAll('_', ' '))),
+      'running' || 'scheduled' || 'processing' || 'publishing' || 'planning' || 'ready' || 'executing' || 'in_progress' || 'open' || 'todo' => (Icons.radio_button_unchecked, q.info, _cap(s.replaceAll('_', ' '))),
       _ => (Icons.circle_outlined, q.text2, _cap(s.replaceAll('_', ' '))),
     };
     return Container(

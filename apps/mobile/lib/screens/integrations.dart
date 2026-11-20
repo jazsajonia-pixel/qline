@@ -7,12 +7,13 @@ import '../core/api.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'facebook.dart';
 import 'github.dart';
 import 'leads.dart';
 
 Map<String, dynamic> _m(dynamic v) => (v as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
 
-const _icons = {'google': Icons.mail_outline, 'microsoft': Icons.window_outlined, 'slack': Icons.tag, 'notion': Icons.article_outlined, 'github': Icons.code, 'stripe': Icons.payments_outlined};
+const _icons = {'google': Icons.mail_outline, 'microsoft': Icons.window_outlined, 'slack': Icons.tag, 'notion': Icons.article_outlined, 'github': Icons.code, 'facebook': Icons.facebook, 'stripe': Icons.payments_outlined};
 
 /// Providers that sync leads on a schedule (the others are used by the AI on demand).
 const syncingProviders = {'google', 'microsoft'};
@@ -349,6 +350,23 @@ class _ConnectionState extends ConsumerState<ConnectionScreen> {
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text('Code, pull requests and CI', style: qs(15, w: FontWeight.w600, c: q.text)),
                     Text('Browse repositories and see what the AI can do here', style: qs(13, c: q.text2)),
+                  ]),
+                ),
+                Icon(Icons.chevron_right, color: q.text3),
+              ]),
+            ),
+          ],
+          if (_p == 'facebook' && ok) ...[
+            const SizedBox(height: 12),
+            QCard(
+              onTap: () => push(context, const FacebookScreen()),
+              child: Row(children: [
+                Icon(Icons.facebook, color: q.halo),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Pages and posts', style: qs(15, w: FontWeight.w600, c: q.text)),
+                    Text('Write, review and schedule posts. Nothing goes out without your approval.', style: qs(13, c: q.text2)),
                   ]),
                 ),
                 Icon(Icons.chevron_right, color: q.text3),

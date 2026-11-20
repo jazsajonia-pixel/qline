@@ -32,3 +32,10 @@ do $$ begin
     revoke delete, truncate on content_jobs from qline_app;
   end if;
 end $$;
+
+-- v1.11 Facebook (docs/27): post history is kept; a scheduled post is cancelled, never deleted.
+do $$ begin
+  if to_regclass('public.facebook_posts') is not null then
+    revoke delete, truncate on facebook_posts from qline_app;
+  end if;
+end $$;

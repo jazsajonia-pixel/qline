@@ -4,17 +4,18 @@ import { env } from '../core/env';
 import { ApiError } from '../core/errors';
 import { withTenant, type Q } from '../core/db';
 import { open, seal } from '../core/secrets';
+import { FB_DIALOG, FB_SCOPES, FB_VIDEO_SCOPE, fbTokenRequest, GRAPH } from './facebook';
 
 /**
  * Generic OAuth 2.0 for the providers Qline integrates with. The app owner registers Qline
  * once per provider (Settings → Integration setup); after that every organization connects
  * its own account by logging in. Tokens are sealed per org and refreshed on use.
  */
-export type OAuthProvider = 'google' | 'microsoft' | 'slack' | 'notion' | 'github';
-export const OAUTH_PROVIDERS: OAuthProvider[] = ['google', 'microsoft', 'slack', 'notion', 'github'];
+export type OAuthProvider = 'google' | 'microsoft' | 'slack' | 'notion' | 'github' | 'facebook';
+export const OAUTH_PROVIDERS: OAuthProvider[] = ['google', 'microsoft', 'slack', 'notion', 'github', 'facebook'];
 export const isOAuthProvider = (p: string): p is OAuthProvider => (OAUTH_PROVIDERS as string[]).includes(p);
 
-export type Feature = 'gmail' | 'sheets' | 'forms' | 'calendar' | 'drive' | 'outlook' | 'ms_calendar' | 'slack' | 'notion' | 'github';
+export type Feature = 'gmail' | 'sheets' | 'forms' | 'calendar' | 'drive' | 'outlook' | 'ms_calendar' | 'slack' | 'notion' | 'github' | 'facebook_pages' | 'facebook_video';
 
 const G = 'https://www.googleapis.com/auth/';
 export const FEATURE_SCOPES: Record<Feature, { provider: OAuthProvider; scopes: string[] }> = {
@@ -33,6 +34,9 @@ export const FEATURE_SCOPES: Record<Feature, { provider: OAuthProvider; scopes: 
   // GitHub App: permissions come from the app's settings (docs/24 §3): Metadata read, Contents read/write,
   // Pull requests read/write, Issues read/write, Actions read, Checks read, Commit statuses read.
   github: { provider: 'github', scopes: [] },
+  // v1.11 (docs/27): Facebook Pages only. Meta App Review is needed before people outside the app's roles can grant these.
+  facebook_pages: { provider: 'facebook', scopes: [...FB_SCOPES] },
+  facebook_video: { provider: 'facebook', scopes: [FB_VIDEO_SCOPE] },
 };
 
 const BASE_SCOPES: Record<OAuthProvider, string[]> = {
@@ -41,6 +45,7 @@ const BASE_SCOPES: Record<OAuthProvider, string[]> = {
   slack: [],
   notion: [],
   github: [],
+  facebook: [],
 };
 
 export const PROVIDER_META: Record<OAuthProvider, { name: string; console: string }> = {
@@ -49,16 +54,19 @@ export const PROVIDER_META: Record<OAuthProvider, { name: string; console: strin
   slack: { name: 'Slack', console: 'https://api.slack.com/apps' },
   notion: { name: 'Notion', console: 'https://www.notion.so/profile/integrations' },
   github: { name: 'GitHub', console: 'https://github.com/settings/apps' },
+  facebook: { name: 'Facebook', console: 'https://developers.facebook.com/apps' },
 };
 
-/** Providers whose authorize step does not take PKCE (Slack, Notion). */
-const NO_PKCE = new Set<OAuthProvider>(['slack', 'notion']);
+/** Providers whose authorize step does not take PKCE (Slack, Notion). Facebook: the code is exchanged server-side with the
+ * app secret, and the single-use state protects the callback. */
+const NO_PKCE = new Set<OAuthProvider>(['slack', 'notion', 'facebook']);
 const AUTH_URL: Record<OAuthProvider, string> = {
   google: 'https://accounts.google.com/o/oauth2/v2/auth',
   microsoft: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
   slack: 'https://slack.com/oauth/v2/authorize',
   notion: 'https://api.notion.com/v1/oauth/authorize',
   github: 'https://github.com/login/oauth/authorize',
+  facebook: FB_DIALOG,
 };
 
 export function redirectUri(p: OAuthProvider) {
@@ -156,6 +164,8 @@ export async function buildAuthUrl(
     u.searchParams.set('include_granted_scopes', 'true');
   }
   if (p === 'microsoft') u.searchParams.set('prompt', 'select_account');
+  // Ask again for anything declined earlier, so a reconnect can restore a missing permission.
+  if (p === 'facebook') u.searchParams.set('auth_type', 'rerequest');
   return u.toString();
 }
 
@@ -193,6 +203,7 @@ const TOKEN_URL: Record<OAuthProvider, string> = {
   slack: 'https://slack.com/api/oauth.v2.access',
   notion: 'https://api.notion.com/v1/oauth/token',
   github: 'https://github.com/login/oauth/access_token',
+  facebook: `${GRAPH}/oauth/access_token`,
 };
 
 /** Notion's token endpoint takes JSON with HTTP Basic client authentication. */
@@ -218,6 +229,8 @@ async function tokenRequest(p: OAuthProvider, app: { clientId: string; clientSec
     const { client_id: _a, client_secret: _b, ...rest } = form;
     return postNotion(rest, app);
   }
+  // Graph errors are objects ({ error: { message, code } }); fbTokenRequest flattens them for the shared handling.
+  if (p === 'facebook') return fbTokenRequest(form);
   const r = await postForm(TOKEN_URL[p], form);
   if (p === 'github' && r.body?.error) return { ...r, ok: false };
   return r;
@@ -240,6 +253,7 @@ export async function exchangeCode(p: OAuthProvider, code: string, verifier: str
 export async function fetchIdentity(p: OAuthProvider, tokens: Tokens, raw: any): Promise<{ email: string | null; name: string | null }> {
   if (p === 'slack') return { email: null, name: raw.team?.name ?? 'Slack workspace' };
   if (p === 'notion') return { email: raw.owner?.user?.person?.email ?? null, name: raw.workspace_name ?? raw.owner?.user?.name ?? 'Notion workspace' };
+  if (p === 'facebook') return { email: null, name: raw.fb_name ?? 'Facebook account' };
   if (p === 'github') {
     const r = await fetch('https://api.github.com/user', { signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${tokens.access_token}`, accept: 'application/vnd.github+json', 'user-agent': 'Qline' } }).catch(() => null);
     const j: any = r && r.ok ? await r.json().catch(() => ({})) : {};

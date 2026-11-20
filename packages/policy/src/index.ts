@@ -215,6 +215,9 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'stripe.invoice.draft': { risk: 'L3', templates: T('ceo', 'finance', 'sales'), decision: 'require_approval', requires: 'contacts.write' },
   'calendar.invite.send': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
   'social.publish': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
+  // v1.11 (docs/27): Facebook Pages only. Reading Pages is L0; posting is L3 and ALWAYS_ASK.
+  'facebook.pages': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'facebook.post': { risk: 'L3', templates: T('ceo', 'marketing'), decision: 'require_approval', requires: 'contacts.write' },
 };
 
 /** v1.10: every GitHub write. All are L3 and in ALWAYS_ASK: no autonomy level or override lets one run unasked. */
@@ -228,7 +231,7 @@ export const GITHUB_WRITE_TOOLS = ['github.issue.create', 'github.issue.comment'
 export const EXTERNAL_WRITE_TOOLS = new Set<string>([
   'email.send', 'slack.post', 'slack.channel.create', 'slack.channel.topic', 'calendar.create', 'calendar.invite.send',
   'forms.create', 'sheets.create', 'sheets.append', 'drive.create', 'drive.update', 'notion.create', 'notion.append',
-  ...GITHUB_WRITE_TOOLS, 'stripe.customer.create', 'stripe.invoice.draft', 'social.publish',
+  ...GITHUB_WRITE_TOOLS, 'stripe.customer.create', 'stripe.invoice.draft', 'social.publish', 'facebook.post',
 ]);
 
 /**
@@ -282,6 +285,7 @@ export const REUSE_POLICY: Record<string, ReusePolicy> = {
   'github.runs': { ttlSec: 30, tables: CONN, writes: ['github.'] },
   'github.run': { ttlSec: 30, tables: CONN, writes: ['github.'] },
   'github.checks': { ttlSec: 30, tables: CONN, writes: ['github.'] },
+  'facebook.pages': { ttlSec: 300, tables: ['facebook_pages', ...CONN], writes: ['facebook.'] },
   'slack.channels': { ttlSec: 600, tables: CONN, writes: ['slack.'] },
   'stripe.summary': { ttlSec: 120, tables: CONN, writes: ['stripe.'] },
   'stripe.list': { ttlSec: 120, tables: CONN, writes: ['stripe.'] },
@@ -344,7 +348,8 @@ export interface DecideResult {
  */
 export type Autonomy = 'supervised' | 'autopilot' | 'full';
 export const AUTONOMY_LEVELS: Autonomy[] = ['supervised', 'autopilot', 'full'];
-export const ALWAYS_ASK = new Set<string>(['config.propose', ...GITHUB_WRITE_TOOLS]);
+/** Publishing to a public Facebook Page always needs a person, like GitHub writes (Jazz's rule for v1.11). */
+export const ALWAYS_ASK = new Set<string>(['config.propose', ...GITHUB_WRITE_TOOLS, 'facebook.post']);
 const AUTOPILOT_ASK = new Set(['records.delete']);
 export const DEFAULT_DAILY_EXTERNAL_LIMIT = 25;
 
@@ -734,6 +739,7 @@ export const TOOL_FAMILY_NOUNS: Record<string, string> = {
   github: 'GitHub',
   stripe: 'Stripe',
   social: 'social media',
+  facebook: 'your Facebook Pages',
 };
 
 export function toolNoun(tool: string): string {

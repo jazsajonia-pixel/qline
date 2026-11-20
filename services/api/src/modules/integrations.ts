@@ -33,6 +33,16 @@ import { STRIPE_KEY, stripeVerify } from '../integrations/connectors';
 import { finishGoogleSignIn, SIGNIN_STATE_PREFIX } from './google-signin';
 import { complete } from '@qline/ai';
 import { resolveModel } from '../agent/models';
+import { facebookApp, forgetPages, syncPages } from './facebook';
+import { FacebookError, facebookMessage, fbMe, graph, grantedPermissions, longLivedUserToken } from '../integrations/facebook';
+
+/** Facebook login finish: long-lived user token, granted permissions and the account name. */
+async function finishFacebookLogin(shortToken: string) {
+  const app = await facebookApp();
+  const ll = await longLivedUserToken(app, shortToken);
+  const [granted, me] = await Promise.all([grantedPermissions(ll.access_token, app.clientSecret), fbMe(ll.access_token, app.clientSecret).catch(() => ({ id: '', name: null }))]);
+  return { tokens: { access_token: ll.access_token, refresh_token: null, expires_at: ll.expires_at }, granted, name: me.name };
+}
 
 const FEATURES: Record<OAuthProvider, { id: Feature; name: string; detail: string }[]> = {
   google: [
@@ -48,6 +58,10 @@ const FEATURES: Record<OAuthProvider, { id: Feature; name: string; detail: strin
   ],
   slack: [{ id: 'slack', name: 'Slack alerts', detail: 'Posts urgent leads, approvals and workflow messages to a channel.' }],
   notion: [{ id: 'notion', name: 'Notion pages', detail: 'The AI can search and read the pages you share with Qline, and create or add to pages with your approval.' }],
+  facebook: [
+    { id: 'facebook_pages', name: 'Facebook Pages', detail: 'Pick a Page you manage, then write, schedule and publish text, link and photo posts. Nothing is posted until you approve the exact post. Facebook only: no Instagram yet.' },
+    { id: 'facebook_video', name: 'Facebook video posts', detail: 'Publish or schedule short videos (up to 10 MB) on your Page, with the same approval.' },
+  ],
   github: [{ id: 'github', name: 'GitHub', detail: 'The AI can browse and search code, branches, commits, pull requests and CI runs where the Qline app is installed. With your approval (and a diff to review) it can create branches, commit files to working branches, open, edit and review pull requests, and open issues or comment. It never pushes to the default or a protected branch, merges, force-pushes, changes workflows or reads secrets.' }],
 };
 
@@ -56,7 +70,7 @@ const STRIPE_FEATURES = [{ id: 'stripe', name: 'Stripe payments', detail: 'The A
 
 const PLANNED = [
   { id: 'file_import', name: 'File import', category: 'Data', status: 'available', detail: 'CSV, XLSX, JSON, TXT, MD, PDF and DOCX up to 10 MB. Use Import.' },
-  { id: 'meta', name: 'Meta (Facebook / Instagram)', category: 'Marketing', status: 'planned', detail: 'Needs Meta app review. Planned.' },
+  { id: 'instagram', name: 'Instagram', category: 'Marketing', status: 'planned', detail: 'Planned after Facebook Pages. Not available yet.' },
 ];
 
 function providerParam(p: string): OAuthProvider {
@@ -115,7 +129,14 @@ oauthPublicRoutes.get('/integrations/:provider/callback', async (c) => {
   if (err) return c.html(page(false, `${name} was not connected`, err === 'access_denied' ? 'You cancelled, or this account is not allowed to use Qline yet (Google Testing mode only allows listed test users).' : err, p), 400);
   if (!st || !code) return c.html(page(false, 'This login link expired', 'Go back to Qline and tap Connect again.', p), 400);
   try {
-    const { tokens, granted, raw } = await exchangeCode(p, code, st.verifier);
+    let { tokens, granted, raw } = await exchangeCode(p, code, st.verifier);
+    if (p === 'facebook') {
+      // Swap the 1-hour token for a 60-day one and read what was really granted (people can untick permissions).
+      const fb = await finishFacebookLogin(tokens.access_token);
+      tokens = fb.tokens;
+      granted = fb.granted;
+      raw = { ...raw, fb_name: fb.name };
+    }
     const who = await fetchIdentity(p, tokens, raw);
     await withTenant({ orgId: st.org_id, userId: st.user_id }, async (q) => {
       const prev = await q.one('select * from integration_connections where provider=$1', [p]);
@@ -140,10 +161,16 @@ oauthPublicRoutes.get('/integrations/:provider/callback', async (c) => {
         [st.org_id, st.workspace_id, p, who.email, who.name, scopes, sealTokens(st.org_id, p, merged), st.user_id, !!sameAccount],
       );
       await audit(q, { orgId: st.org_id, actorKind: 'user', actorId: st.user_id, action: 'integration.connected', targetRef: `integration:${p}`, detail: { account: who.email ?? who.name, scopes } });
+      if (p === 'facebook') {
+        const conn = await q.one<{ id: string }>(`select id from integration_connections where provider='facebook'`);
+        const app = await facebookApp();
+        await syncPages(q, st.org_id, conn!.id, tokens.access_token, app.clientSecret);
+      }
     });
     return c.html(page(true, `${name} connected`, `${who.email ?? who.name ?? 'Your account'} is now connected to Qline.`, p));
   } catch (e) {
-    return c.html(page(false, `${name} was not connected`, (e as any).detail ?? (e as Error).message, p), 400);
+    const detail = e instanceof FacebookError ? facebookMessage(e) : (e as any).detail ?? (e as Error).message;
+    return c.html(page(false, `${name} was not connected`, detail, p), 400);
   }
 });
 
@@ -234,7 +261,18 @@ integrationRoutes.delete('/integrations/:provider', async (c) => {
       /* best effort */
     }
   }
+  if (p === 'facebook') {
+    // Removes Qline's access on Facebook's side too (best effort).
+    try {
+      const tok = JSON.parse(open(conn.token_ciphertext, `oauth:${t.orgId}:${p}`));
+      const app = await getApp('facebook');
+      if (app) await graph('/me/permissions', tok.access_token, { secret: app.clientSecret, method: 'DELETE', timeoutMs: 10_000 });
+    } catch {
+      /* best effort */
+    }
+  }
   await tx(t, async (q) => {
+    if (p === 'facebook') await forgetPages(q);
     await q.exec('delete from integration_connections where id=$1', [conn.id]);
     await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'integration.disconnected', targetRef: `integration:${p}` });
   });
