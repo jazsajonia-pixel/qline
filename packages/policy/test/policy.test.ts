@@ -187,3 +187,36 @@ describe('M2: REUSE_POLICY', () => {
     for (const s of ['What tasks are open?', 'Summarise the Acme deal', 'Draft a reply to Dana']) expect(wantsFresh(s), s).toBe(false);
   });
 });
+
+describe('v1.10: GitHub code, pull requests and CI (docs/24)', () => {
+  const reads = ['github.repo', 'github.tree', 'github.file', 'github.code_search', 'github.branches', 'github.commits', 'github.commit', 'github.compare', 'github.pulls', 'github.pull', 'github.runs', 'github.run', 'github.checks'];
+  const writes = ['github.branch.create', 'github.files.commit', 'github.pr.create', 'github.pr.update', 'github.pr.review', 'github.issue.create', 'github.issue.comment'];
+
+  it('reads are L0 for every built-in profile and need only tasks.read', () => {
+    for (const t of reads) {
+      expect(TOOL_POLICIES[t]?.risk, t).toBe('L0');
+      expect(TOOL_POLICIES[t]?.requires, t).toBe('tasks.read');
+      expect(decideTool({ tool: t, allowlist: defaultAllowlist('research'), userRole: 'viewer' }).decision, t).toBe('allow');
+    }
+  });
+
+  it('every write is L3, only for CEO and Operations, and asks a person at every autonomy level', async () => {
+    const { ALWAYS_ASK, EXTERNAL_WRITE_TOOLS, GITHUB_WRITE_TOOLS } = await import('../src/index');
+    expect([...GITHUB_WRITE_TOOLS].sort()).toEqual([...writes].sort());
+    for (const t of writes) {
+      expect(TOOL_POLICIES[t]?.risk, t).toBe('L3');
+      expect(TOOL_POLICIES[t]?.templates, t).toEqual(['ceo', 'operations']);
+      expect(ALWAYS_ASK.has(t), t).toBe(true);
+      expect(EXTERNAL_WRITE_TOOLS.has(t), t).toBe(true);
+      for (const autonomy of ['supervised', 'autopilot', 'full'] as const) {
+        expect(decideTool({ tool: t, allowlist: defaultAllowlist('ceo'), userRole: 'owner', autonomy, relaxed: [t] }).decision, `${t} ${autonomy}`).toBe('require_approval');
+      }
+      expect(decideTool({ tool: t, allowlist: defaultAllowlist('ceo'), userRole: 'viewer' }).decision, t).toBe('deny');
+      expect(defaultAllowlist('research')).not.toContain(t);
+    }
+  });
+
+  it('has no merge, force-push, delete, workflow or secrets tool', () => {
+    for (const t of Object.keys(TOOL_POLICIES).filter((k) => k.startsWith('github.'))) expect(t).not.toMatch(/merge|force|delete|secret|workflow_dispatch|rerun|dispatch|variable/);
+  });
+});

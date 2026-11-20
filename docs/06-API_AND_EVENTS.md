@@ -99,3 +99,20 @@ Spec for editors: [docs/23](23-EDITOR_HANDOFF_SPEC.md). Design: [docs/22](22-CON
 | `POST /v1/hooks/drive` | none | Google change notifications; checked by channel ID, token hash, resource and expiry; 404 otherwise |
 
 Notifications use category `content` and `ref = {kind:'content_job', id, jobCode}`; the app opens the job from it.
+
+## 7. v1.10 GitHub (read-only routes)
+
+Design and limits: [docs/24](24-GITHUB_INTEGRATION.md). Every route needs `tasks.read`, uses only this organization's GitHub connection, and changes nothing on GitHub (writes exist only as approval-gated agent tools). No connection → 409 `GITHUB_NOT_CONNECTED`; a missing app permission → 502 `GITHUB_PERMISSION` naming it; a bad repo/sha/run → 400.
+
+| Route | What it does |
+|---|---|
+| `GET /v1/github/capabilities` | Installations, their permissions, which Qline features each permission enables, unused risky permissions, and Qline's guarantees |
+| `GET /v1/github/repos?limit=` | Repositories where the app is installed (`installed`, `repos[]`) |
+| `GET /v1/github/repos/:owner/:name` | Repository facts (default branch, visibility, language) |
+| `GET /v1/github/repos/:owner/:name/tree?path=&ref=` | One folder (≤ 500 entries, folders first) |
+| `GET /v1/github/repos/:owner/:name/file?path=&ref=&page=` | Text file in 400-line pages; > 1 MB and binary files are not read; secret-looking values are replaced with `[redacted]` |
+| `GET /v1/github/repos/:owner/:name/branches?q=` | Branches with `default` and `protected` |
+| `GET /v1/github/repos/:owner/:name/commits?ref=`, `/commits/:sha` | History; one commit with per-file patches |
+| `GET /v1/github/repos/:owner/:name/pulls?state=`, `/pulls/:number` | PR list; one PR with files, reviews and checks |
+| `GET /v1/github/repos/:owner/:name/runs?branch=`, `/runs/:id` | Actions runs; one run with jobs, steps and the masked end of failed job logs |
+| `GET /v1/github/repos/:owner/:name/checks?ref=` | Check runs and commit statuses for a ref, with an overall verdict |

@@ -10,6 +10,7 @@ import { fileTools } from './tools-files';
 import { knowledgeTools } from './tools-knowledge';
 import { connectorTools } from './tools-connectors';
 import { proposalTools } from './tools-proposals';
+import { githubTools } from './tools-github';
 
 export interface ToolCtx {
   orgId: string;
@@ -51,7 +52,20 @@ export interface ToolDef<S extends z.ZodTypeAny> {
   schema: S;
   execute(q: Q, ctx: ToolCtx, args: z.infer<S>): Promise<ToolResult>;
   /** Describe what would happen, without side effects (approvals preview, dry runs). */
-  preview(args: z.infer<S>): { title: string; lines: string[] };
+  preview(args: z.infer<S>): ToolPreview;
+  /**
+   * v1.10 (docs/24): reads the current state before a write is recorded, and returns the args to store with the
+   * state pinned (e.g. the branch head the person saw) plus a preview with a diff. Runs before the approval is
+   * created, so what a person approves is exactly what executes. Pinned fields from the model are always replaced.
+   */
+  stage?(q: Q, ctx: ToolCtx, args: z.infer<S>): Promise<{ ok: true; args: z.infer<S>; preview: ToolPreview } | { ok: false; error: string }>;
+}
+
+export interface ToolPreview {
+  title: string;
+  lines: string[];
+  /** Unified diff text shown in Approvals (bounded). */
+  diff?: string;
 }
 
 const dueFromArgs = (a: { dueAt?: string | null; dueInDays?: number | null }) =>
@@ -234,6 +248,7 @@ const defs = {
   ...knowledgeTools,
   ...connectorTools,
   ...proposalTools,
+  ...githubTools,
 };
 
 export type ToolName = keyof typeof defs;

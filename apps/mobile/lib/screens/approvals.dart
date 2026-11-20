@@ -5,6 +5,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'github.dart' show DiffView;
 import 'needs_checking.dart';
 
 Map<String, dynamic> _preview(Map a) {
@@ -158,6 +159,10 @@ class _ApprovalDetailState extends ConsumerState<ApprovalDetail> {
                 for (final l in lines) Padding(padding: const EdgeInsets.only(bottom: 6), child: Text('$l', style: qs(14, c: q.text))),
               ]),
             ),
+            if (p['diff'] is String && (p['diff'] as String).isNotEmpty) ...[
+              const SectionLabel('Changes'),
+              DiffView(p['diff'] as String),
+            ],
             if (a['reason'] != null) ...[const SectionLabel('Why approval is needed'), Text('${a['reason']}', style: qs(14, c: q.text2))],
             if (args.isNotEmpty) ...[
               const SectionLabel('Exact inputs'),

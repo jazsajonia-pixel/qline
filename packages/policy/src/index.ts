@@ -190,6 +190,25 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'github.read': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
   'github.issue.create': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
   'github.issue.comment': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  // v1.10 (docs/24): code, branches, commits, pull requests and CI. Reads are L0; every write is L3 and ALWAYS_ASK.
+  'github.repo': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.tree': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.file': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.code_search': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.branches': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.commits': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.commit': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.compare': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.pulls': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.pull': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.runs': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.run': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.checks': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
+  'github.branch.create': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  'github.files.commit': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  'github.pr.create': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  'github.pr.update': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
+  'github.pr.review': { risk: 'L3', templates: T('ceo', 'operations'), decision: 'require_approval', requires: 'tasks.write' },
   'stripe.summary': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'tasks.read' },
   'stripe.list': { risk: 'L0', templates: AGENT_TEMPLATES, decision: 'allow', requires: 'contacts.read' },
   'stripe.customer.create': { risk: 'L3', templates: T('ceo', 'finance', 'sales'), decision: 'require_approval', requires: 'contacts.write' },
@@ -198,15 +217,18 @@ export const TOOL_POLICIES: Record<string, ToolPolicy> = {
   'social.publish': { risk: 'L3', templates: T('sales', 'marketing', 'operations'), decision: 'require_approval', requires: 'contacts.write' },
 };
 
+/** v1.10: every GitHub write. All are L3 and in ALWAYS_ASK: no autonomy level or override lets one run unasked. */
+export const GITHUB_WRITE_TOOLS = ['github.issue.create', 'github.issue.comment', 'github.branch.create', 'github.files.commit', 'github.pr.create', 'github.pr.update', 'github.pr.review'] as const;
+
 /**
  * M1 (docs/17 §H): tools that change something outside Qline (a connected app). Their intent is committed before
  * the provider call, an interrupted or ambiguous call is recorded as "unknown" and never retried automatically, and
  * under full autopilot the L3 ones use the workspace's daily allowance. Every L3 tool must be listed here.
  */
-export const EXTERNAL_WRITE_TOOLS = new Set([
+export const EXTERNAL_WRITE_TOOLS = new Set<string>([
   'email.send', 'slack.post', 'slack.channel.create', 'slack.channel.topic', 'calendar.create', 'calendar.invite.send',
   'forms.create', 'sheets.create', 'sheets.append', 'drive.create', 'drive.update', 'notion.create', 'notion.append',
-  'github.issue.create', 'github.issue.comment', 'stripe.customer.create', 'stripe.invoice.draft', 'social.publish',
+  ...GITHUB_WRITE_TOOLS, 'stripe.customer.create', 'stripe.invoice.draft', 'social.publish',
 ]);
 
 /**
@@ -247,6 +269,19 @@ export const REUSE_POLICY: Record<string, ReusePolicy> = {
   'github.repos': { ttlSec: 600, tables: CONN, writes: ['github.'] },
   'github.issues': { ttlSec: 120, tables: CONN, writes: ['github.'] },
   'github.read': { ttlSec: 300, tables: CONN, writes: ['github.'] },
+  'github.repo': { ttlSec: 300, tables: CONN, writes: ['github.'] },
+  'github.tree': { ttlSec: 120, tables: CONN, writes: ['github.'] },
+  'github.file': { ttlSec: 120, tables: CONN, writes: ['github.'] },
+  'github.code_search': { ttlSec: 120, tables: CONN, writes: ['github.'] },
+  'github.branches': { ttlSec: 60, tables: CONN, writes: ['github.'] },
+  'github.commits': { ttlSec: 60, tables: CONN, writes: ['github.'] },
+  'github.commit': { ttlSec: 1800, tables: CONN, writes: ['github.'] },
+  'github.compare': { ttlSec: 60, tables: CONN, writes: ['github.'] },
+  'github.pulls': { ttlSec: 60, tables: CONN, writes: ['github.'] },
+  'github.pull': { ttlSec: 60, tables: CONN, writes: ['github.'] },
+  'github.runs': { ttlSec: 30, tables: CONN, writes: ['github.'] },
+  'github.run': { ttlSec: 30, tables: CONN, writes: ['github.'] },
+  'github.checks': { ttlSec: 30, tables: CONN, writes: ['github.'] },
   'slack.channels': { ttlSec: 600, tables: CONN, writes: ['slack.'] },
   'stripe.summary': { ttlSec: 120, tables: CONN, writes: ['stripe.'] },
   'stripe.list': { ttlSec: 120, tables: CONN, writes: ['stripe.'] },
@@ -309,7 +344,7 @@ export interface DecideResult {
  */
 export type Autonomy = 'supervised' | 'autopilot' | 'full';
 export const AUTONOMY_LEVELS: Autonomy[] = ['supervised', 'autopilot', 'full'];
-export const ALWAYS_ASK = new Set(['config.propose']);
+export const ALWAYS_ASK = new Set<string>(['config.propose', ...GITHUB_WRITE_TOOLS]);
 const AUTOPILOT_ASK = new Set(['records.delete']);
 export const DEFAULT_DAILY_EXTERNAL_LIMIT = 25;
 

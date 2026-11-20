@@ -27,7 +27,7 @@ export const CATALOGUE = [
   { id: 'google_calendar', name: 'Google Calendar', category: 'Calendar', status: 'not_configured', detail: 'Needs a verified Google OAuth app. Planned.' },
   { id: 'slack', name: 'Slack', category: 'Messaging', status: 'not_configured', detail: 'Needs a Slack app. Planned.' },
   { id: 'notion', name: 'Notion', category: 'Docs', status: 'not_configured', detail: 'Needs a Notion integration. Planned.' },
-  { id: 'github', name: 'GitHub', category: 'Dev', status: 'not_configured', detail: 'Needs a GitHub app. Planned.' },
+  { id: 'github', name: 'GitHub', category: 'Dev', status: 'not_configured', detail: 'Connect in Settings → Integrations: code, pull requests and CI, with approval for every change.' },
   { id: 'stripe', name: 'Stripe', category: 'Payments', status: 'not_configured', detail: 'Read-only revenue sync. Planned.' },
   { id: 'meta', name: 'Meta (Facebook / Instagram)', category: 'Marketing', status: 'not_configured', detail: 'Needs Meta app review. Planned.' },
 ] as const;

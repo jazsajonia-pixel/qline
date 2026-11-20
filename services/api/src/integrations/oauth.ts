@@ -30,7 +30,8 @@ export const FEATURE_SCOPES: Record<Feature, { provider: OAuthProvider; scopes: 
   slack: { provider: 'slack', scopes: ['chat:write', 'chat:write.public', 'channels:read', 'channels:manage'] },
   // Notion has no scopes: the person picks which pages Qline may use on the Notion consent screen.
   notion: { provider: 'notion', scopes: [] },
-  // GitHub App: permissions come from the app's settings (Issues read/write, Pull requests, Contents and Metadata read).
+  // GitHub App: permissions come from the app's settings (docs/24 §3): Metadata read, Contents read/write,
+  // Pull requests read/write, Issues read/write, Actions read, Checks read, Commit statuses read.
   github: { provider: 'github', scopes: [] },
 };
 

@@ -453,7 +453,7 @@ export const REPO = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_-][A-Za-z0-9
 
 /** Repositories the person and the Qline GitHub App can both reach. */
 export async function githubRepos(token: string, limit = 30) {
-  const inst = await call(`${GH}/user/installations?per_page=20`, { headers: gh(token) });
+  const inst = await call(`${GH}/user/installations?per_page=50`, { headers: gh(token) });
   const repos: any[] = [];
   for (const i of inst.installations ?? []) {
     const r = await call(`${GH}/user/installations/${i.id}/repositories?per_page=${Math.min(limit, 100)}`, { headers: gh(token) });
@@ -462,7 +462,7 @@ export async function githubRepos(token: string, limit = 30) {
   }
   return {
     installed: (inst.installations ?? []).length > 0,
-    repos: repos.slice(0, limit).map((r) => ({ fullName: r.full_name, private: r.private, description: clip(r.description, 200), openIssues: r.open_issues_count, url: r.html_url, pushedAt: r.pushed_at })),
+    repos: repos.slice(0, limit).map((r) => ({ fullName: r.full_name, private: r.private, description: clip(r.description, 200), defaultBranch: r.default_branch, language: r.language ?? null, archived: !!r.archived, openIssues: r.open_issues_count, url: r.html_url, pushedAt: r.pushed_at })),
   };
 }
 

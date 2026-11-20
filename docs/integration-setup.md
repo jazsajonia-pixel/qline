@@ -73,7 +73,7 @@ Microsoft has no 7-day limit. Users outside your organization may see an "unveri
 3. In Qline: **Settings → Integration setup → Notion**, paste both.
 4. Each user taps **Integrations → Notion → Connect** and picks the pages Qline may use. The AI only sees pages picked there.
 
-## 5. GitHub (v1.6: issues and pull requests)
+## 5. GitHub (v1.10: code, pull requests, CI and issues)
 
 Qline uses a **GitHub App** with user access tokens, so access is limited to the repositories where the app is installed.
 
@@ -82,7 +82,8 @@ Qline uses a **GitHub App** with user access tokens, so access is limited to the
    - **Callback URL**: `https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech/v1/integrations/github/callback`
    - Keep **Expire user authorization tokens** on. Leave **Request user authorization during installation** off.
    - Webhook: untick **Active** (Qline does not use GitHub webhooks yet).
-   - Repository permissions: **Issues: Read and write**, **Pull requests: Read-only**, **Contents: Read-only**, **Metadata: Read-only**.
+   - Repository permissions (v1.10): **Metadata: Read-only**, **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, **Actions: Read-only**, **Checks: Read-only**, **Commit statuses: Read-only**. Leave **Workflows**, **Secrets**, **Administration**, **Environments** and **Variables** at **No access**: Qline never uses them. Any permission you leave out just turns that feature off; Qline names the missing permission on **Integrations → GitHub → Code, pull requests and CI**. Details: [docs/24](24-GITHUB_INTEGRATION.md).
+   - After changing permissions on an existing app, each installation must **accept** the new permissions (GitHub emails the owner, or open the installation's settings).
    - Where can it be installed: **Any account** if other people's repos should connect, otherwise **Only on this account**.
 2. Create the app, then copy the **Client ID** and **Generate a new client secret**.
 3. **Install App** → install it on the repositories Qline may see.
