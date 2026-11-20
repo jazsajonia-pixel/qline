@@ -41,7 +41,7 @@ Release signing reads `apps/mobile/android/key.properties`. That file and the ke
 
 ## Honest status (v1.11.0, server live; APK not released)
 
-Production runs API 1.11.0 (Neon deployment #17) with migration 0026, applied 2026-11-20. The v1.11.0 APK is not released yet. New in 1.11: Voice v2 and background continuity ([docs/26](docs/26-VOICE_V2_AND_CONTINUITY.md)) Facebook Pages posting with approval ([docs/27](docs/27-FACEBOOK_PAGES.md)), and in-app updates that are offered, never forced ([docs/28](docs/28-IN_APP_UPDATES.md)). All are tested with automated tests only: no device QA, and Facebook has not been tried against a real Page because no Meta app is registered. 
+Production runs API 1.11.0 (Neon deployment #17) with migration 0026, applied 2026-11-20. The v1.11.0 APK is not released yet. New in 1.11: Voice v2 and background continuity ([docs/26](docs/26-VOICE_V2_AND_CONTINUITY.md)), Facebook Pages posting with approval ([docs/27](docs/27-FACEBOOK_PAGES.md)), and in-app updates that are offered, never forced ([docs/28](docs/28-IN_APP_UPDATES.md)). All are tested with automated tests only: no device QA, and Facebook has not been tried against a real Page because no Meta app is registered.
 
 ### Earlier notes (v1.10.0)
 
