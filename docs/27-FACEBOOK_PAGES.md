@@ -47,6 +47,6 @@ Endpoints (all under `/v1`): `GET /facebook/pages`, `POST /facebook/pages/sync`,
 | Cancel scheduled post | Yes | Yes | No | No |
 | Phone: Pages, posts, composer, review sheet | Yes | Yes (widget tests) | No | No |
 
-Nothing here has been run against the real Graph API or a real Page: there is no Meta app registered for Qline yet. Before calling it production-verified: register the app, apply migration 0026, connect a test Page, and post, schedule, cancel and fail (duplicate) one post each.
+Nothing here has been run against the real Graph API or a real Page: there is no Meta app registered for Qline yet. Migration 0026 is applied in production and API 1.11.0 is live (2026-11-20, deployment #17), so the routes exist, but none has been used yet. Before calling it production-verified: register the app, connect a test Page, and post, schedule, cancel and fail (duplicate) one post each.
 
 Meta references: [Page feed posts](https://developers.facebook.com/docs/pages-api/posts), [Page photos](https://developers.facebook.com/docs/graph-api/reference/page/photos/), [Page videos](https://developers.facebook.com/docs/graph-api/reference/page/videos/), [long-lived tokens](https://developers.facebook.com/documentation/facebook-login/guides/access-tokens/get-long-lived/), [Graph API changelog](https://developers.facebook.com/documentation/development/graph-api/changelog).
