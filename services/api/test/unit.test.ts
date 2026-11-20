@@ -594,3 +594,30 @@ describe('M1 OAuth refresh classification', () => {
     expect(isDeadGrant(500, { error: 'server_error' })).toBe(false);
   });
 });
+
+describe('v1.10 GitHub helpers (docs/24)', () => {
+  it('unifiedDiff shows exact hunks with context, new files, and line numbers', async () => {
+    const { unifiedDiff } = await import('../src/integrations/github');
+    const a = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n');
+    const b = a.replace('line 3', 'LINE 3').replace('line 18', 'line 18\nadded');
+    const d = unifiedDiff('f.txt', a, b);
+    expect(d.added).toBe(2);
+    expect(d.removed).toBe(1);
+    expect(d.text.split('\n').filter((l) => l.startsWith('@@'))).toEqual(['@@ -1,6 +1,6 @@', '@@ -16,5 +16,6 @@']);
+    expect(d.text).toContain('-line 3\n+LINE 3');
+    expect(unifiedDiff('n.md', null, '# x\n').text).toBe('--- /dev/null\n+++ b/n.md\n@@ -0,0 +1,2 @@\n+# x\n+');
+    const big = unifiedDiff('big', 'a', Array.from({ length: 50 }, (_, i) => `n${i}`).join('\n'), 20);
+    expect(big.truncated).toBe(true);
+  });
+  it('path guards and secret masking', async () => {
+    const { badPath, blockedWritePath, redactSecrets, BRANCH } = await import('../src/integrations/github');
+    for (const p of ['/etc/x', 'a/../b', './a', 'a//b', '.git/config', 'a\\b']) expect(badPath(p), p).not.toBeNull();
+    expect(badPath('src/app.ts')).toBeNull();
+    for (const p of ['.github/workflows/ci.yml', '.GitHub/Actions/x/action.yml', '.env', 'app/.env.local', 'keys/server.pem', 'id_rsa', 'android/key.properties']) expect(blockedWritePath(p), p).not.toBeNull();
+    for (const p of ['.github/CODEOWNERS', 'src/env.ts', 'docs/keys.md']) expect(blockedWritePath(p), p).toBeNull();
+    expect(redactSecrets('a ' + 'gh' + 'p_abcdefghijklmnopqrstuvwxyz0123456789 b ' + 'AKIA' + 'ABCDEFGHIJKLMNOP').text).toBe('a [redacted] b [redacted]');
+    expect(redactSecrets('-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----').text).toBe('[redacted]');
+    for (const b of ['qline/fix-1', 'feature.x']) expect(BRANCH.test(b), b).toBe(true);
+    for (const b of ['/x', 'a..b', 'a/', 'x.lock', 'a b', 'a@{1}']) expect(BRANCH.test(b), b).toBe(false);
+  });
+});

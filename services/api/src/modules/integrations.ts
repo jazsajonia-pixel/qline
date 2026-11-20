@@ -48,7 +48,7 @@ const FEATURES: Record<OAuthProvider, { id: Feature; name: string; detail: strin
   ],
   slack: [{ id: 'slack', name: 'Slack alerts', detail: 'Posts urgent leads, approvals and workflow messages to a channel.' }],
   notion: [{ id: 'notion', name: 'Notion pages', detail: 'The AI can search and read the pages you share with Qline, and create or add to pages with your approval.' }],
-  github: [{ id: 'github', name: 'GitHub issues', detail: 'The AI can read repositories, issues and pull requests where the Qline app is installed, and open issues or comment with your approval. It never changes code.' }],
+  github: [{ id: 'github', name: 'GitHub', detail: 'The AI can browse and search code, branches, commits, pull requests and CI runs where the Qline app is installed. With your approval (and a diff to review) it can create branches, commit files to working branches, open, edit and review pull requests, and open issues or comment. It never pushes to the default or a protected branch, merges, force-pushes, changes workflows or reads secrets.' }],
 };
 
 /** Key-based providers (no OAuth app): the organization pastes a restricted key. */

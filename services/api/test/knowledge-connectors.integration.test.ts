@@ -316,7 +316,7 @@ d('v1.6 run 3: Knowledge OS and connectors (integration)', () => {
     expect(a?.x).toBe(1);
   });
 
-  it('GitHub tools list installed repos, read issues and open issues (never code)', async () => {
+  it('GitHub tools list installed repos, read issues and open issues (code tools: github-code test)', async () => {
     await connect(A, 'github', []);
     stub([
       [/GET https:\/\/api\.github\.com\/user\/installations\?/, () => ({ json: { installations: [{ id: 7 }] } })],
@@ -331,7 +331,8 @@ d('v1.6 run 3: Knowledge OS and connectors (integration)', () => {
     expect((await run(A, 'github.issue.create', { repo: 'mara/shop', title: 'Add GCash', body: 'Customers asked.' })).ok).toBe(true);
     expect(seen.every((x) => x.headers['user-agent'] === 'Qline')).toBe(true);
     expect(() => tools.getTool('github.issues')!.schema.parse({ repo: '../../etc' })).toThrow();
-    expect(tools.IMPLEMENTED_TOOLS.some((n) => /github\.(push|commit|merge|contents)/.test(n))).toBe(false);
+    // v1.10 adds code tools (github-code.integration.test.ts); there is still no push, merge, force or delete tool.
+    expect(tools.IMPLEMENTED_TOOLS.some((n) => /github\.(push|merge|force|delete|secret)/.test(n))).toBe(false);
   });
 
   it('Drive tools need the Drive scope, export Google Docs as text, and save files to the Library', async () => {

@@ -37,7 +37,8 @@ import type { Artifact, ToolCtx, ToolDef, ToolResult } from './tools';
  * v1.6 run 3 connector tools: Google Drive, Notion, GitHub and Stripe.
  * Reads are L0. Writes go through the policy table (docs/09): Drive/Notion writes need approval
  * unless relaxed; GitHub issue writes and Stripe customer/draft-invoice writes are L3 (always approved).
- * Qline never finalizes, sends, refunds or charges in Stripe, and never writes code in GitHub.
+ * Qline never finalizes, sends, refunds or charges in Stripe. GitHub code, pull request and CI tools are in
+ * tools-github.ts (v1.10, docs/24).
  */
 
 const DRIVE_READ = 'drive.readonly';

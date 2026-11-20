@@ -7,6 +7,7 @@ import '../core/api.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'github.dart';
 import 'leads.dart';
 
 Map<String, dynamic> _m(dynamic v) => (v as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
@@ -337,6 +338,23 @@ class _ConnectionState extends ConsumerState<ConnectionScreen> {
                 QButton('Sync now', icon: Icons.sync, busy: _syncing, expand: true, onPressed: _sync),
             ]),
           ),
+          if (_p == 'github' && ok) ...[
+            const SizedBox(height: 12),
+            QCard(
+              onTap: () => push(context, const GithubScreen()),
+              child: Row(children: [
+                Icon(Icons.code, color: q.halo),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Code, pull requests and CI', style: qs(15, w: FontWeight.w600, c: q.text)),
+                    Text('Browse repositories and see what the AI can do here', style: qs(13, c: q.text2)),
+                  ]),
+                ),
+                Icon(Icons.chevron_right, color: q.text3),
+              ]),
+            ),
+          ],
           if (missing.isNotEmpty && ok) ...[
             const SectionLabel('Not allowed yet'),
             for (final f in missing)
