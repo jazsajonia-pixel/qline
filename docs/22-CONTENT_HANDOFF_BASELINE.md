@@ -369,6 +369,13 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
   - Deviations: New handoff has no duration, notes or expiry fields (server defaults apply). The asset picker shows the first 100 files without search.
   - Not verified: a real phone, the system-tray tap path (not unit-testable), the live server (it lacks the content routes until a deploy is authorized).
   - Tests: `apps/mobile/test/v17_content_test.dart` (29 tests): loading, empty, error, offline, older server, stale, viewer and member permissions, semantics, 390 px light and dark screenshots, 130% text.
+- **Run 7 (Slice 5), 2026-11-20:** editor spec, docs, final audit, v1.9.0. No Drive write, no scope change, no production deploy or migration.
+  - New [docs/23](23-EDITOR_HANDOFF_SPEC.md): the editor's side (manifest, result file, names, refusals, checks, receipt). Route table in docs/06 §6, Drive section in docs/09, setup in integration-setup §7.
+  - Audit of section C: every row is implemented. By design (ADR-C3) Qline does not put the manifest, PDF or receipt into Drive; the owner sends them. Live Drive push is built but untested (needs a public HTTPS webhook).
+  - Gap fixed: the job screen can now save Qline's receipt (`/content/jobs/:id/ack`) as `<code>-r<rev>.ack-<ver>.json`; one widget test added (30 in v17).
+  - Known limit: there is no "mark as sent" action, so `dispatched` is never reached; a first accepted report moves a job from `prepared` straight on.
+  - Versions: app 1.9.0+11, API_VERSION 1.9.0. Production stays on API 1.8.0 until the owner authorizes the deploy and migrations 0020–0024; until then the app shows "not on your server yet".
+  - Not verified: a phone, a real Google account and editor, the live server.
 
 ## H. Owner actions (later, not in this task)
 

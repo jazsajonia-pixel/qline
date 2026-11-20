@@ -12,6 +12,7 @@ import 'package:qline/core/api.dart';
 import 'package:qline/core/session.dart';
 import 'package:qline/screens/content.dart';
 import 'package:qline/screens/content_setup.dart';
+import 'package:qline/ui/chat_artifacts.dart' show saveFileBytes;
 import 'package:qline/ui/theme.dart';
 import 'package:qline/ui/widgets.dart' show SkeletonList;
 
@@ -182,6 +183,7 @@ Server jobServer(Map<String, Object?> d, {Object? manifestOut}) => Server({
       'POST /content/jobs/$idA/cancel': (_) => {...d, 'state': 'cancelled'},
       'POST /content/jobs/$idA/ingest': (_) => {'outcome': 'applied', 'findings': <Object>[], 'job': d},
       'POST /content/jobs/$idA/reissue': (_) => {...d, 'revision': 2},
+      'GET /content/jobs/$idA/ack': (_) => {'schema': 'qline.content.ack/1', 'version': 1},
     });
 
 void main() {
@@ -457,6 +459,24 @@ void main() {
       await settle(t);
       expect(s.hits('POST', '/ingest').single.body, raw);
       expect(find.text('Report read. Qline updated the job.'), findsOneWidget);
+    });
+
+    testWidgets("Qline's receipt saves the latest acknowledgement", (t) async {
+      phone(t, height: 2200);
+      final saved = <String>[];
+      final old = saveFileBytes;
+      saveFileBytes = (name, bytes) async {
+        saved.add(name);
+        return '/tmp/$name';
+      };
+      addTearDown(() => saveFileBytes = old);
+      final s = jobServer(detail('external_in_progress', ext: 'in_progress'));
+      await t.pumpWidget(app(s, const ContentJobScreen(id: idA), role: 'viewer'));
+      await settle(t);
+      await t.tap(find.text("Save Qline's receipt"));
+      await settle(t);
+      expect(saved, ['QJ-20261120-AAAA-r1.ack-1.json']);
+      expect(s.hits('GET', '/ack').single.url.queryParameters['version'], '1');
     });
 
     testWidgets('viewer can only download', (t) async {

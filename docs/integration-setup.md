@@ -98,3 +98,19 @@ Stripe needs no app registration. Each workspace pastes a **restricted key**; Ql
    - **Write**: Customers, Invoices (Qline only creates customers and **draft** invoices, always after your approval; it never sends, finalizes, charges or refunds).
    - Everything else: **None**.
 3. Copy the key (`rk_test_…` or `rk_live_…`), then in Qline: **Integrations → Stripe → Connect Stripe** and paste it. Qline checks it with Stripe and stores it encrypted.
+
+## 7. Content Studio (v1.9: video handoffs through Drive)
+
+Uses the Google connection from section 1. No new scope.
+
+1. **Connect Google** with **Drive files** ticked (the account must be a listed test user while the app is in Testing).
+2. In Drive, arrange one main folder with these folders inside it (any names, any depth up to 20):
+   - **Source files** (one or more): what the editor works from. Qline only reads them.
+   - **Ready for QA**: where the editor puts the finished video.
+   - **Reports** (optional): where the editor puts `…result.json`. Without it, paste the result into the job.
+   Share the main folder (or just these folders) with the editor yourself. Qline never shares anything.
+3. In Qline: **Home → Command Center → Content Studio → Drive folders**. Paste each folder's link or ID, tap **Save and check folders**, fix anything it reports, then **Sync now**.
+4. **New handoff** → pick files, write the brief, create. Save the editor PDF and manifest and send them to the editor. Point them to [docs/23](23-EDITOR_HANDOFF_SPEC.md).
+5. Optional push updates: set `QLINE_DRIVE_WEBHOOK_URL=https://<api host>/v1/hooks/drive` on the API (HTTPS with a valid certificate). Without it, Qline checks for changes every 10 minutes.
+
+Server requirement: API 1.9.0 with migrations 0020–0024. On an older server the app shows "Content Studio is not on your server yet".

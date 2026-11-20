@@ -65,3 +65,14 @@ Source: `packages/policy/src/index.ts`. Content returned by every connector is w
 ## Google Forms publish state (M1)
 
 Forms created through the API after 2026-06-30 start unpublished. Qline publishes each new form and then reads it back; it only calls a form ready when Google reports it is published and accepting responses. Otherwise the result carries `accepting:false` and `publishError`, and the user is told to open the form and press Publish. Reading responses uses `drive.file`, which only covers forms Qline created. See docs/17 §C.
+
+## Google Drive for Content Studio (v1.9)
+
+Content Studio coordinates video edits with an outside editor through Drive. See [docs/22](22-CONTENT_HANDOFF_BASELINE.md) and the editor spec in [docs/23](23-EDITOR_HANDOFF_SPEC.md).
+
+- **Scopes are unchanged:** `drive.readonly` + `drive.file`. Qline never asks for the full `drive` scope.
+- **Read-only in practice.** Calls used: `files.get`, `files.list` (children of mapped folders only), `alt=media` downloads of result files (≤ 256 KB), `changes.getStartPageToken`, `changes.list`, and, only when `QLINE_DRIVE_WEBHOOK_URL` is set, `changes.watch` and `channels.stop`. No file is created, changed, moved, shared or deleted.
+- **Boundary.** Everything is limited to one main folder and the folders mapped inside it, by ID. Shortcuts are never followed. Indexing is bounded (depth 8, 5,000 items per sync).
+- **Change tracking.** A changes cursor with a lease, re-listing on folder moves, a full re-listing on a stale cursor, retries with backoff on 429/5xx/403, and a 10-minute reconciliation tick that also expires old jobs and flags quiet ones.
+- **Trust.** Editor reports are strict, size-capped, never given to a model and never move a job to "checked". Only Qline's own Drive reads verify a video.
+- **Not done:** Qline does not write the manifest, PDF or receipt into Drive (the owner sends them); a push channel needs a public HTTPS address and was not tested with Google.

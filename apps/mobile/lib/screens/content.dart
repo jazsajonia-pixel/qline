@@ -347,11 +347,16 @@ class _JobState extends ConsumerState<ContentJobScreen> {
     if (r != null) await reload();
   }
 
-  Future<void> _save(Map j, String kind) async {
-    final name = '${j['jobCode']}-r${j['revision']}${kind == 'pdf' ? '.pdf' : '.manifest.json'}';
+  /// Saves Qline's stored copy: the editor PDF, the manifest or the latest acknowledgement.
+  Future<void> _save(Map j, String kind, {Map? ack}) async {
+    final name = switch (kind) {
+      'pdf' => '${j['jobCode']}-r${j['revision']}.pdf',
+      'ack' => '${j['jobCode']}-r${ack?['revision']}.ack-${ack?['version']}.json',
+      _ => '${j['jobCode']}-r${j['revision']}.manifest.json',
+    };
     setState(() => _busy = kind);
     try {
-      final bytes = await ref.read(apiProvider).download('/content/jobs/${j['id']}/${kind == 'pdf' ? 'pdf' : 'manifest'}');
+      final bytes = await ref.read(apiProvider).download('/content/jobs/${j['id']}/${kind == 'ack' ? 'ack?version=${ack?['version']}' : kind}');
       final where = await saveDeviceFile(name, bytes);
       if (mounted) toast(context, where == null ? 'Not saved' : 'Saved $name');
     } catch (e) {
@@ -458,6 +463,7 @@ class _JobState extends ConsumerState<ContentJobScreen> {
         Wrap(spacing: 8, runSpacing: 8, children: [
           QButton('Save editor PDF', kind: state == 'prepared' ? QBtn.halo : QBtn.secondary, icon: Icons.picture_as_pdf_outlined, busy: _busy == 'pdf', onPressed: _busy != null || manifest is ApiException ? null : () => _save(j, 'pdf')),
           QButton('Save manifest', icon: Icons.data_object, busy: _busy == 'manifest', onPressed: _busy != null || manifest is ApiException ? null : () => _save(j, 'manifest')),
+          if (acks.isNotEmpty) QButton("Save Qline's receipt", icon: Icons.receipt_long_outlined, busy: _busy == 'ack', onPressed: _busy != null ? null : () => _save(j, 'ack', ack: acks.last)),
         ]),
         Padding(padding: const EdgeInsets.only(top: 6, left: 4), child: Text('Send both to your editor. They hold this revision\'s security code, so share them only with the editor.', style: qs(12, c: q.text3))),
         SectionLabel('Source files · ${inputs.isEmpty ? (j['inputFileIds'] as List?)?.length ?? 0 : inputs.length}'),
