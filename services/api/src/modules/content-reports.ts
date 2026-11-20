@@ -6,7 +6,7 @@ import { need, tx, type Env, type TenantCtx } from '../core/context';
 import type { Q } from '../core/db';
 import { ApiError, conflict, notFound } from '../core/errors';
 import { driveChildren, driveDownload, driveMeta, DRIVE_FOLDER, DRIVE_SHORTCUT, ProviderHttpError, type DriveFile } from '../integrations/connectors';
-import { driveFailure, mappedDrive } from './content';
+import { actorKind, driveFailure, mappedDrive } from './content';
 import { download, FILE_ID, integrity, JOB_COLS, jobOrThrow, jobOut, RESULT_SCHEMA, sha256 } from './content-jobs';
 
 /**
@@ -113,7 +113,7 @@ function correlate(job: any, r: Report): Finding[] {
 type Channel = { channel: 'manual' } | { channel: 'drive'; reportFileId: string; reportVersion: string };
 type IngestResult = { outcome: 'applied' | 'duplicate' | 'rejected' | 'recorded'; findings: Finding[]; verification?: 'verified' | 'rejected' | 'deferred' | 'stale' };
 
-const insertEvent = (q: Q, t: TenantCtx, job: any, e: { source: string; key: string; revision: number; sequence?: number | null; type: string; message?: string | null; fileIds?: string[]; detail?: object; rawSha?: string | null; occurredAt?: Date }) =>
+export const insertEvent = (q: Q, t: TenantCtx, job: any, e: { source: string; key: string; revision: number; sequence?: number | null; type: string; message?: string | null; fileIds?: string[]; detail?: object; rawSha?: string | null; occurredAt?: Date }) =>
   q.one<{ id: string }>(
     `insert into content_job_events (org_id, job_id, source, event_key, revision, sequence, event_type, message, file_ids, detail, raw_sha256, occurred_at)
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12, now())) on conflict (job_id, source, event_key) do nothing returning id`,
@@ -156,7 +156,7 @@ export function ackJson(jobCode: string, r: any): string {
 }
 
 /** One notification per person per job event; repeats collapse on the dedupe key. Text is Qline's own, never the report's. */
-async function notifyJob(q: Q, t: TenantCtx, job: any, key: string, title: string, body: string) {
+export async function notifyJob(q: Q, t: TenantCtx, job: any, key: string, title: string, body: string) {
   const people = await q.many<{ user_id: string }>(
     `select user_id from organization_members where org_id=$1 and status='active' and (role in ('owner','admin') or user_id=$2)`,
     [t.orgId, job.created_by],
@@ -169,11 +169,11 @@ async function notifyJob(q: Q, t: TenantCtx, job: any, key: string, title: strin
     );
 }
 
-async function setState(q: Q, t: TenantCtx, job: any, to: string, cause: string, extra = '') {
+export async function setState(q: Q, t: TenantCtx, job: any, to: string, cause: string, extra = '') {
   if (job.qline_state === to) return job;
   const r = await q.one(`update content_jobs set qline_state=$2, last_activity_at=now(), updated_at=now()${extra} where id=$1 returning *`, [job.id, to]);
   await insertEvent(q, t, job, { source: 'qline', key: `state:r${job.revision}:${to}:${cause}`, revision: job.revision, type: 'state.changed', message: `${job.qline_state.replace(/_/g, ' ')} → ${to.replace(/_/g, ' ')}`, detail: { from: job.qline_state, to, cause } });
-  await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.job.state', targetRef: `content_job:${job.id}`, outcome: 'success', correlationId: t.correlationId, detail: { from: job.qline_state, to, cause } });
+  await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.job.state', targetRef: `content_job:${job.id}`, outcome: 'success', correlationId: t.correlationId, detail: { from: job.qline_state, to, cause } });
   return r;
 }
 
@@ -205,7 +205,7 @@ export async function ingest(t: TenantCtx, jobId: string, bytes: Uint8Array | 't
       const ev = await insertEvent(q, t, job, { source: 'external', key, revision, type: 'report.rejected', message: findings.map((f) => f.message).join(' '), detail: { ...via, findings }, rawSha });
       if (!ev) return { outcome: 'duplicate' as const, findings };
       await nextAck(q, t, job, { status: 'rejected', findings, reportSha: rawSha, revision });
-      await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.report.rejected', targetRef: `content_job:${job.id}`, outcome: 'denied', correlationId: t.correlationId, detail: { codes: findings.map((f) => f.code), ...via } });
+      await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.report.rejected', targetRef: `content_job:${job.id}`, outcome: 'denied', correlationId: t.correlationId, detail: { codes: findings.map((f) => f.code), ...via } });
       return { outcome: 'rejected' as const, findings };
     };
     if (!parsed.report) return reject(parsed.findings);
@@ -226,7 +226,7 @@ export async function ingest(t: TenantCtx, jobId: string, bytes: Uint8Array | 't
       // An exact replay changes nothing, except that a check interrupted earlier may run again.
       return { outcome: 'duplicate', findings: [], verify: job.qline_state === 'validating_output' };
     }
-    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.report.received', targetRef: `content_job:${job.id}`, outcome: 'success', correlationId: t.correlationId, detail: { status: r.status, sequence: r.sequence ?? null, ...via } });
+    await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.report.received', targetRef: `content_job:${job.id}`, outcome: 'success', correlationId: t.correlationId, detail: { status: r.status, sequence: r.sequence ?? null, ...via } });
 
     const best = (await bestReport(q, job))!;
     if (best.status !== job.external_status) job = await q.one('update content_jobs set external_status=$2, last_activity_at=now(), updated_at=now() where id=$1 returning *', [job.id, best.status]);
@@ -377,7 +377,7 @@ async function createQaTask(q: Q, t: TenantCtx, job: any) {
   );
   await q.exec('update content_jobs set qa_task_id=$2 where id=$1 and qa_task_id is null', [job.id, task!.id]);
   await insertEvent(q, t, job, { source: 'qline', key: 'qa.created', revision: job.revision, type: 'qa.created', message: 'Review task created.', detail: { taskId: task!.id } });
-  await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.job.qa_created', targetRef: `content_job:${job.id}`, outcome: 'success', correlationId: t.correlationId, detail: { taskId: task!.id } });
+  await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.job.qa_created', targetRef: `content_job:${job.id}`, outcome: 'success', correlationId: t.correlationId, detail: { taskId: task!.id } });
   return task!.id;
 }
 
@@ -469,14 +469,13 @@ contentReportRoutes.get('/content/jobs/:id/ack', async (c) => {
  * "Check reports": reads result files from the mapped Reports folder (read-only), ingests the ones named after a job,
  * then re-checks verified outputs for tampering. Files already read at the same Drive version are skipped.
  */
-contentReportRoutes.post('/content/reports/check', async (c) => {
-  const t = need(c, 'agents.use');
-  const cfg = await tx(t, (q) => q.one<any>('select * from content_drive_config where workspace_id=$1', [t.workspaceId]));
-  if (!cfg) throw conflict('NOT_CONFIGURED', 'Map the Drive folders first.');
-  if (cfg.status !== 'valid') throw conflict('NOT_VALIDATED', 'Check the folder mapping first.');
-  const folder: string | undefined = cfg.roles.external_reports;
-  if (!folder) throw conflict('NO_REPORTS_FOLDER', 'Map a Reports folder to check reports from Drive, or paste a report into the job.');
-  const token = await mappedDrive(t, cfg);
+/**
+ * Reads new result files from the Reports folder (each Drive version once), applies them, then checks verified outputs
+ * for tampering. Used by "Check reports" and by background change tracking. Throws an ApiError on Drive trouble, after
+ * recording it on the config row.
+ */
+export async function checkReports(t: TenantCtx, cfg: any, token: string) {
+  const folder: string = cfg.roles.external_reports;
   const summary = { listed: 0, read: 0, applied: 0, duplicates: 0, rejected: 0, recorded: 0, alreadyRead: 0, tampered: 0, deferred: 0, skipped: [] as { fileId: string; name: string; reason: string }[], truncated: false };
   const skip = (f: DriveFile, reason: string) => summary.skipped.length < 50 && summary.skipped.push({ fileId: f.id, name: clean(f.name).slice(0, 120), reason });
   try {
@@ -540,7 +539,17 @@ contentReportRoutes.post('/content/reports/check', async (c) => {
   }
   await tx(t, async (q) => {
     await q.exec('update content_drive_config set last_reports_check_at=now(), last_reports_check=$2 where workspace_id=$1', [t.workspaceId, JSON.stringify(summary)]);
-    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.reports_checked', targetRef: `workspace:${t.workspaceId}`, outcome: 'success', correlationId: t.correlationId, detail: { ...summary, skipped: summary.skipped.length } });
+    await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.reports_checked', targetRef: `workspace:${t.workspaceId}`, outcome: 'success', correlationId: t.correlationId, detail: { ...summary, skipped: summary.skipped.length } });
   });
-  return c.json(summary);
+  return summary;
+}
+
+contentReportRoutes.post('/content/reports/check', async (c) => {
+  const t = need(c, 'agents.use');
+  const cfg = await tx(t, (q) => q.one<any>('select * from content_drive_config where workspace_id=$1', [t.workspaceId]));
+  if (!cfg) throw conflict('NOT_CONFIGURED', 'Map the Drive folders first.');
+  if (cfg.status !== 'valid') throw conflict('NOT_VALIDATED', 'Check the folder mapping first.');
+  if (!cfg.roles.external_reports) throw conflict('NO_REPORTS_FOLDER', 'Map a Reports folder to check reports from Drive, or paste a report into the job.');
+  const token = await mappedDrive(t, cfg);
+  return c.json(await checkReports(t, cfg, token));
 });

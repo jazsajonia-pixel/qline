@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { audit } from '../core/audit';
@@ -5,7 +6,8 @@ import { need, tx, type Env, type TenantCtx } from '../core/context';
 import { ApiError, badRequest, conflict } from '../core/errors';
 import { body, query } from '../core/validate';
 import { hasScope } from '../integrations/oauth';
-import { DRIVE_FOLDER, DRIVE_SHORTCUT, driveChildren, driveMeta, ProviderHttpError, type DriveFile } from '../integrations/connectors';
+import { DRIVE_FOLDER, DRIVE_SHORTCUT, driveChildren, driveMeta, driveStartPageToken, ProviderHttpError, type DriveFile } from '../integrations/connectors';
+import type { Q } from '../core/db';
 import { connOrThrow, tokenFor } from './integrations';
 
 /**
@@ -34,7 +36,7 @@ const MAPPING = z
       .strict(),
   })
   .strict();
-type Roles = z.infer<typeof MAPPING>['roles'];
+export type Roles = z.infer<typeof MAPPING>['roles'];
 
 export const PARENT_WALK_LIMIT = 20;
 export const INDEX_DEPTH_LIMIT = 8;
@@ -42,7 +44,7 @@ export const INDEX_ITEM_LIMIT = 5000;
 const INDEX_CONCURRENCY = 2;
 
 /** [role, folderId] for every mapped folder except the root. */
-function roleFolders(roles: Roles): [string, string][] {
+export function roleFolders(roles: Roles): [string, string][] {
   const out: [string, string][] = roles.assets.map((id) => ['assets', id]);
   out.push(['ready_for_qa', roles.ready_for_qa]);
   for (const r of OPTIONAL_ROLES) {
@@ -52,7 +54,8 @@ function roleFolders(roles: Roles): [string, string][] {
   return out;
 }
 
-const COLS = 'root_folder_id, roles, status, validation, validated_at, last_sync_at, last_sync, last_success_at, last_error, updated_at';
+const COLS = `root_folder_id, roles, status, validation, validated_at, last_sync_at, last_sync, last_success_at, last_error, updated_at,
+  cursor_status, cursor_reset_at, channel_id is not null as watching, channel_expires_at, channel_renewed_at, last_reconciled_at, last_reconcile`;
 const publicConfig = (r: any) =>
   r
     ? {
@@ -66,8 +69,17 @@ const publicConfig = (r: any) =>
         lastSuccessAt: r.last_success_at,
         lastError: r.last_error,
         updatedAt: r.updated_at,
+        changes: {
+          cursor: r.cursor_status,
+          cursorResetAt: r.cursor_reset_at,
+          watching: r.watching === true,
+          channelExpiresAt: r.channel_expires_at,
+          channelRenewedAt: r.channel_renewed_at,
+          lastReconciledAt: r.last_reconciled_at,
+          lastReconcile: r.last_reconcile,
+        },
       }
-    : { status: 'unconfigured', rootFolderId: null, roles: null, validation: null, validatedAt: null, lastSyncAt: null, lastSync: null, lastSuccessAt: null, lastError: null, updatedAt: null };
+    : { status: 'unconfigured', rootFolderId: null, roles: null, validation: null, validatedAt: null, lastSyncAt: null, lastSync: null, lastSuccessAt: null, lastError: null, updatedAt: null, changes: null };
 
 /** A Drive failure as an API error the app can show. 403/404 are handled by the callers (they mean a folder). */
 export function driveFailure(e: unknown): ApiError {
@@ -77,7 +89,7 @@ export function driveFailure(e: unknown): ApiError {
   if (s === 429 || s >= 500 || s === 0) return new ApiError(503, 'PROVIDER_UNAVAILABLE', 'Google Drive is not answering', 'Try again in a few minutes.');
   return new ApiError(502, 'INTEGRATION_ERROR', 'Google Drive request failed', (e as Error).message);
 }
-const isAccessLost = (e: unknown) => e instanceof ProviderHttpError && (e.status === 403 || e.status === 404);
+export const isAccessLost = (e: unknown) => e instanceof ProviderHttpError && (e.status === 403 || e.status === 404);
 
 async function driveToken(t: TenantCtx) {
   const conn = await connOrThrow(t, 'google');
@@ -175,9 +187,10 @@ export interface IndexedFile {
  * Breadth-first listing of the mapped folders only. Bounded by depth, total items and concurrency.
  * Shortcuts are recorded as skipped and never followed. A folder nested inside another mapped folder keeps its own role.
  */
-export async function indexFolders(token: string, start: [string, string][]) {
+export type IndexedFolder = { id: string; role: string; depth: number };
+export async function indexFolders(token: string, start: [string, string][], beat?: () => Promise<void>) {
   const found = new Map<string, IndexedFile>();
-  const visited = new Set(start.map(([, id]) => id));
+  const visited = new Map<string, IndexedFolder>(start.map(([role, id]) => [id, { id, role, depth: 0 }]));
   let seen = 0;
   let truncated: 'item_limit' | 'depth_limit' | null = null;
   let level = start.map(([role, folderId]) => ({ role, folderId, depth: 0 }));
@@ -190,6 +203,7 @@ export async function indexFolders(token: string, start: [string, string][]) {
         let page: string | null = null;
         do {
           let r;
+          if (beat) await beat();
           try {
             r = await driveChildren(token, it.folderId, page);
           } catch (e) {
@@ -207,7 +221,7 @@ export async function indexFolders(token: string, start: [string, string][]) {
                 truncated ??= 'depth_limit';
                 continue;
               }
-              visited.add(f.id);
+              visited.set(f.id, { id: f.id, role: it.role, depth: it.depth + 1 });
               next.push({ role: it.role, folderId: f.id, depth: it.depth + 1 });
             } else if (!found.has(f.id)) {
               found.set(f.id, { file: f, role: it.role, parentId: it.folderId, depth: it.depth, state: f.mimeType === DRIVE_SHORTCUT ? 'skipped_shortcut' : 'indexed' });
@@ -220,10 +234,10 @@ export async function indexFolders(token: string, start: [string, string][]) {
     await Promise.all(Array.from({ length: Math.min(INDEX_CONCURRENCY, level.length) }, worker));
     level = next;
   }
-  return { files: [...found.values()], folders: visited.size, truncated };
+  return { files: [...found.values()], folders: visited.size, folderList: [...visited.values()], truncated };
 }
 
-const toRow = (x: IndexedFile) => {
+export const toRow = (x: IndexedFile) => {
   const f = x.file;
   const n = (v: unknown) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
   return {
@@ -270,13 +284,16 @@ contentRoutes.put('/content/drive-config', async (c) => {
        on conflict (workspace_id) do update set root_folder_id=excluded.root_folder_id, roles=excluded.roles, updated_by=excluded.updated_by, updated_at=now(),
          status = case when $6 then 'needs_revalidation' else content_drive_config.status end,
          validation = case when $6 then '{}'::jsonb else content_drive_config.validation end,
-         validated_at = case when $6 then null else content_drive_config.validated_at end
+         validated_at = case when $6 then null else content_drive_config.validated_at end,
+         cursor_status = case when $6 then 'none' else content_drive_config.cursor_status end,
+         start_page_token = case when $6 then null else content_drive_config.start_page_token end,
+         folder_index = case when $6 then '[]'::jsonb else content_drive_config.folder_index end
        returning ${COLS}`,
       [t.orgId, t.workspaceId, input.rootFolderId, JSON.stringify(input.roles), t.userId, changed],
     );
     if (changed) {
       await q.exec(`update content_assets set state='removed' where workspace_id=$1 and state <> 'removed'`, [t.workspaceId]);
-      await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.drive_config.updated', targetRef: `workspace:${t.workspaceId}`, correlationId: t.correlationId, detail: { rootFolderId: input.rootFolderId, folders: ids.length - 1 } });
+      await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.drive_config.updated', targetRef: `workspace:${t.workspaceId}`, correlationId: t.correlationId, detail: { rootFolderId: input.rootFolderId, folders: ids.length - 1 } });
     }
     return r;
   });
@@ -292,34 +309,87 @@ contentRoutes.post('/content/drive-config/validate', async (c) => {
   const validation = { ...v, accountEmail: conn.account_email ?? null };
   const row = await tx(t, async (q) => {
     const r = await q.one(
-      `update content_drive_config set status=$3, validation=$4, validated_at=now(), connection_id=$5, last_error=null, updated_at=now()
+      // A fresh validation always restarts change tracking with a full listing. A channel opened for a different Google
+      // connection is forgotten here (its token is gone); it runs out by itself and its messages are refused.
+      `update content_drive_config set status=$3, validation=$4, validated_at=now(), last_error=null, updated_at=now(),
+         cursor_status='none', start_page_token=null, folder_index='[]'::jsonb,
+         channel_id=case when connection_id is distinct from $5 then null else channel_id end,
+         channel_token_hash=case when connection_id is distinct from $5 then null else channel_token_hash end,
+         resource_id=case when connection_id is distinct from $5 then null else resource_id end,
+         channel_expires_at=case when connection_id is distinct from $5 then null else channel_expires_at end,
+         prev_channel_id=case when connection_id is distinct from $5 then null else prev_channel_id end,
+         prev_channel_token_hash=case when connection_id is distinct from $5 then null else prev_channel_token_hash end,
+         prev_resource_id=case when connection_id is distinct from $5 then null else prev_resource_id end,
+         prev_channel_expires_at=case when connection_id is distinct from $5 then null else prev_channel_expires_at end,
+         connection_id=$5
        where workspace_id=$1 and updated_at::text=$2 returning ${COLS}`,
       [t.workspaceId, cfg.version_tag, v.ok ? 'valid' : 'invalid', JSON.stringify(validation), conn.id],
     );
     if (!r) throw conflict('STALE_CONFIG', 'The folder mapping changed while it was being checked. Check it again.');
-    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.drive_config.validated', targetRef: `workspace:${t.workspaceId}`, outcome: v.ok ? 'valid' : 'invalid', correlationId: t.correlationId, detail: { rejected: v.folders.filter((f) => !f.ok).map((f) => `${f.role}:${f.reason}`).concat(v.root.ok ? [] : [`root:${v.root.reason}`]) } });
+    await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.drive_config.validated', targetRef: `workspace:${t.workspaceId}`, outcome: v.ok ? 'valid' : 'invalid', correlationId: t.correlationId, detail: { rejected: v.folders.filter((f) => !f.ok).map((f) => `${f.role}:${f.reason}`).concat(v.root.ok ? [] : [`root:${v.root.reason}`]) } });
     return r;
   });
   return c.json(publicConfig(row));
 });
 
+// ---- Sync lease and full index ----------------------------------------------------------------
+
+/** Audit actor for a request (a person) or a background job (the system). */
+export const actorKind = (t: TenantCtx) => ((t as { human?: boolean }).human === true ? 'user' : 'system');
+
+export const loadConfig = (t: TenantCtx) => tx(t, (q) => q.one<any>('select *, validated_at::text as validated_tag from content_drive_config where workspace_id=$1', [t.workspaceId]));
+
+export const SYNC_LEASE_SECONDS = 90;
+/** One Drive sync per workspace at a time. A holder that crashed loses the lease when it runs out (no manual cleanup). */
+export async function takeSyncLease(t: TenantCtx, owner: string, renew = false): Promise<boolean> {
+  const r = await tx(t, (q) =>
+    q.one(
+      `update content_drive_config set sync_lease_owner=$2, sync_lease_until=now() + make_interval(secs => $3)
+       where workspace_id=$1 and (sync_lease_owner=$2 or ($4 = false and (sync_lease_owner is null or sync_lease_until < now()))) returning 1 as ok`,
+      [t.workspaceId, owner, SYNC_LEASE_SECONDS, renew],
+    ),
+  );
+  return !!r;
+}
+export const releaseSyncLease = (t: TenantCtx, owner: string) =>
+  tx(t, (q) => q.exec('update content_drive_config set sync_lease_owner=null, sync_lease_until=null where workspace_id=$1 and sync_lease_owner=$2', [t.workspaceId, owner]));
+/** Inside a write transaction: locks the config row and confirms the caller still holds the lease (fencing). */
+export const holdsLease = async (q: Q, workspaceId: string, owner: string) =>
+  !!(await q.one('select 1 from content_drive_config where workspace_id=$1 and sync_lease_owner=$2 for update', [workspaceId, owner]));
+
+export async function upsertAssets(q: Q, t: TenantCtx, rows: ReturnType<typeof toRow>[]) {
+  for (let i = 0; i < rows.length; i += 500) {
+    await q.exec(
+      `insert into content_assets (org_id, workspace_id, drive_file_id, name, mime, parent_id, role, depth, size_bytes, md5, sha256, version, head_revision_id,
+         created_at_drive, modified_at_drive, width, height, duration_ms, web_view_link, state, last_seen_at)
+       select $1, $2, x.drive_file_id, x.name, x.mime, x.parent_id, x.role, x.depth, x.size_bytes, x.md5, x.sha256, x.version, x.head_revision_id,
+         x.created_at_drive, x.modified_at_drive, x.width, x.height, x.duration_ms, x.web_view_link, x.state, now()
+       from jsonb_to_recordset($3::jsonb) as x(drive_file_id text, name text, mime text, parent_id text, role text, depth int, size_bytes bigint, md5 text, sha256 text,
+         version bigint, head_revision_id text, created_at_drive timestamptz, modified_at_drive timestamptz, width int, height int, duration_ms bigint, web_view_link text, state text)
+       on conflict (workspace_id, drive_file_id) do update set name=excluded.name, mime=excluded.mime, parent_id=excluded.parent_id, role=excluded.role, depth=excluded.depth,
+         size_bytes=excluded.size_bytes, md5=excluded.md5, sha256=excluded.sha256, version=excluded.version, head_revision_id=excluded.head_revision_id,
+         created_at_drive=excluded.created_at_drive, modified_at_drive=excluded.modified_at_drive, width=excluded.width, height=excluded.height,
+         duration_ms=excluded.duration_ms, web_view_link=excluded.web_view_link, state=excluded.state, last_seen_at=now()`,
+      [t.orgId, t.workspaceId, JSON.stringify(rows.slice(i, i + 500))],
+    );
+  }
+}
+
 /**
- * "Sync now": indexes the mapped folders. Drive calls run outside any database transaction; the results are written in
- * one transaction, and only if the mapping did not change meanwhile.
- * shortcut: runs inline in the request with no automatic retry; run 5 moves it to a durable job with backoff.
+ * Lists the mapped folders and writes the index in one transaction, only if the mapping did not change meanwhile and the
+ * caller still holds the sync lease. The Drive start page token is taken before listing, so a change made during the
+ * listing is seen again by change tracking (applying it twice is harmless). Used by "Sync now", the first sync and the
+ * stale-cursor rescan. Drive calls run outside any database transaction.
  */
-contentRoutes.post('/content/sync', async (c) => {
-  const t = need(c, 'integrations.manage');
-  const cfg = await tx(t, (q) => q.one<any>('select *, validated_at::text as validated_tag from content_drive_config where workspace_id=$1', [t.workspaceId]));
-  if (!cfg) throw conflict('NOT_CONFIGURED', 'Map the Drive folders first.');
-  if (cfg.status !== 'valid') throw conflict('NOT_VALIDATED', 'Check the folder mapping before syncing.');
-  const token = await mappedDrive(t, cfg);
+export async function fullIndex(t: TenantCtx, cfg: any, token: string, owner: string, beat?: () => Promise<void>) {
   const started = new Date();
   const fail = async (msg: string, status?: string) =>
     tx(t, (q) => q.exec(`update content_drive_config set last_sync_at=now(), last_error=$2, status=coalesce($3, status) where workspace_id=$1`, [t.workspaceId, msg, status ?? null]));
+  // Best effort: without a start token the index is still written and change tracking starts on the next reconcile.
+  const startToken = await driveStartPageToken(token).catch(() => null);
   let r;
   try {
-    r = await indexFolders(token, roleFolders(cfg.roles));
+    r = await indexFolders(token, roleFolders(cfg.roles), beat);
   } catch (e) {
     if (isAccessLost(e)) {
       const role = (e as any).role ?? 'a mapped folder';
@@ -327,9 +397,12 @@ contentRoutes.post('/content/sync', async (c) => {
       await fail(msg, (e as any).depth ? undefined : 'needs_revalidation');
       throw new ApiError(409, 'FOLDER_ACCESS_LOST', 'Folder access lost', msg);
     }
-    const err = driveFailure(e);
-    await fail(err.detail ?? err.title);
-    throw err;
+    if (e instanceof ProviderHttpError || e instanceof ApiError || (e as Error)?.name === 'TypeError' || (e as Error)?.name === 'TimeoutError') {
+      const err = driveFailure(e);
+      await fail(err.detail ?? err.title);
+      throw err;
+    }
+    throw e;
   }
   const rows = r.files.map(toRow);
   const summary = {
@@ -338,39 +411,57 @@ contentRoutes.post('/content/sync', async (c) => {
     folders: r.folders,
     truncated: r.truncated,
     removed: 0,
+    cursor: startToken ? ('reset' as const) : ('unchanged' as const),
     durationMs: Date.now() - started.getTime(),
   };
   const row = await tx(t, async (q) => {
-    const live = await q.one<any>(`select validated_at::text as tag, status from content_drive_config where workspace_id=$1 for update`, [t.workspaceId]);
+    if (!(await holdsLease(q, t.workspaceId, owner))) throw conflict('SYNC_SUPERSEDED', 'Another Drive sync took over. Its result is used instead.');
+    const live = await q.one<any>(`select validated_at::text as tag, status from content_drive_config where workspace_id=$1`, [t.workspaceId]);
     if (!live || live.tag !== cfg.validated_tag || live.status !== 'valid') throw conflict('STALE_CONFIG', 'The folder mapping changed during the sync. Sync again.');
-    for (let i = 0; i < rows.length; i += 500) {
-      await q.exec(
-        `insert into content_assets (org_id, workspace_id, drive_file_id, name, mime, parent_id, role, depth, size_bytes, md5, sha256, version, head_revision_id,
-           created_at_drive, modified_at_drive, width, height, duration_ms, web_view_link, state, last_seen_at)
-         select $1, $2, x.drive_file_id, x.name, x.mime, x.parent_id, x.role, x.depth, x.size_bytes, x.md5, x.sha256, x.version, x.head_revision_id,
-           x.created_at_drive, x.modified_at_drive, x.width, x.height, x.duration_ms, x.web_view_link, x.state, now()
-         from jsonb_to_recordset($3::jsonb) as x(drive_file_id text, name text, mime text, parent_id text, role text, depth int, size_bytes bigint, md5 text, sha256 text,
-           version bigint, head_revision_id text, created_at_drive timestamptz, modified_at_drive timestamptz, width int, height int, duration_ms bigint, web_view_link text, state text)
-         on conflict (workspace_id, drive_file_id) do update set name=excluded.name, mime=excluded.mime, parent_id=excluded.parent_id, role=excluded.role, depth=excluded.depth,
-           size_bytes=excluded.size_bytes, md5=excluded.md5, sha256=excluded.sha256, version=excluded.version, head_revision_id=excluded.head_revision_id,
-           created_at_drive=excluded.created_at_drive, modified_at_drive=excluded.modified_at_drive, width=excluded.width, height=excluded.height,
-           duration_ms=excluded.duration_ms, web_view_link=excluded.web_view_link, state=excluded.state, last_seen_at=now()`,
-        [t.orgId, t.workspaceId, JSON.stringify(rows.slice(i, i + 500))],
-      );
-    }
+    await upsertAssets(q, t, rows);
     // Only a complete listing may conclude that a file is gone.
     if (!r.truncated) {
       const gone = await q.many(`update content_assets set state='removed' where workspace_id=$1 and state <> 'removed' and last_seen_at < $2 returning id`, [t.workspaceId, started]);
       summary.removed = gone.length;
     }
     const u = await q.one(
-      `update content_drive_config set last_sync_at=now(), last_success_at=now(), last_error=$2, last_sync=$3, updated_at=updated_at where workspace_id=$1 returning ${COLS}`,
-      [t.workspaceId, r.truncated ? `Sync stopped early (${r.truncated === 'item_limit' ? `more than ${INDEX_ITEM_LIMIT} items` : `folders deeper than ${INDEX_DEPTH_LIMIT} levels were skipped`}).` : null, JSON.stringify(summary)],
+      `update content_drive_config set last_sync_at=now(), last_success_at=now(), last_error=$2, last_sync=$3, folder_index=$4,
+         start_page_token=coalesce($5, start_page_token), cursor_status=case when $5::text is null then cursor_status else 'ok' end,
+         cursor_reset_at=case when $5::text is null then cursor_reset_at else now() end, updated_at=updated_at
+       where workspace_id=$1 returning ${COLS}`,
+      [
+        t.workspaceId,
+        r.truncated ? `Sync stopped early (${r.truncated === 'item_limit' ? `more than ${INDEX_ITEM_LIMIT} items` : `folders deeper than ${INDEX_DEPTH_LIMIT} levels were skipped`}).` : null,
+        JSON.stringify(summary),
+        JSON.stringify(r.folderList),
+        startToken,
+      ],
     );
-    await audit(q, { orgId: t.orgId, actorKind: 'user', actorId: t.userId, action: 'content.drive_synced', targetRef: `workspace:${t.workspaceId}`, correlationId: t.correlationId, detail: summary });
+    await audit(q, { orgId: t.orgId, actorKind: actorKind(t), actorId: t.userId, action: 'content.drive_synced', targetRef: `workspace:${t.workspaceId}`, correlationId: t.correlationId, detail: summary });
     return u;
   });
-  return c.json({ ...publicConfig(row), sync: summary });
+  return { row, summary };
+}
+
+/**
+ * "Sync now": a full listing of the mapped folders, inline so the result and any error show at once. It takes the same
+ * sync lease as background change tracking, and resets the change cursor. Automatic syncs run as durable jobs
+ * (content-watch.ts) with retries and backoff.
+ */
+contentRoutes.post('/content/sync', async (c) => {
+  const t = need(c, 'integrations.manage');
+  const cfg = await loadConfig(t);
+  if (!cfg) throw conflict('NOT_CONFIGURED', 'Map the Drive folders first.');
+  if (cfg.status !== 'valid') throw conflict('NOT_VALIDATED', 'Check the folder mapping before syncing.');
+  const token = await mappedDrive(t, cfg);
+  const owner = `manual:${randomUUID()}`;
+  if (!(await takeSyncLease(t, owner))) throw conflict('SYNC_BUSY', 'A Drive sync is already running. Try again in a minute.');
+  try {
+    const { row, summary } = await fullIndex(t, cfg, token, owner);
+    return c.json({ ...publicConfig(row), sync: summary });
+  } finally {
+    await releaseSyncLease(t, owner);
+  }
 });
 
 contentRoutes.get('/content/assets', async (c) => {

@@ -24,6 +24,15 @@ export const env = {
   get cronKey() {
     return process.env.QLINE_CRON_KEY ?? '';
   },
+  /**
+   * Content handoff run 5 (docs/22 ADR-C4): the public HTTPS address Google posts Drive change notifications to,
+   * e.g. https://api.example.com/v1/hooks/drive. Unset (the default) means no push channel: changes are found by the
+   * 10-minute reconciliation tick only. Anything that is not https is ignored.
+   */
+  get driveWebhookUrl() {
+    const u = (process.env.QLINE_DRIVE_WEBHOOK_URL ?? '').trim();
+    return /^https:\/\/[^\s]+$/.test(u) ? u : '';
+  },
   get minClientBuild() {
     return Number(process.env.QLINE_MIN_CLIENT_BUILD ?? '0');
   },

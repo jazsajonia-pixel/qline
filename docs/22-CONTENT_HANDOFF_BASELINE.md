@@ -325,6 +325,38 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
   - Tamper on outputs: during "Check reports", verified outputs that were renamed, moved, trashed, changed or became unopenable are recorded once (`output.tampered`, source `drive`), and the job goes to `needs_manual_review` with one notification.
   - Limits and known gaps: 50 reports and 200 verified outputs per check, 10 list pages. An exact duplicate report under a different Drive file is downloaded again on every check (bounded by the 50 limit). Expiry and stale sweeps are run 5.
   - Tests: `services/api/test/content-reports.integration.test.ts` (15 tests).
+- **Run 5 (Slice 3), 2026-11-20:** built and tested locally against Postgres with a mocked Drive. The only Drive calls added are changes.getStartPageToken, changes.list, changes.watch and channels.stop. No file is written to Drive and the OAuth scopes are unchanged.
+  - Migration `0024_content_watch.sql`:
+    - `content_drive_config` gains `folder_index`, a sync lease (`sync_lease_owner` / `sync_lease_until`), the previous channel (`prev_channel_*`), `cursor_reset_at` and `last_reconcile`, plus unique partial indexes on `channel_id` and `prev_channel_id`;
+    - `content_jobs.stale_since`;
+    - security-definer functions `qline_content_due(lim)` (workspaces not reconciled for 10 min) and `qline_content_channel(cid)` (channel → workspace and token hash; never a token).
+  - `modules/content-watch.ts`, with jobs `content.drive_sync` and `content.reconcile`:
+    - The first sync is a full listing that takes the start token first, so nothing is missed. After that, changes.list runs page by page (100 per page, up to 20 pages per run; a follow-up job carries on). The cursor is saved per page with a compare-and-swap, under the lease and the validated-config check. Only files inside the mapped folders are applied.
+    - Folder changes inside the tree cause a re-listing. A change to the root or a mapped folder re-checks the boundary, which also catches a QA folder being moved.
+    - A stale cursor (400/404/410) leads to a full listing and a fresh token.
+    - 429, 5xx, 403 and network errors are retried with the runtime's backoff and recorded in `last_error`. A refused sign-in or lost access marks the config and stops. A superseded or not-valid config is skipped.
+    - The sync lease lasts 90 s and is renewed per page. A crash leaves the lease to run out, and the next run resumes from the saved cursor. Assets are upserted, so a replay creates no duplicates.
+    - When anything changed, and on every reconcile, the run-4 Reports check runs (each report version is read once). On reconcile, verifications that Drive could not finish (`validating_output` with `last_error`) are retried.
+  - Reconciliation runs from the system tick (`runContentReconcile`) for workspaces not reconciled for 10 minutes. The cycle is claimed with a compare-and-swap on `last_reconciled_at`, so racing ticks queue one job. It runs the sweeps, the sync and the channel upkeep.
+  - Sweeps:
+    - Jobs past `expires_at` in an open state go to `expired`, with a notification.
+    - Jobs with no activity for 72 h in prepared/dispatched/acknowledged/in-progress are flagged once per quiet period (`stale_since`, a `job.stale` event and a notification). `GET` job responses now include `stale` and `staleSince`.
+  - Push channel (`ensureChannel`), off unless `QLINE_DRIVE_WEBHOOK_URL` is set (HTTPS only, otherwise ignored):
+    - It opens a changes channel for 7 days (the documented maximum) with a random token, of which only the hash is stored.
+    - It renews when less than 24 h is left. The pending channel is stored before the watch call, so an early `sync` message is accepted. The old channel stays valid as `prev_*` until the new one is confirmed, and is then stopped. If the stop fails, it is retried on the next tick. If the watch fails, the old channel is restored.
+    - When the URL is unset or the config is not valid, the channels are stopped and cleared.
+  - `POST /v1/hooks/drive` takes no session; it is mounted before `requireUser`:
+    - Unknown channels, a wrong token (constant-time compare), a wrong resource or an expired channel return 404, so Google stops sending.
+    - `sync` messages return 204.
+    - Otherwise it queues one `content.drive_sync` per workspace per 30 s (idempotency key), kicks the runtime and returns 204. Message content is never trusted; the sync reads Drive itself.
+  - Deviations:
+    - Manual "Sync now" (`POST /content/sync`) stays inline. It now takes the lease (409 `SYNC_BUSY` when a sync is running) and resets the cursor.
+    - A 403 on changes.list is treated as a rate limit (Drive uses 403 for some quota errors).
+    - There is no `/content/jobs/:id/reconcile` route; the tick covers it.
+    - The stale threshold is a fixed 72 h, not per job.
+    - Tamper checks still need a Reports folder to be mapped.
+  - Not verified: live Google push (needs a public HTTPS domain with a valid certificate, `QLINE_DRIVE_WEBHOOK_URL` and a real account), real Drive change ordering and quota behaviour.
+  - Tests: `services/api/test/content-watch.integration.test.ts` (10 tests). They cover paging, folder moves, stale cursor, missed webhook, 429/5xx/401, crash mid-sync, webhook checks, renewal, sweeps and tenant isolation.
 
 ## H. Owner actions (later, not in this task)
 

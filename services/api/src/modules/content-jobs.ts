@@ -171,7 +171,7 @@ function issue(m: Manifest) {
 
 export const JOB_COLS = `id, job_code, mission_id, title, brief, editor_target, qline_state, external_status, revision, input_file_ids, constraints,
   expected_outputs, manifest_sha256, pdf_sha256, qa_task_id, last_error, cancel_reason, created_by, created_at, issued_at, dispatched_at,
-  last_activity_at, result_received_at, verified_at, expires_at, updated_at`;
+  last_activity_at, result_received_at, verified_at, expires_at, stale_since, updated_at`;
 export const jobOut = (r: any) => ({
   id: r.id,
   jobCode: r.job_code,
@@ -198,6 +198,9 @@ export const jobOut = (r: any) => ({
   resultReceivedAt: r.result_received_at,
   verifiedAt: r.verified_at,
   expiresAt: r.expires_at,
+  // flagged by the reconciliation sweep; any later activity clears it
+  stale: !!r.stale_since && new Date(r.stale_since) >= new Date(r.last_activity_at),
+  staleSince: r.stale_since ?? null,
   updatedAt: r.updated_at,
 });
 

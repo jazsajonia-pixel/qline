@@ -25,6 +25,7 @@ import { proposalRoutes } from './modules/proposals';
 import { contentRoutes } from './modules/content';
 import { contentJobRoutes } from './modules/content-jobs';
 import { contentReportRoutes } from './modules/content-reports';
+import { contentHookRoutes } from './modules/content-watch';
 
 export const app = new Hono<Env>();
 
@@ -90,6 +91,8 @@ app.route('/v1', systemRoutes);
 app.route('/v1', orgRoutes);
 app.route('/v1', oauthPublicRoutes);
 app.route('/v1', googleSignInRoutes);
+// Drive change notifications: no session; verified by channel ID and token (content-watch.ts).
+app.route('/v1', contentHookRoutes);
 
 // Everything else is tenant-scoped.
 app.use('/v1/*', requireUser, requireTenant);
