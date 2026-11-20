@@ -343,6 +343,38 @@ describe('v1.6 reply metadata (speech + suggestions)', () => {
   });
 });
 
+describe('Voice v2: early spoken lines and voice turns', () => {
+  it('pulls <qline-say> blocks out of the stream, even split across tokens', async () => {
+    const { SayFilter } = await import('../src/agent/meta');
+    const f = new SayFilter();
+    const said: string[] = [];
+    let shown = '';
+    for (const c of ['<qli', 'ne-say>Tatlong bagong', ' **leads** today.</qline', '-say>\nHere are', ' the leads.']) {
+      const o = f.push(c);
+      shown += o.show;
+      said.push(...o.said);
+    }
+    shown += f.flush();
+    expect(said).toEqual(['Tatlong bagong leads today.']);
+    expect(shown).toBe('Here are the leads.');
+    expect(f.spoken).toBe('Tatlong bagong leads today.');
+    const g = new SayFilter();
+    expect(g.push('a <b> c').show).toBe('a <b> c');
+    const h = new SayFilter();
+    h.push('<qline-say>' + 'x'.repeat(700));
+    expect(h.spoken).toBe('');
+  });
+  it('strips say blocks from stored text and builds voice instructions', async () => {
+    const { stripMeta, voiceInstructions } = await import('../src/agent/meta');
+    expect(stripMeta('<qline-say>Hi there.</qline-say>\nAnswer.')).toBe('Answer.');
+    const v = voiceInstructions({ lang: 'fil-PH', confidence: 0.62, alternates: ['<b>ilan ang task</b>'] });
+    expect(v).toContain('fil-PH');
+    expect(v).toContain('0.62');
+    expect(v).toContain('Taglish');
+    expect(v).not.toContain('<b>');
+  });
+});
+
 describe('v1.6 run 3: untrusted data, connector helpers and policies', async () => {
   const { untrusted } = await import('../src/agent/runner');
   const c = await import('../src/integrations/connectors');

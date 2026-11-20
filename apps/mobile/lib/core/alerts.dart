@@ -164,3 +164,12 @@ String? alertPayload(Map n) {
   }
   return r is Map && r['kind'] == 'content_job' && r['id'] is String ? jsonEncode({'kind': 'content_job', 'id': r['id']}) : null;
 }
+
+/// Background continuity: a one-off local notification (for example "Your answer is ready" when Live AI
+/// finished while Qline was in the background). Does nothing in tests or when notifications are off.
+Future<void> showLocalAlert({required int id, required String title, String? body}) async {
+  if (!_AlertWatcherState._enabled || !_AlertWatcherState._ready) return;
+  try {
+    await _AlertWatcherState._plugin.show(id: id, title: title, body: body, notificationDetails: const NotificationDetails(android: _AlertWatcherState._channel));
+  } catch (_) {}
+}

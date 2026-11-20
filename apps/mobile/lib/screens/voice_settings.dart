@@ -120,6 +120,23 @@ class _VoiceSettingsState extends ConsumerState<VoiceSettingsScreen> {
             const SectionLabel('Speed'),
             Slider(value: p.rate, min: .3, max: .8, divisions: 10, label: p.rate == .5 ? 'Normal' : p.rate.toStringAsFixed(2), onChanged: (v) => setP(p.copy(rate: v))),
             Text('Speed applies to the phone voice. Natural voices speak at their own pace.', style: qs(12, c: q.text3)),
+            const SectionLabel('Listening'),
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: p.listenLang,
+              decoration: const InputDecoration(labelText: 'Language I speak'),
+              items: [for (final e in listenLangs.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
+              onChanged: (v) => setP(p.copy(listenLang: v)),
+            ),
+            const SizedBox(height: 6),
+            Text('Taglish works in any of these; Qline reads mixed Filipino and English. Pick Filipino if names and words are often misheard. If the phone has no Filipino speech pack, it uses the phone default.', style: qs(12, c: q.text3)),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: p.bargeIn,
+              onChanged: (v) => setP(p.copy(bargeIn: v)),
+              title: Text('Interrupt by talking', style: qs(14, c: q.text)),
+              subtitle: Text('In hands-free, talk over a reply to stop it and ask something else. Turn off if the speaker sets it off by itself.', style: qs(12, c: q.text3)),
+            ),
             const SizedBox(height: 16),
             QButton(_playing ? 'Stop preview' : 'Preview voice', kind: QBtn.halo, icon: _playing ? Icons.stop : Icons.play_arrow, expand: true, onPressed: () => _preview(p)),
           ]);

@@ -59,10 +59,107 @@ export class MetaFilter {
   }
 }
 
-/** Removes every meta block (complete or cut off) from stored text. */
+/** Removes every meta block and spoken-line block (complete or cut off) from stored text. */
 export function stripMeta(text: string): string {
-  return text.replace(/<qline-meta>[\s\S]*?(<\/qline-meta>|$)/g, '').trimEnd();
+  return text
+    .replace(/<qline-meta>[\s\S]*?(<\/qline-meta>|$)/g, '')
+    .replace(/<qline-say>[\s\S]*?(<\/qline-say>|$)\s*/g, '')
+    .trimEnd();
 }
+
+/**
+ * Voice v2: early spoken lines. In a voice turn the model starts its reply with
+ *   <qline-say>One short spoken sentence.</qline-say>
+ * so the phone can start talking while the written answer is still streaming. SayFilter pulls each
+ * complete block out of the token stream (it is never shown) and hands back the visible text.
+ */
+export const SAY_OPEN = '<qline-say>';
+export const SAY_CLOSE = '</qline-say>';
+
+export class SayFilter {
+  private buf = '';
+  private inSay = false;
+  private said = '';
+
+  /** Returns the visible part of `chunk` and any spoken lines that just completed. */
+  push(chunk: string): { show: string; said: string[] } {
+    this.buf += chunk;
+    let show = '';
+    const said: string[] = [];
+    for (;;) {
+      if (this.inSay) {
+        const end = this.buf.indexOf(SAY_CLOSE);
+        if (end < 0) {
+          // A runaway block (no close) is capped so it can never swallow the whole answer.
+          if (this.buf.length > 600) {
+            show += this.buf;
+            this.buf = '';
+            this.inSay = false;
+          }
+          break;
+        }
+        const line = clean(this.buf.slice(0, end)).slice(0, 300);
+        if (line) said.push(line);
+        this.buf = this.buf.slice(end + SAY_CLOSE.length).replace(/^[ \t]*\n?/, '');
+        this.inSay = false;
+        continue;
+      }
+      const at = this.buf.indexOf(SAY_OPEN);
+      if (at >= 0) {
+        show += this.buf.slice(0, at);
+        this.buf = this.buf.slice(at + SAY_OPEN.length);
+        this.inSay = true;
+        continue;
+      }
+      let keep = 0;
+      for (let k = Math.min(SAY_OPEN.length - 1, this.buf.length); k > 0; k--) {
+        if (SAY_OPEN.startsWith(this.buf.slice(-k))) {
+          keep = k;
+          break;
+        }
+      }
+      show += this.buf.slice(0, this.buf.length - keep);
+      this.buf = this.buf.slice(this.buf.length - keep);
+      break;
+    }
+    if (said.length) this.said = [this.said, ...said].filter(Boolean).join(' ');
+    return { show, said };
+  }
+
+  /** Text held back at the end of a turn (a lone "<", or an unclosed block, which is shown rather than lost). */
+  flush(): string {
+    const out = this.buf;
+    this.buf = '';
+    this.inSay = false;
+    return out;
+  }
+
+  /** Everything spoken early in this run, joined. */
+  get spoken(): string {
+    return this.said;
+  }
+}
+
+export interface VoiceTurn {
+  lang?: string;
+  confidence?: number;
+  alternates?: string[];
+}
+
+/** Voice v2: extra instructions when the latest message was spoken, not typed. */
+export function voiceInstructions(v: VoiceTurn): string {
+  const conf = typeof v.confidence === 'number' && v.confidence >= 0 ? v.confidence : null;
+  const alts = (v.alternates ?? []).filter((a) => typeof a === 'string' && a.trim()).slice(0, 3);
+  return [
+    `The user's latest message was spoken and turned into text by speech recognition${v.lang ? ` (${v.lang.replace(/[^\w-]/g, '')})` : ''}${conf !== null ? `, confidence ${conf.toFixed(2)}` : ''}. It may contain recognition mistakes.`,
+    '- Users in the Philippines often mix Filipino and English (Taglish) in one sentence. Understand both, read misheard words by their likely meaning, and reply in the language mix the user used.',
+    '- If a name, number, amount, date or the action itself is unclear and getting it wrong matters (anything that changes data or sends something), ask one short confirming question before acting. Otherwise just answer.',
+    ...(alts.length ? [`- Other ways the recogniser heard it: ${untrustedInline(alts.join(' | '))}`] : []),
+    `- Start your final reply with one short spoken sentence in ${SAY_OPEN}...${SAY_CLOSE} (at most about 25 words, plain words, no markdown), then the written answer. If you need to use tools first, you may start with a brief ${SAY_OPEN}...${SAY_CLOSE} saying what you are checking. When you used ${SAY_OPEN}, leave "speech" in the final meta block empty.`,
+  ].join('\n');
+}
+
+const untrustedInline = (s: string) => JSON.stringify(s.replace(/[<>]/g, '').slice(0, 300));
 
 const clean = (s: string) =>
   s

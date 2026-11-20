@@ -159,6 +159,40 @@ d('v1.6 files, charts and images (integration)', () => {
     }
   });
 
+  it('Voice v2: a spoken message tells the model it may be misheard, and the early spoken line streams as a speech event', async () => {
+    const conv = (await call(A, 'POST', '/conversations', {})).json;
+    expect((await call(A, 'POST', `/conversations/${conv.id}/messages`, { content: 'x', voice: { lang: 'bad lang!' } })).status).toBe(400);
+    const mock = new ai.MockProvider(() => [
+      { type: 'token', text: '<qline-say>Tatlo ang bukas na tasks mo.</qline' },
+      { type: 'token', text: '-say>\nYou have **3 open tasks**. <qline-meta>{"speech":"","suggestions":["Show overdue"]}</qline-meta>' },
+      { type: 'done' },
+    ]);
+    ai.setTestProvider(mock);
+    try {
+      const m = await call(A, 'POST', `/conversations/${conv.id}/messages`, { content: 'ilan ang tasks ko', voice: { lang: 'fil-PH', confidence: 0.55, alternates: ['ilan ang task ko'] } });
+      expect(m.status).toBe(202);
+      const sse = await (await app.fetch(new Request(`http://localhost/v1/runs/${m.json.runId}/stream`, { headers: headers(A) }))).text();
+      expect(sse).toContain('event: speech');
+      expect(sse.indexOf('event: speech')).toBeLessThan(sse.indexOf('event: token'));
+      expect(sse).not.toContain('qline-say');
+      const system = mock.calls[0].messages[0].content as string;
+      expect(system).toContain('speech recognition (fil-PH), confidence 0.55');
+      expect(system).toContain('Answer depth');
+      const g = (await call(A, 'GET', `/conversations/${conv.id}`)).json;
+      const reply = g.messages.find((x: any) => x.role === 'assistant');
+      expect(reply.content).toBe('You have **3 open tasks**.');
+      expect(reply.meta.speech).toBe('Tatlo ang bukas na tasks mo.');
+      expect(g.messages.find((x: any) => x.role === 'user').meta.voice.lang).toBe('fil-PH');
+      // A typed message gets no voice instructions.
+      const conv2 = (await call(A, 'POST', '/conversations', {})).json;
+      const m2 = await call(A, 'POST', `/conversations/${conv2.id}/messages`, { content: 'how many tasks' });
+      await (await app.fetch(new Request(`http://localhost/v1/runs/${m2.json.runId}/stream`, { headers: headers(A) }))).text();
+      expect(mock.calls[1].messages[0].content as string).not.toContain('speech recognition');
+    } finally {
+      ai.setTestProvider(null);
+    }
+  });
+
   it('files.read pages through text and rows; save_to_library makes a searchable document', async () => {
     const long = 'Policy. '.repeat(1500); // 12,000 chars
     const doc = (await attach(A, 'policy.txt', long, 'text/plain')).json;

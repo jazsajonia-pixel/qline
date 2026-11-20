@@ -372,6 +372,14 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
         fresh: z.boolean().optional(),
         // Run 3 / M4: knowledge entries the person added to this message from the in-chat map
         knowledge: z.array(z.string().uuid()).max(5).default([]),
+        // Voice v2: the message was spoken; recogniser language, confidence and alternates help the model read it.
+        voice: z
+          .object({
+            lang: z.string().max(16).regex(/^[A-Za-z-_]*$/).optional(),
+            confidence: z.number().min(-1).max(1).optional(),
+            alternates: z.array(z.string().max(300)).max(3).optional(),
+          })
+          .optional(),
       })
       .refine((v) => v.content.length > 0 || v.attachments.length > 0, { message: 'Write a message or attach a file.', path: ['content'] }),
   );
@@ -432,6 +440,7 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
     const meta = {
       ...(files.length ? { attachments: files.map((f) => ({ id: f.id, name: f.name, mime: f.mime, kind: f.extracted?.kind ?? 'document', size: f.size_bytes })) } : {}),
       ...(input.fresh ? { fresh: true } : {}),
+      ...(input.voice ? { voice: input.voice } : {}),
       ...(knowledge.length ? { knowledge: knowledge.map((k) => ({ id: k.id, title: k.title, status: k.status })) } : {}),
     };
     const msg = await q.one(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, meta) values ($1,$2,'user',$3,$4,$5) returning id, created_at`, [
