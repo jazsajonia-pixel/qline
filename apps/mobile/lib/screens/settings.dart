@@ -8,6 +8,7 @@ import 'package:material_ui/material_ui.dart';
 import '../core/config.dart';
 import '../core/session.dart';
 import '../ui/theme.dart';
+import '../ui/update_banner.dart';
 import '../ui/widgets.dart';
 import 'ai.dart';
 import 'autonomy.dart';
@@ -76,6 +77,7 @@ class SettingsScreen extends ConsumerWidget {
         nav(Icons.record_voice_over_outlined, 'Voice', prefs.speak ? 'Spoken replies on · choose a natural voice' : 'Spoken replies off · choose a natural voice', const VoiceSettingsScreen()),
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('About')),
         nav(Icons.health_and_safety_outlined, 'System status', 'Server, storage and AI availability', const StatusScreen()),
+        ListTile(leading: const Icon(Icons.system_update_outlined), title: const Text('App updates'), subtitle: Text('Check for a new version', style: qs(13, c: q.text3)), trailing: const Icon(Icons.chevron_right), onTap: () => push(context, const UpdatesScreen())),
         ListTile(leading: const Icon(Icons.info_outline), title: const Text('Version'), subtitle: Text('${AppConfig.version} (${AppConfig.build})', style: qs(13, c: q.text3, family: mono))),
         Padding(
           padding: const EdgeInsets.all(16),
