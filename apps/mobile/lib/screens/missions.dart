@@ -8,7 +8,7 @@ import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'proposals.dart';
 
-/// v1.5 AI CEO missions (docs/13 §10): goal → CEO plan → your approval → specialist tasks.
+/// v1.5 Command Center missions (docs/13 §10; template key `ceo`): goal → plan → your approval → specialist tasks.
 /// Nothing runs before you approve the plan. Pause and emergency stop live at the top.
 class MissionsScreen extends ConsumerStatefulWidget {
   const MissionsScreen({super.key});
@@ -20,9 +20,9 @@ class _MissionsState extends ConsumerState<MissionsScreen> {
   int _gen = 0;
 
   Future<void> _new() async {
-    final goal = await promptText(context, title: 'New mission', label: 'What should the AI CEO work on?', action: 'Plan it', maxLines: 4);
+    final goal = await promptText(context, title: 'New mission', label: 'What should Command Center work on?', action: 'Plan it', maxLines: 4);
     if (goal == null || goal.trim().length < 3 || !mounted) return;
-    final r = await act(context, ref, (api) => api.post('/missions', {'goal': goal.trim()}), ok: 'The CEO is planning. You approve the plan before anything runs.');
+    final r = await act(context, ref, (api) => api.post('/missions', {'goal': goal.trim()}), ok: 'Command Center is planning. You approve the plan before anything runs.');
     if (r is Map && mounted) {
       await push(context, MissionDetail(id: r['id'] as String));
       if (mounted) setState(() => _gen++);
@@ -61,7 +61,7 @@ class _MissionsState extends ConsumerState<MissionsScreen> {
               if (list.isEmpty)
                 const Padding(
                   padding: EdgeInsets.only(top: 24),
-                  child: EmptyState(icon: Icons.flag_outlined, title: 'No missions yet', body: 'Give the AI CEO a goal. It proposes a plan, you approve it, and specialist agents do the work.'),
+                  child: EmptyState(icon: Icons.flag_outlined, title: 'No missions yet', body: 'Give Command Center a goal. It proposes a plan, you approve it, and specialist agents do the work.'),
                 ),
               for (final m in list)
                 Padding(
@@ -214,7 +214,7 @@ class _MissionDetailState extends ConsumerState<MissionDetail> {
               _Budget(m: m),
               if (status == 'planning') ...[
                 const SizedBox(height: 16),
-                QCard(child: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)), const SizedBox(width: 12), Expanded(child: Text('The CEO is writing a plan. Pull to refresh.', style: qs(14, c: q.text2)))])),
+                QCard(child: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)), const SizedBox(width: 12), Expanded(child: Text('Command Center is writing a plan. Pull to refresh.', style: qs(14, c: q.text2)))])),
               ],
               if (plan != null) ...[
                 SectionLabel('Plan · version ${plan['version']}', trailing: StatusPill(plan['status'] as String? ?? '')),
@@ -237,9 +237,9 @@ class _MissionDetailState extends ConsumerState<MissionDetail> {
                     child: QButton('Revise', kind: QBtn.secondary, busy: _busy == 'revise', onPressed: busy
                         ? null
                         : () async {
-                            final note = await promptText(context, title: 'What should change?', label: 'Tell the CEO', action: 'Ask again', maxLines: 3);
+                            final note = await promptText(context, title: 'What should change?', label: 'Tell Command Center', action: 'Ask again', maxLines: 3);
                             if (note == null || note.trim().isEmpty) return;
-                            await _run('revise', (api) => api.post('/missions/${widget.id}/plan/decision', {'decision': 'revise', 'planVersion': plan!['version'], 'note': note.trim()}), 'The CEO is revising the plan.', reload);
+                            await _run('revise', (api) => api.post('/missions/${widget.id}/plan/decision', {'decision': 'revise', 'planVersion': plan!['version'], 'note': note.trim()}), 'Command Center is revising the plan.', reload);
                           }),
                   ),
                 ]),

@@ -23,3 +23,12 @@ do $$ begin
     revoke delete, truncate on workspace_controls, missions, mission_plans, mission_tasks, mission_trace from qline_app;
   end if;
 end $$;
+
+-- Content handoff (docs/22 ADR-C2): the event ledger and Qline's acknowledgements are append-only for the app; jobs are
+-- cancelled, never deleted.
+do $$ begin
+  if to_regclass('public.content_job_events') is not null then
+    revoke update, delete, truncate on content_job_events, content_job_acks from qline_app;
+    revoke delete, truncate on content_jobs from qline_app;
+  end if;
+end $$;

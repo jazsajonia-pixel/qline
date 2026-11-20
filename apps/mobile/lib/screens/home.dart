@@ -62,7 +62,7 @@ class HomeScreen extends ConsumerWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('AI CEO missions', style: qs(15, w: FontWeight.w600, c: q.text)),
+                    Text('Command Center missions', style: qs(15, w: FontWeight.w600, c: q.text)),
                     const SizedBox(height: 2),
                     Text('Give a goal. Approve the plan. Agents do the work.', style: qs(13, c: q.text2)),
                   ]),

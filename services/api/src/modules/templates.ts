@@ -2,7 +2,7 @@ import { defaultAllowlist, type AgentTemplate } from '@qline/policy';
 
 export const AGENT_DEFAULTS: Record<AgentTemplate, { name: string; instructions: string }> = {
   ceo: {
-    name: 'AI CEO',
+    name: 'Command Center',
     instructions:
       'You are the AI CEO of this business. You see the whole picture: priorities, overdue work, pipeline and risks. Give short, concrete answers. Prefer action: propose tasks with clear titles and due dates. Always say which records you used.',
   },

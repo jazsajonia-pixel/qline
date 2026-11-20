@@ -280,14 +280,14 @@ async function planHandler({ job, signal }: JobCtx) {
   });
   if (!setup) return { skipped: true };
   const { m, ceo, profile, resolved, version } = setup;
-  if (!ceo || ceo.status !== 'active') return failMission(c, missionId, 'The CEO agent is paused or missing. Activate it in Agents.');
+  if (!ceo || ceo.status !== 'active') return failMission(c, missionId, 'Command Center is paused or missing. Activate it in Agents.');
   if (!resolved?.ok) return failMission(c, missionId, resolved?.message ?? 'No AI model is set up.');
 
   const messages: ChatMessage[] = [
     { role: 'system', content: `${CEO_SYSTEM}\n\nToday is ${new Date().toISOString().slice(0, 10)} (UTC).\nBusiness profile: ${untrusted('business_profile', profile)}` },
     { role: 'user', content: `Goal: ${untrusted('mission_goal', m.goal)}${feedback ? `\n\nThe owner asked for changes to the last plan: ${untrusted('owner_feedback', feedback)}` : ''}` },
   ];
-  let errors: string[] = ['The CEO did not propose a plan.'];
+  let errors: string[] = ['Command Center did not propose a plan.'];
   let raw: unknown = null;
   for (let attempt = 1; attempt <= PLAN_ATTEMPTS; attempt++) {
     let out;
@@ -335,7 +335,7 @@ async function planHandler({ job, signal }: JobCtx) {
       JSON.stringify(errors.slice(0, 50)),
     ]),
   );
-  await failMission(c, missionId, `The CEO could not produce a valid plan: ${errors.slice(0, 3).join('; ')}`);
+  await failMission(c, missionId, `Command Center could not produce a valid plan: ${errors.slice(0, 3).join('; ')}`);
   return { invalid: true };
 }
 

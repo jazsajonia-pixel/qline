@@ -284,6 +284,20 @@ One feature branch, `content/drive-handoff`, with a draft PR. **It is not merged
     - Missing files are marked `removed` only after a complete listing (not after a truncated or failed one).
     - Sync now runs inline in the request with no automatic retry. Run 5 moves it to a durable job with backoff.
   - Tests: `services/api/test/content-drive.integration.test.ts` (12 tests). Not verified with a real Google account.
+- **Run 3 (Slice 2a), 2026-11-20:** built, tested locally against Postgres with a mocked Drive (used only to index assets). Nothing is written to Drive.
+  - Migration `0021_content_jobs.sql`: `content_jobs`, `content_job_events`, `content_job_outputs`, `content_job_acks` (RLS `tenant_isolation`), plus `notifications.dedupe_key` with a unique partial index. `9999_app_role.sql`: the app role cannot update or delete events and acks, or delete jobs.
+  - Migration `0022_command_center_label.sql`: built-in `ceo` agents still named `AI CEO` become `Command Center`; custom names are kept. New organizations get `Command Center`. Mobile and API messages now say Command Center. The template key stays `ceo`.
+  - `core/pdf.ts`: internal text-PDF writer (Helvetica, Helvetica-Bold, Courier; WinAnsi; wrapping; page breaks; no dates, so the same input gives the same bytes).
+  - `modules/content-jobs.ts`: `POST /content/jobs`, `GET /content/jobs?filter=`, `GET /content/jobs/:id` (with events, outputs, acks), `GET …/manifest`, `GET …/pdf`, `POST …/cancel` (needs `confirm: true`), `POST …/reissue` (needs the current `revision`).
+  - Job code `QLINE-YYYYMMDD-xxxxxx` (6 lowercase Crockford base32 characters), unique per organization, retried on a clash.
+  - Manifest schema `qline.content.manifest/1`; result schema `qline.content.result/1` (shown in the manifest and PDF as `resultExample`; run 4 must accept exactly this). Expected output name `<code>-r<revision>.mp4`, result file `<code>-r<revision>.result.json`.
+  - Deviations from §E, decided in this run:
+    - The manifest is stored as the exact issued JSON text (`manifest_json text`), not `jsonb`, so its SHA-256 can always be re-checked. The PDF bytes are stored in the row (`pdf bytea`). There is no `manifest_file_id` / `pdf_file_id`, because nothing is uploaded in this slice. Downloads re-check both checksums and refuse a mismatch (500 `INTEGRITY_FAILED`).
+    - List filters are `active | awaiting | failed | attention | all`. There is no `completed` filter yet, because no terminal success state exists until the QA gate in run 4/5.
+    - Inputs must be `indexed` files from an `assets` role folder. Files in Ready for QA, removed files, shortcuts and unknown IDs are refused (400, listing the IDs).
+    - Reissue is refused from `cancelled`, `output_verified` and `awaiting_video_qa`. Cancel is refused from `cancelled` and `expired`.
+    - The `ceo` template's instructions still start "You are the AI CEO…". Changing them would change model behaviour, so it is left for Jazz to decide.
+  - Tests: `services/api/test/content-jobs.integration.test.ts` (15 tests) and `services/api/test/pdf.test.ts` (3 tests). PDFs are parsed with `unpdf`, which needs Node 22+ (CI uses 24).
 
 ## H. Owner actions (later, not in this task)
 
