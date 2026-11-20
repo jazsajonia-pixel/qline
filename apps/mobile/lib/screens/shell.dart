@@ -3,6 +3,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../core/alerts.dart';
 import '../core/back_exit.dart';
+import '../core/live_status.dart';
 import '../core/session.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
@@ -30,16 +31,98 @@ class Shell extends ConsumerStatefulWidget {
   ConsumerState<Shell> createState() => _ShellState();
 }
 
-class _ShellState extends ConsumerState<Shell> {
+class _ShellState extends ConsumerState<Shell> with SingleTickerProviderStateMixin {
   int _tab = 0;
   static const _titles = ['Home', 'Work', '', 'Business', 'Library'];
 
-  void _openLive() => Navigator.of(context).push(
-    PageRouteBuilder(
-      transitionDuration: const Duration(milliseconds: 260),
-      pageBuilder: (_, a, _) => FadeTransition(opacity: a, child: const LiveScreen()),
-    ),
-  );
+  // Background continuity: Live AI stays mounted as a layer over the shell once opened. Minimizing hides
+  // it (state, the answer stream and the voice keep going) and the core flies down into the navbar orb.
+  final _orbKey = GlobalKey();
+  final _coreKey = GlobalKey();
+  // Emphasized motion (Animation and Motion skill): ~450 ms in, ~220 ms out.
+  late final AnimationController _fly = AnimationController(vsync: this, duration: const Duration(milliseconds: 450), reverseDuration: const Duration(milliseconds: 220));
+
+  void _openLive() => ref.read(liveHostProvider.notifier).open();
+
+  @override
+  void dispose() {
+    _fly.dispose();
+    super.dispose();
+  }
+
+  void _onHost(LiveHost? before, LiveHost now) {
+    final reduce = ref.read(prefsProvider).reduceMotion || MediaQuery.of(context).disableAnimations;
+    switch (now.view) {
+      case LiveView.open:
+        reduce ? _fly.value = 1 : _fly.forward();
+      case LiveView.minimized:
+        reduce ? _fly.value = 0 : _fly.reverse();
+      case LiveView.closed:
+        _fly.value = 0;
+    }
+  }
+
+  Rect? _rectOf(GlobalKey k) {
+    final box = k.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize || !box.attached) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  /// Where the live core sits; before Live AI has laid out once, roughly where it will appear.
+  Rect _coreRect(Size screen, EdgeInsets pad) {
+    final r = _rectOf(_coreKey);
+    if (r != null && r.width > 0) {
+      final side = r.shortestSide * .62;
+      return Rect.fromCenter(center: r.center, width: side, height: side);
+    }
+    final side = screen.width * .42;
+    return Rect.fromCenter(center: Offset(screen.width / 2, pad.top + kToolbarHeight + screen.height * .16), width: side, height: side);
+  }
+
+  Widget _liveLayer(LiveHost host) {
+    final size = MediaQuery.of(context).size;
+    final pad = MediaQuery.of(context).padding;
+    return AnimatedBuilder(
+      animation: _fly,
+      builder: (context, child) {
+        final t = _fly.value;
+        final flying = _fly.isAnimating;
+        final status = ref.read(liveStatusProvider);
+        final from = _rectOf(_orbKey);
+        final curve = _fly.status == AnimationStatus.reverse ? Curves.easeInCubic : Curves.easeOutCubic;
+        final p = curve.transform(t);
+        return Stack(children: [
+          Offstage(
+            offstage: t == 0,
+            child: TickerMode(
+              enabled: t > 0,
+              child: IgnorePointer(
+                ignoring: flying || host.view != LiveView.open,
+                child: Opacity(
+                  opacity: const Interval(.35, 1).transform(t),
+                  child: Transform.scale(scale: .97 + .03 * p, child: child),
+                ),
+              ),
+            ),
+          ),
+          if (flying && from != null)
+            Positioned.fromRect(
+              rect: Rect.lerp(from, _coreRect(size, pad), p)!,
+              child: IgnorePointer(
+                child: Opacity(
+                  // Hands over to the real core as the screen fades in (and back to the orb on the way down).
+                  opacity: _fly.status == AnimationStatus.reverse ? 1 : (1 - const Interval(.8, 1).transform(t)),
+                  child: ClipOval(
+                    child: EnergyCore(state: navCoreState(status.core), agent: status.template ?? 'ceo', compact: true, background: false),
+                  ),
+                ),
+              ),
+            ),
+        ]);
+      },
+      child: KeyedSubtree(key: ValueKey(host.session), child: LiveScreen(embedded: true, coreKey: _coreKey)),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -48,11 +131,22 @@ class _ShellState extends ConsumerState<Shell> {
     final pending = ref.watch(pendingCount).value ?? 0;
     final unread = ref.watch(unreadAlerts);
     final pages = [HomeScreen(onTab: (i) => setState(() => _tab = i)), const WorkScreen(), const SizedBox(), const BusinessScreen(), const LibraryScreen()];
+    final host = ref.watch(liveHostProvider);
+    ref.listen(liveHostProvider, _onHost);
+    // Live AI belongs to one organisation: switching ends it (the answer still finishes on the server).
+    ref.listen(sessionProvider.select((s) => s.orgId), (a, b) {
+      if (a != b && ref.read(liveHostProvider).mounted) ref.read(liveHostProvider.notifier).end();
+    });
     // Run 3 / M5: Back on another tab goes Home first; Back on Home asks before closing the app.
-    return PopScope(
+    // Background continuity: Back in Live AI minimizes it.
+    final shell = PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
+        if (ref.read(liveHostProvider).view == LiveView.open) {
+          ref.read(liveHostProvider.notifier).minimize();
+          return;
+        }
         if (_tab != 0) {
           setState(() => _tab = 0);
           return;
@@ -84,10 +178,11 @@ class _ShellState extends ConsumerState<Shell> {
           ],
         ),
         body: IndexedStack(index: _tab, children: pages),
-        bottomNavigationBar: _BottomNav(index: _tab, onTap: (i) => i == 2 ? _openLive() : setState(() => _tab = i)),
+        bottomNavigationBar: _BottomNav(index: _tab, orbKey: _orbKey, fly: _fly, onTap: (i) => i == 2 ? _openLive() : setState(() => _tab = i)),
       ),
       ),
     );
+    return Stack(children: [shell, if (host.mounted) Positioned.fill(child: _liveLayer(host))]);
   }
 }
 
@@ -185,13 +280,18 @@ class _OrgSwitcher extends ConsumerWidget {
 }
 
 class _BottomNav extends ConsumerWidget {
-  const _BottomNav({required this.index, required this.onTap});
+  const _BottomNav({required this.index, required this.onTap, required this.orbKey, required this.fly});
   final int index;
   final ValueChanged<int> onTap;
+  final GlobalKey orbKey;
+  final AnimationController fly;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final q = context.q;
     final reduce = ref.watch(prefsProvider).reduceMotion;
+    final live = ref.watch(liveStatusProvider);
+    final host = ref.watch(liveHostProvider);
+    final orbState = host.mounted ? navCoreState(live.core) : CoreState.idle;
     final personal = ref.watch(sessionProvider.select((s) => s.personal));
     Widget item(int i, IconData icon, IconData active, String label) {
       final sel = index == i;
@@ -237,7 +337,7 @@ class _BottomNav extends ConsumerWidget {
             Expanded(
               child: Semantics(
                 button: true,
-                label: 'Open Live AI',
+                label: navOrbLabel(host.mounted ? live : const LiveStatus(), open: false),
                 child: InkWell(
                   customBorder: const CircleBorder(),
                   onTap: () => onTap(2),
@@ -253,8 +353,25 @@ class _BottomNav extends ConsumerWidget {
                           border: Border.all(color: q.line),
                         ),
                         clipBehavior: Clip.antiAlias,
+                        // The orb shows what Live AI is doing (listening, thinking, speaking, approval, disconnected).
+                        // It hides while the core is flying to or from it.
                         child: ExcludeSemantics(
-                          child: EnergyCore(state: CoreState.idle, reduceMotion: reduce, compact: true, background: false),
+                          child: AnimatedBuilder(
+                            animation: fly,
+                            builder: (_, child) => Opacity(opacity: fly.isAnimating ? 0 : 1, child: child),
+                            child: ValueListenableBuilder<double>(
+                              valueListenable: liveLevel,
+                              builder: (_, level, _) => EnergyCore(
+                                key: orbKey,
+                                state: orbState,
+                                agent: live.template ?? 'ceo',
+                                reduceMotion: reduce,
+                                compact: true,
+                                background: false,
+                                level: host.view == LiveView.minimized ? level : 0,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),

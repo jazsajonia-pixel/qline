@@ -5,8 +5,10 @@ import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../core/alerts.dart';
 import '../core/api.dart';
 import '../core/chat_resume.dart';
+import '../core/live_status.dart';
 import '../core/session.dart';
 import '../core/voice.dart';
 import '../ui/activity_trace.dart';
@@ -22,6 +24,8 @@ import 'needs_checking.dart';
 
 class _Msg {
   _Msg(this.role, this.text, {this.steps, this.error, this.speech, this.suggestions = const [], this.agentName, this.template, this.attachments = const [], this.knowledge = const [], this.runId, this.stepCount = 0, List<Map<String, dynamic>>? artifacts}) : artifacts = artifacts ?? [];
+  /// Voice v2: the reply already started talking while it streamed (its spoken lines came early).
+  bool spokeEarly = false;
   /// Run 3: knowledge entries the person added to this message ({id, title, status}).
   final List<Map<String, dynamic>> knowledge;
   /// Run 3: for answers from history, the run whose steps can be opened, and how many there were.
@@ -47,21 +51,44 @@ class _Msg {
 }
 
 /// Live AI is always dark (docs/03 §5): the energy core needs a dark field.
+/// An answer being followed: which run, its bubble, the last event seen and whether to speak it.
+class _Following {
+  _Following(this.runId, this.reply, {this.lastId, required this.voiceOn, required this.resumed});
+  final String runId;
+  final _Msg reply;
+  String? lastId;
+  final bool resumed;
+
+  /// Turned off when the user talks over the reply, so later spoken lines stay quiet.
+  bool voiceOn;
+  int attempts = 0;
+  bool done = false;
+}
+
 class LiveScreen extends ConsumerWidget {
-  const LiveScreen({super.key, this.conversationId});
+  const LiveScreen({super.key, this.conversationId, this.embedded = false, this.coreKey});
   final String? conversationId;
+
+  /// Background continuity: shown as a layer of the main shell. Close and Back minimize it into the
+  /// navbar orb instead of disposing it, so the answer, the voice and the conversation keep going.
+  final bool embedded;
+
+  /// Lets the shell find the core on screen for the orb animation.
+  final GlobalKey? coreKey;
   @override
-  Widget build(BuildContext context, WidgetRef ref) => Theme(data: buildTheme(false), child: _Live(conversationId: conversationId));
+  Widget build(BuildContext context, WidgetRef ref) => Theme(data: buildTheme(false), child: _Live(conversationId: conversationId, embedded: embedded, coreKey: coreKey));
 }
 
 class _Live extends ConsumerStatefulWidget {
-  const _Live({this.conversationId});
+  const _Live({this.conversationId, this.embedded = false, this.coreKey});
   final String? conversationId;
+  final bool embedded;
+  final GlobalKey? coreKey;
   @override
   ConsumerState<_Live> createState() => _LiveState();
 }
 
-class _LiveState extends ConsumerState<_Live> {
+class _LiveState extends ConsumerState<_Live> with WidgetsBindingObserver {
   CoreState _core = CoreState.idle;
   List<Map<String, dynamic>> _agents = [];
   Map<String, dynamic>? _agent;
@@ -80,7 +107,17 @@ class _LiveState extends ConsumerState<_Live> {
       if (mounted && i != _word) setState(() => _word = i);
     },
     onLevel: (l) {
+      if (_core == CoreState.speaking) liveLevel.value = l;
       if (mounted && (l - _speakLevel).abs() > .01) setState(() => _speakLevel = l);
+    },
+    onStart: (text) {
+      if (!mounted) return;
+      setState(() {
+        _spoken = speakable(text);
+        _word = -1;
+        if (_core != CoreState.approval && _core != CoreState.error) _core = CoreState.speaking;
+      });
+      _startBargeIn();
     },
     onDone: _afterSpeech,
     onNotice: (m) {
@@ -132,7 +169,41 @@ class _LiveState extends ConsumerState<_Live> {
     super.initState();
     _convId = widget.conversationId;
     _input.addListener(_onComposerChanged);
+    WidgetsBinding.instance.addObserver(this);
     _init();
+  }
+
+  // ---- Background continuity ---------------------------------------------------------------------------
+  bool _background = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    if (s == AppLifecycleState.paused || s == AppLifecycleState.hidden) {
+      _background = true;
+      // Android stops the microphone for apps in the background; stop it cleanly (the answer and the
+      // voice keep going while the app is alive).
+      _relisten?.cancel();
+      if (_listening) {
+        _barge = false;
+        _gate.reset();
+        _stt.cancel();
+      }
+    } else if (s == AppLifecycleState.resumed && _background) {
+      _background = false;
+      // The stream may have dropped while away: follow the answer from where it stopped.
+      final f = _following;
+      if (_runId != null && _sub == null && f != null) _follow(f);
+      if (_handsFree && !_voice.speaking) _scheduleListen();
+    }
+  }
+
+  /// Keeps the navbar orb in step with this screen.
+  void _publish(String template) {
+    final status = LiveStatus(core: _core, template: _liveTemplate ?? template, busy: _runId != null || _voice.speaking);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(liveStatusProvider.notifier).set(status);
+    });
+    if (_core != CoreState.speaking && !_listening) liveLevel.value = 0;
   }
 
   static final _stopPhrase = RegExp(r"^(please )?(stop listening|stop|that'?s all|goodbye|bye|end hands[- ]free|exit)[.!]?$", caseSensitive: false);
@@ -148,15 +219,58 @@ class _LiveState extends ConsumerState<_Live> {
 
   void _afterSpeech() {
     if (!mounted) return;
+    final writing = _runId != null;
     setState(() {
-      _busy = false;
       _speakLevel = 0;
-      if (_core == CoreState.speaking) _core = CoreState.idle;
+      // Early spoken lines can finish before the written answer does: then it is still thinking.
+      if (!writing) _busy = false;
+      if (_core == CoreState.speaking) _core = writing ? CoreState.thinking : CoreState.idle;
     });
-    if (_handsFree) _scheduleListen();
+    liveLevel.value = 0;
+    if (_barge) {
+      // Speech ended without an interruption: the open microphone becomes normal listening, no restart.
+      _barge = false;
+      if (!writing && _listening) {
+        _gate.reset();
+        setState(() => _core = CoreState.listening);
+        return;
+      }
+    }
+    if (_handsFree && !writing) _scheduleListen();
   }
 
-  void _scheduleListen([int ms = 450]) {
+  // ---- Voice v2: barge-in ----------------------------------------------------------------------------
+  /// Listening while the voice talks, to catch the user talking over it.
+  bool _barge = false;
+
+  /// A request heard while an answer was still being written; sent when it finishes.
+  String? _queued;
+  Map<String, dynamic>? _queuedVoice;
+
+  void _startBargeIn() {
+    final p = ref.read(voicePrefsProvider);
+    if (!_handsFree || !p.bargeIn || _listening || _background) return;
+    _listen(barge: true);
+  }
+
+  /// The user talked over the voice: stop it and keep listening to them.
+  Future<void> _interrupt(String heard) async {
+    final spoken = _spoken;
+    _barge = false;
+    _following?.voiceOn = false;
+    await _voice.stop();
+    if (!mounted) return;
+    setState(() {
+      _speakLevel = 0;
+      _core = CoreState.listening;
+      if (_runId == null) _busy = false;
+    });
+    _gate.reset();
+    final said = withoutEcho(heard, spoken);
+    if (said.isNotEmpty) _gate.feed(said);
+  }
+
+  void _scheduleListen([int ms = 250]) {
     _relisten?.cancel();
     _relisten = Timer(Duration(milliseconds: ms), () {
       if (mounted && _handsFree && !_busy && !_listening && _runId == null && !_voice.speaking) _listen();
@@ -177,11 +291,13 @@ class _LiveState extends ConsumerState<_Live> {
       try {
         await WakelockPlus.disable();
       } catch (_) {}
+      _barge = false;
+      _queued = null;
       if (_listening) await _stt.stop();
       await _voice.stop();
       if (mounted) {
         setState(() {
-          _busy = false;
+          _busy = _runId != null;
           _spoken = '';
           if (_core == CoreState.listening || _core == CoreState.speaking) _core = CoreState.idle;
         });
@@ -192,13 +308,17 @@ class _LiveState extends ConsumerState<_Live> {
   /// Tap on the core: interrupt speech (and listen again in hands-free), or start/stop the mic.
   Future<void> _tapCore() async {
     if (_core == CoreState.speaking && _voice.speaking) {
+      if (_barge) {
+        _barge = false;
+        await _stt.cancel();
+      }
       await _voice.stop();
       setState(() {
-        _busy = false;
-        _core = CoreState.idle;
+        _busy = _runId != null;
+        _core = _runId != null ? CoreState.thinking : CoreState.idle;
         _speakLevel = 0;
       });
-      if (_handsFree) await _listen();
+      if (_handsFree && _runId == null) await _listen();
       return;
     }
     if (_runId != null || _loading || _loadError != null) return;
@@ -367,7 +487,7 @@ class _LiveState extends ConsumerState<_Live> {
     }
   }
 
-  Future<void> _send([String? text]) async {
+  Future<void> _send([String? text, Map<String, dynamic>? voice]) async {
     final content = (text ?? _input.text).trim();
     if (_runId != null) return;
     if (_files.uploading) {
@@ -403,6 +523,7 @@ class _LiveState extends ConsumerState<_Live> {
         if (sending.isNotEmpty) 'attachments': [for (final p in sending) p.id],
         if (knowledge.isNotEmpty) 'knowledge': [for (final k in knowledge) k['id']],
         if (_auto) 'agent': 'auto',
+        'voice': ?voice,
       }) as Map;
       _runId = r['runId'] as String;
       final routed = (r['agent'] as Map?)?.cast<String, dynamic>();
@@ -432,29 +553,50 @@ class _LiveState extends ConsumerState<_Live> {
       _msgs.add(reply);
       _liveTemplate = template;
     });
-    String? last = lastId;
-    _sub = _api.sse('/runs/$runId/stream', lastEventId: lastId).listen(
+    _follow(_Following(runId, reply, lastId: lastId, voiceOn: !resumed && (_handsFree || ref.read(prefsProvider).speak), resumed: resumed));
+  }
+
+  /// The answer being followed, kept so a dropped connection can pick up where it stopped.
+  _Following? _following;
+
+  /// Subscribes to the run's events from [f.lastId]. A dropped connection reconnects (up to 4 times,
+  /// with a short backoff) instead of failing: the server keeps writing the answer either way.
+  void _follow(_Following f) {
+    _following = f;
+    final reply = f.reply;
+    _sub?.cancel();
+    _sub = _api.sse('/runs/${f.runId}/stream', lastEventId: f.lastId).listen(
       (e) {
-        last = e.id ?? last;
+        f.lastId = e.id ?? f.lastId;
+        f.attempts = 0;
         final d = e.data;
         setState(() {
           switch (e.event) {
             case 'status':
-              _core = d['state'] == 'thinking' ? CoreState.thinking : _core;
+              _core = d['state'] == 'thinking' && !_voice.speaking ? CoreState.thinking : _core;
             case 'token':
               reply.text += d['text'] as String? ?? '';
               // Writing is not speaking: the core only shows "speaking" while the voice is actually playing.
-              _core = CoreState.thinking;
+              if (!_voice.speaking) _core = CoreState.thinking;
+            case 'speech':
+              // Voice v2: a spoken line that arrived before the written answer finished; start talking now.
+              final line = d['text'] as String? ?? '';
+              if (f.voiceOn && line.isNotEmpty && !_background) {
+                reply.spokeEarly = true;
+                _voice.enqueue(_api, line, ref.read(voicePrefsProvider));
+              } else if (f.voiceOn && line.isNotEmpty) {
+                reply.spokeEarly = true; // in the background the line is not spoken; the notification says it's ready
+              }
             case 'meta':
               reply.speech = d['speech'] as String?;
               reply.suggestions = ((d['suggestions'] as List?) ?? const []).whereType<String>().take(3).toList();
             case 'tool.planned':
               reply.steps!.add(TraceStep.planned(d));
-              _core = CoreState.tool;
+              if (!_voice.speaking) _core = CoreState.tool;
             case 'tool.result':
               final s = reply.steps!.where((s) => s.id == d['stepId']).lastOrNull ?? reply.steps!.lastOrNull;
               s?.result(d);
-              _core = CoreState.thinking;
+              if (!_voice.speaking) _core = CoreState.thinking;
             case 'artifact':
               if (reply.artifacts.length < 6) reply.artifacts.add(d);
             case 'approval.required':
@@ -462,23 +604,51 @@ class _LiveState extends ConsumerState<_Live> {
               _core = CoreState.approval;
             case 'error':
               reply.error = d['message'] as String? ?? 'Something went wrong.';
+              f.done = true; // a failed run ends with its error, not with "done"
               _core = CoreState.error;
             case 'done':
               reply.streaming = false;
-              if (_core != CoreState.approval && _core != CoreState.error) _core = d['status'] == 'waiting_approval' ? CoreState.approval : CoreState.success;
+              f.done = true;
+              if (_core != CoreState.approval && _core != CoreState.error) _core = d['status'] == 'waiting_approval' ? CoreState.approval : (_voice.speaking ? CoreState.speaking : CoreState.success);
           }
         });
         _toBottom();
       },
       onError: (Object err) {
+        _sub = null;
+        final network = err is! ApiException || err.isNetwork;
+        if (network && !f.done && f.attempts < 4 && mounted) {
+          // Reconnect from the last event; in the background wait for the app to come back instead.
+          f.attempts++;
+          setState(() => _core = CoreState.offline);
+          if (_background) return;
+          Future<void>.delayed(Duration(milliseconds: 600 * f.attempts), () {
+            if (mounted && _following == f && _runId == f.runId && _sub == null && !_background) _follow(f);
+          });
+          return;
+        }
+        if (!mounted) return;
         setState(() {
           reply.streaming = false;
           reply.error = err is ApiException ? err.message : 'The connection dropped. The answer is still saved; reopen this conversation to see it.';
           _core = err is ApiException && !err.isNetwork ? CoreState.error : CoreState.offline;
           _runId = null;
+          _busy = _voice.speaking;
         });
       },
       onDone: () async {
+        _sub = null;
+        if (!f.done && f.attempts < 4 && mounted && _runId == f.runId) {
+          // The stream closed before "done" (a proxy timeout, a network change): follow it again.
+          f.attempts++;
+          if (!_background) {
+            Future<void>.delayed(Duration(milliseconds: 400 * f.attempts), () {
+              if (mounted && _following == f && _sub == null && !_background) _follow(f);
+            });
+          }
+          return;
+        }
+        _following = null;
         _runId = null;
         reply.streaming = false;
         ref.read(refreshTick.notifier).bump();
@@ -486,25 +656,49 @@ class _LiveState extends ConsumerState<_Live> {
         if (reply.text.isEmpty && reply.artifacts.isEmpty && reply.error == null && reply.approval == null && (reply.steps?.isEmpty ?? true)) {
           setState(() => reply.error = 'No answer came back. Try again.');
         }
-        final voiceOn = !resumed && (_handsFree || ref.read(prefsProvider).speak);
-        if (_core == CoreState.success) {
-          if (voiceOn && reply.text.isNotEmpty) {
+        if (_background && !f.resumed) {
+          // Finished while Qline was in the background: say so in the notification shade.
+          final body = reply.error ?? (reply.approval != null ? 'An action needs your approval.' : spokenLine(reply.speech, reply.text));
+          showLocalAlert(id: f.runId.hashCode & 0x7fffffff, title: reply.approval != null ? 'Qline needs your approval' : 'Your answer is ready', body: body);
+        }
+        final voiceOn = f.voiceOn;
+        final queued = _queued;
+        if (queued != null) {
+          // The user asked something new while this answer was being written: ask it now.
+          final v = _queuedVoice;
+          _queued = null;
+          _queuedVoice = null;
+          await _voice.stop();
+          setState(() => _busy = false);
+          await _send(queued, v);
+          return;
+        }
+        if (reply.spokeEarly && (_core == CoreState.success || _core == CoreState.speaking)) {
+          // The spoken line already played (or is still playing) while the text streamed.
+          if (_voice.speaking) {
+            setState(() => _core = CoreState.speaking);
+          } else {
+            setState(() => _core = CoreState.idle);
+            _afterSpeech();
+          }
+        } else if (_core == CoreState.success) {
+          if (voiceOn && reply.text.isNotEmpty && !_background) {
             // Speak the short spoken line, not the whole written answer.
             await _speakReply(spokenLine(reply.speech, reply.text));
           } else {
-            await Future<void>.delayed(const Duration(milliseconds: 900));
+            await Future<void>.delayed(const Duration(milliseconds: 600));
             if (mounted && _core == CoreState.success) setState(() => _core = CoreState.idle);
             _afterSpeech();
           }
-        } else if (_handsFree && _core == CoreState.approval) {
+        } else if (_handsFree && _core == CoreState.approval && !_background) {
           await _speakReply('That needs your approval. I put it on the screen for you.');
-        } else if (_handsFree && reply.error != null) {
+        } else if (_handsFree && reply.error != null && !_background) {
           await _speakReply('Sorry, that did not work. ${reply.error}');
         } else {
-          if (_core == CoreState.speaking || _core == CoreState.thinking) setState(() => _core = CoreState.idle);
+          if (_core == CoreState.speaking && !_voice.speaking || _core == CoreState.thinking) setState(() => _core = CoreState.idle);
           _afterSpeech();
         }
-        setState(() {});
+        if (mounted) setState(() {});
       },
     );
   }
@@ -512,7 +706,10 @@ class _LiveState extends ConsumerState<_Live> {
   Future<void> _cancel() async {
     final id = _runId;
     if (id == null) return;
+    _following = null;
+    _queued = null;
     await _sub?.cancel();
+    _sub = null;
     try {
       await _api.post('/runs/$id/cancel');
     } catch (_) {}
@@ -537,10 +734,18 @@ class _LiveState extends ConsumerState<_Live> {
     _sttReady = await _stt.initialize(
       onStatus: (s) {
         if ((s == 'done' || s == 'notListening') && mounted) {
+          final barge = _barge;
           setState(() {
             _listening = false;
+            _level = 0;
             if (_core == CoreState.listening) _core = CoreState.idle;
           });
+          if (barge) {
+            // The barge-in microphone timed out while the voice talks: open it again.
+            _barge = false;
+            if (_voice.speaking) Timer(const Duration(milliseconds: 300), _startBargeIn);
+            return;
+          }
           _gate.ended(); // sends whatever was heard, even if no final result came
           if (_handsFree && !_gate.committed) _scheduleListen();
         }
@@ -552,6 +757,10 @@ class _LiveState extends ConsumerState<_Live> {
           _listening = false;
           if (_core == CoreState.listening) _core = CoreState.idle;
         });
+        if (_barge) {
+          _barge = false;
+          return; // barge-in is best effort; the reply keeps playing
+        }
         if (_gate.heard.isNotEmpty) {
           _gate.ended(); // keep what was already heard instead of dropping it
           return;
@@ -575,27 +784,71 @@ class _LiveState extends ConsumerState<_Live> {
     return _sttReady;
   }
 
-  Future<void> _listen() async {
-    if (!mounted || _listening || _runId != null) return;
+  /// Voice v2: the recogniser locale for the chosen listening language (null = the phone's default).
+  String? _localeId;
+  String? _localeFor;
+
+  Future<String?> _resolveLocale() async {
+    final want = ref.read(voicePrefsProvider).listenLang;
+    if (want == _localeFor) return _localeId;
+    _localeFor = want;
+    _localeId = null;
+    if (want == 'auto') return null;
+    try {
+      final ids = (await _stt.locales()).map((l) => l.localeId);
+      _localeId = pickLocale(want, ids);
+    } catch (_) {}
+    if (_localeId == null && mounted) toast(context, '${listenLangs[want]} speech recognition is not installed on this phone. Using the phone default.');
+    return _localeId;
+  }
+
+  /// Recogniser details for the last heard request, sent with it so the model can read a misheard Taglish request.
+  Map<String, dynamic>? _heardVoice;
+
+  /// [barge]: listen while the voice is talking, only to notice the user talking over it.
+  Future<void> _listen({bool barge = false}) async {
+    if (!mounted || _listening || (!barge && _runId != null)) return;
     if (!await _ensureStt()) return;
-    await _voice.stop();
+    final locale = await _resolveLocale();
+    if (!barge) await _voice.stop();
     if (!mounted) return;
+    _heardVoice = null;
+    _barge = barge;
     _gate
       ..reset()
-      ..silence = Duration(milliseconds: _handsFree ? 1500 : 1300);
+      ..silence = Duration(milliseconds: _handsFree ? 1300 : 1100);
     setState(() {
       _listening = true;
-      _core = CoreState.listening;
-      _spoken = '';
+      if (!barge) {
+        _core = CoreState.listening;
+        _spoken = '';
+      }
     });
     await _stt.listen(
       onResult: (SpeechRecognitionResult r) {
+        if (_barge) {
+          if (_voice.speaking && isBargeIn(r.recognizedWords, _spoken)) _interrupt(r.recognizedWords);
+          return;
+        }
         if (_gate.committed) return;
-        setState(() => _input.text = r.recognizedWords);
-        _gate.feed(r.recognizedWords, isFinal: r.finalResult);
+        final words = _spokenEcho == null ? r.recognizedWords : withoutEcho(r.recognizedWords, _spokenEcho!);
+        _heardVoice = {
+          if (locale != null) 'lang': locale.replaceAll('_', '-'),
+          if (r.hasConfidenceRating) 'confidence': double.parse(r.confidence.clamp(0, 1).toStringAsFixed(2)),
+          if (r.alternates.length > 1) 'alternates': [for (final a in r.alternates.skip(1).take(3)) a.recognizedWords],
+        };
+        setState(() => _input.text = words);
+        _gate.feed(words, isFinal: r.finalResult);
       },
-      onSoundLevelChange: (l) => setState(() => _level = ((l + 2) / 12).clamp(0, 1).toDouble()),
+      onSoundLevelChange: (l) {
+        final v = ((l + 2) / 12).clamp(0, 1).toDouble();
+        if (!_barge) {
+          liveLevel.value = v;
+          setState(() => _level = v);
+        }
+      },
       listenOptions: SpeechListenOptions(
+        localeId: locale,
         partialResults: true,
         cancelOnError: true,
         listenMode: ListenMode.dictation,
@@ -605,6 +858,9 @@ class _LiveState extends ConsumerState<_Live> {
       ),
     );
   }
+
+  /// After a barge-in, the same recognition session still holds the echo of what the voice said.
+  String? get _spokenEcho => _spoken.isEmpty ? null : _spoken;
 
   /// The user finished speaking: send it (or end hands-free on a stop phrase).
   void _heardRequest(String words) {
@@ -616,7 +872,18 @@ class _LiveState extends ConsumerState<_Live> {
       _setHandsFree(false);
       return;
     }
-    _send(words);
+    final voice = {...?_heardVoice};
+    _spoken = '';
+    if (_runId != null) {
+      // Heard while the answer is still being written (the user talked over an early spoken line).
+      _queued = words;
+      _queuedVoice = voice;
+      _input.clear();
+      toast(context, 'Got it. I\'ll ask that as soon as this answer finishes.');
+      setState(() => _core = CoreState.thinking);
+      return;
+    }
+    _send(words, voice);
   }
 
   /// New chat is always explicit: reopening the app continues the current conversation (M2).
@@ -624,6 +891,9 @@ class _LiveState extends ConsumerState<_Live> {
     _leaveDraft();
     _remember(newChatPointer);
     _sub?.cancel();
+    _sub = null;
+    _following = null;
+    _queued = null;
     _voice.stop();
     setState(() {
       _spoken = '';
@@ -639,6 +909,7 @@ class _LiveState extends ConsumerState<_Live> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sub?.cancel();
     _stt.cancel();
     _relisten?.cancel();
@@ -660,6 +931,10 @@ class _LiveState extends ConsumerState<_Live> {
     final aiOk = _agentReady;
     final hasChat = _msgs.isNotEmpty;
     final template = _agent?['template'] as String? ?? 'ceo';
+    _publish(template);
+    final scaffold = _scaffold(context, q, prefs, aiOk, hasChat, template);
+    // Background continuity: in the shell, Back and Close minimize (the shell handles Back); nothing is lost.
+    if (widget.embedded) return scaffold;
     // Run 3 / M5: leaving the chat with an upload or an unsent message asks first. Nothing else is lost
     // (answers keep being written on the server; listening stops when the screen closes).
     return PopScope(
@@ -676,11 +951,18 @@ class _LiveState extends ConsumerState<_Live> {
         }
         if (context.mounted) Navigator.of(context).pop();
       },
-      child: Scaffold(
+      child: scaffold,
+    );
+  }
+
+  Widget _scaffold(BuildContext context, QColors q, Prefs prefs, bool aiOk, bool hasChat, String template) {
+    return Scaffold(
       backgroundColor: QColors.liveInk,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        leading: IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.maybePop(context)),
+        leading: widget.embedded
+            ? IconButton(tooltip: 'Minimize', icon: const Icon(Icons.keyboard_arrow_down), onPressed: () => ref.read(liveHostProvider.notifier).minimize())
+            : IconButton(tooltip: 'Close', icon: const Icon(Icons.close), onPressed: () => Navigator.maybePop(context)),
         title: _AgentPicker(
             agents: _agents,
             selected: _agent,
@@ -717,6 +999,18 @@ class _LiveState extends ConsumerState<_Live> {
             },
           ),
           IconButton(tooltip: 'New chat', icon: const Icon(Icons.add_comment_outlined), onPressed: _runId == null ? _newChat : null),
+          if (widget.embedded)
+            IconButton(
+              tooltip: 'End Live AI',
+              icon: const Icon(Icons.close),
+              onPressed: () async {
+                if ((_runId != null || _voice.speaking || _handsFree) &&
+                    !await confirm(context, title: 'End Live AI?', body: 'Listening and speech stop. An answer being written still finishes and is saved in this conversation.', action: 'End')) {
+                  return;
+                }
+                ref.read(liveHostProvider.notifier).end();
+              },
+            ),
         ],
       ),
       body: SafeArea(
@@ -737,6 +1031,7 @@ class _LiveState extends ConsumerState<_Live> {
                     behavior: HitTestBehavior.opaque,
                     onTap: _tapCore,
                     child: EnergyCore(
+                      key: widget.coreKey,
                       state: _core,
                       agent: _liveTemplate ?? template,
                       reduceMotion: prefs.reduceMotion,
@@ -819,7 +1114,6 @@ class _LiveState extends ConsumerState<_Live> {
             ],
           ),
         ]),
-      ),
       ),
     );
   }

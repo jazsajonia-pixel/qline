@@ -11,19 +11,33 @@ import 'api.dart';
 
 /// Voice settings (stored on the device).
 class VoicePrefs {
-  const VoicePrefs({this.engine = 'device', this.voice, this.deviceVoice, this.rate = .5});
+  const VoicePrefs({this.engine = 'device', this.voice, this.deviceVoice, this.rate = .5, this.listenLang = 'auto', this.bargeIn = true});
   final String engine; // device | gemini | openai
   final String? voice; // provider voice id
   final Map<String, String>? deviceVoice; // {name, locale}
   final double rate;
-  VoicePrefs copy({String? engine, String? voice, Map<String, String>? deviceVoice, double? rate, bool clearVoice = false}) =>
-      VoicePrefs(engine: engine ?? this.engine, voice: clearVoice ? null : (voice ?? this.voice), deviceVoice: deviceVoice ?? this.deviceVoice, rate: rate ?? this.rate);
-  Map<String, dynamic> toJson() => {'engine': engine, 'voice': voice, 'deviceVoice': deviceVoice, 'rate': rate};
+
+  /// Voice v2: the language speech recognition listens for: auto (the phone's setting), en-PH, fil-PH or en-US.
+  final String listenLang;
+
+  /// Voice v2: in hands-free, talking over a reply stops it and Qline listens (barge-in).
+  final bool bargeIn;
+  VoicePrefs copy({String? engine, String? voice, Map<String, String>? deviceVoice, double? rate, String? listenLang, bool? bargeIn, bool clearVoice = false}) => VoicePrefs(
+        engine: engine ?? this.engine,
+        voice: clearVoice ? null : (voice ?? this.voice),
+        deviceVoice: deviceVoice ?? this.deviceVoice,
+        rate: rate ?? this.rate,
+        listenLang: listenLang ?? this.listenLang,
+        bargeIn: bargeIn ?? this.bargeIn,
+      );
+  Map<String, dynamic> toJson() => {'engine': engine, 'voice': voice, 'deviceVoice': deviceVoice, 'rate': rate, 'listenLang': listenLang, 'bargeIn': bargeIn};
   static VoicePrefs fromJson(Map<String, dynamic> j) => VoicePrefs(
         engine: j['engine'] as String? ?? 'device',
         voice: j['voice'] as String?,
         deviceVoice: (j['deviceVoice'] as Map?)?.map((k, v) => MapEntry('$k', '$v')),
         rate: (j['rate'] as num?)?.toDouble() ?? .5,
+        listenLang: listenLangs.containsKey(j['listenLang']) ? j['listenLang'] as String : 'auto',
+        bargeIn: j['bargeIn'] as bool? ?? true,
       );
 }
 
@@ -46,6 +60,54 @@ class VoicePrefsNotifier extends Notifier<VoicePrefs> {
     state = p;
     _storage.write(key: 'voice', value: jsonEncode(p.toJson()));
   }
+}
+
+/// Voice v2: languages speech recognition can listen for, with their labels.
+const listenLangs = {'auto': 'Phone default', 'en-PH': 'English (Philippines)', 'fil-PH': 'Filipino', 'en-US': 'English (US)'};
+
+/// Picks the recogniser locale id for [lang] from the ids the phone offers (they come as "fil_PH",
+/// "fil-PH", "tl_PH"...). Null means "use the phone's default", also when the language is not installed.
+String? pickLocale(String lang, Iterable<String> available) {
+  if (lang == 'auto') return null;
+  String norm(String x) => x.replaceAll('_', '-').toLowerCase();
+  final want = norm(lang);
+  final ids = available.toList();
+  final exact = ids.where((i) => norm(i) == want).firstOrNull;
+  if (exact != null) return exact;
+  // Filipino is also published under the older code "tl".
+  if (want == 'fil-ph') {
+    final tl = ids.where((i) => norm(i) == 'tl-ph' || norm(i).startsWith('fil') || norm(i).startsWith('tl')).firstOrNull;
+    if (tl != null) return tl;
+  }
+  final lang2 = want.split('-').first;
+  return ids.where((i) => norm(i).split('-').first == lang2).firstOrNull;
+}
+
+String _norm(String w) => w.toLowerCase().replaceAll(RegExp(r"[^a-z0-9'ñ]"), '');
+
+/// Words the user says to cut the voice off, in English and Filipino.
+const _interrupts = {'stop', 'wait', 'hold', 'teka', 'sandali', 'tama', 'hinto', 'tigil', 'pause', 'quiet'};
+
+/// Voice v2 barge-in: the microphone also hears the phone's own voice. Words that are part of what Qline is
+/// saying ([spoken]) are echo; the user is interrupting when at least two other words were heard, or a
+/// single interrupt word like "stop" or "teka".
+bool isBargeIn(String heard, String spoken) {
+  final own = wordsOf(spoken).map(_norm).toSet();
+  final words = wordsOf(heard).map(_norm).where((w) => w.isNotEmpty).toList();
+  final fresh = words.where((w) => !own.contains(w)).toList();
+  if (fresh.length >= 2) return true;
+  return words.isNotEmpty && words.length <= 3 && words.any(_interrupts.contains);
+}
+
+/// What the user said after the echo of [spoken] (leading echo words are dropped).
+String withoutEcho(String heard, String spoken) {
+  final own = wordsOf(spoken).map(_norm).toSet();
+  final words = wordsOf(heard);
+  var i = 0;
+  while (i < words.length && own.contains(_norm(words[i]))) {
+    i++;
+  }
+  return words.skip(i).join(' ');
 }
 
 /// Removes markdown and symbols that sound bad when read aloud.
@@ -89,6 +151,9 @@ String spokenLine(String? speech, String text, {int maxChars = 220}) {
 const _trailing = {
   'and', 'but', 'or', 'so', 'because', 'cause', 'the', 'a', 'an', 'to', 'of', 'with', 'for', 'if', 'then', 'um', 'uh', 'erm',
   'like', 'my', 'your', 'about', 'in', 'on', 'at', 'is', 'are', 'was', 'that', 'which', 'also', 'plus', 'maybe', 'i',
+  // Voice v2: Filipino / Taglish connectors and fillers ("at", "pero", "kasi", "yung", "ano"...).
+  'ang', 'ng', 'sa', 'na', 'pero', 'kasi', 'tapos', 'para', 'yung', 'iyong', 'mga', 'ay', 'kung', 'dahil', 'eh', 'ano', 'ah',
+  'parang', 'siguro', 'saka', 'pati', 'kay', 'ni', 'nang', 'kapag', 'pag', 'bale', 'ganun', 'ganito',
 };
 
 /// How long to wait for more speech after [words] before sending (M6 adaptive end-of-turn).
@@ -198,7 +263,11 @@ List<String> chunk(String text) {
 /// Plays a reply aloud and reports the spoken word index and a 0..1 loudness level as it goes,
 /// so the energy core pulses with each word as it is spoken.
 class Speaker {
-  Speaker({required this.onWord, required this.onLevel, required this.onDone, required this.onNotice});
+  Speaker({required this.onWord, required this.onLevel, required this.onDone, required this.onNotice, this.onStart});
+
+  /// Called with each line as it starts playing (a queued line starts after the previous one).
+  final void Function(String text)? onStart;
+  final List<String> _queue = [];
   final void Function(int index) onWord;
   final void Function(double level) onLevel;
   final void Function() onDone;
@@ -259,7 +328,17 @@ class Speaker {
 
   Future<Map<String, String>?> bestDeviceVoice() async => (await deviceVoices()).firstOrNull;
 
+  /// Voice v2: speaks [text] after whatever is playing now (early spoken lines arrive while text streams).
+  Future<void> enqueue(Api api, String text, VoicePrefs p) async {
+    if (_speaking) {
+      _queue.add(text);
+      return;
+    }
+    await speak(api, text, p);
+  }
+
   Future<void> stop() async {
+    _queue.clear();
     _session++;
     _tick?.cancel();
     _speaking = false;
@@ -281,10 +360,18 @@ class Speaker {
   /// Speaks [text]. Word indexes refer to wordsOf(speakable(text)).
   Future<void> speak(Api api, String text, VoicePrefs p) async {
     await stop();
+    return _speakOne(api, text, p);
+  }
+
+  Future<void> _speakOne(Api api, String text, VoicePrefs p) async {
     final my = ++_session;
     final clean = speakable(text);
-    if (clean.isEmpty) return onDone();
+    if (clean.isEmpty) {
+      if (_queue.isNotEmpty) return _speakOne(api, _queue.removeAt(0), p);
+      return onDone();
+    }
     _speaking = true;
+    onStart?.call(text);
     final parts = chunk(clean);
     var offset = 0;
     var engine = p.engine;
@@ -314,6 +401,7 @@ class Speaker {
       offset += wordsOf(part).length;
     }
     if (my != _session) return;
+    if (_queue.isNotEmpty) return _speakOne(api, _queue.removeAt(0), p);
     _speaking = false;
     _tick?.cancel();
     onLevel(0);

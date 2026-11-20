@@ -5,7 +5,7 @@ import { withTenant, type Q } from '../core/db';
 import { autonomyState, isStopped, reserveExternalAction, settleReservation } from '../core/controls';
 import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { currentSnapshot, findReusable, ledgerDigest, ownXid, remember, reusable, type LedgerScope } from './context-ledger';
-import { MetaFilter, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
+import { MetaFilter, SayFilter, voiceInstructions, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
 import { reportKey } from './keys';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName, type Artifact } from './tools';
@@ -70,7 +70,7 @@ Rules you must always follow:
 - If you do not know, say so. Do not invent records, numbers or dates.
 - Never show tool names or internal ids (like tasks.search or business.snapshot) to the user. Say what you did in plain words, e.g. "I checked your tasks".
 - Format with simple Markdown: short paragraphs, "-" bullet lists, **bold** for the few key items, \`code\` only for literal values. Small tables only for short comparisons. No HTML, no headings deeper than ###.
-- Keep answers short and practical. Today is {{today}} (UTC).`;
+- Answer depth: match the question. A simple question gets a direct answer in a sentence or two. Anything with more to it gets the direct answer first, then the useful context a capable colleague would add: why it matters, what it depends on, the key caveat or risk, and the practical next step. Prefer specifics from the user's data over generic advice. No filler, no restating the question, no long preambles or recaps; stop when the useful part is said. Keep uncertainty visible. Today is {{today}} (UTC).`;
 
 /** Wraps data the model must not obey. A `</data` inside the body is neutralised so it cannot close the block (docs/14 §2.7). */
 export function untrusted(source: string, body: unknown) {
@@ -198,6 +198,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
           ]
         : []),
     META_INSTRUCTIONS,
+    ...(latest?.meta?.voice ? [voiceInstructions(latest.meta.voice)] : []),
   ].join('\n\n');
 
   // v1.6: attachments become untrusted context on their message; images go to vision models with the latest message only.
@@ -237,6 +238,8 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
   let parked = false;
   const refs: unknown[] = [];
   const artifacts: Artifact[] = [];
+  // Voice v2: spoken lines the model writes early, sent as 'speech' events so the phone can talk while text streams.
+  const say = new SayFilter();
 
   try {
     for (let turn = 0; turn < maxCalls + 1; turn++) {
@@ -252,7 +255,9 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
           if (ev.type === 'reasoning') reasoning += ev.text;
           else if (ev.type === 'token') {
             turnText += ev.text;
-            const show = filter.push(ev.text);
+            const out = say.push(ev.text);
+            for (const line of out.said) await emit('speech', { text: line });
+            const show = filter.push(out.show);
             if (show) {
               emitted = true;
               await emit('token', { text: show });
@@ -287,6 +292,8 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
         const ok = keyId;
         await db((q) => reportKey(q, ok, 'ok')).catch(() => {});
       }
+      const held = filter.push(say.flush());
+      if (held) await emit('token', { text: held });
       const tail = filter.flush();
       if (tail) await emit('token', { text: tail });
       raw += turnText;
@@ -327,7 +334,8 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
   }
 
   if (refs.length) await emit('citation', { refs });
-  const meta = { ...parseMeta(raw, text), ...(artifacts.length ? { artifacts } : {}) };
+  const parsed = parseMeta(raw, text);
+  const meta = { ...parsed, ...(say.spoken ? { speech: say.spoken } : {}), ...(artifacts.length ? { artifacts } : {}) };
   if (text.trim()) await emit('meta', meta);
   await finish(parked ? 'waiting_approval' : 'completed', text, usage, undefined, refs, meta);
   await emit('done', { usage: { inputTokens: usage.i, outputTokens: usage.o }, status: parked ? 'waiting_approval' : 'completed' });
