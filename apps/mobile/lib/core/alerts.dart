@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:flutter/widgets.dart';
@@ -24,8 +25,11 @@ class UnreadAlerts extends Notifier<int> {
 /// foreground. When the app is fully closed nothing is checked; real push needs Firebase
 /// Cloud Messaging (see the v1.3 handoff).
 class AlertWatcher extends ConsumerStatefulWidget {
-  const AlertWatcher({super.key, required this.child, this.interval = const Duration(seconds: 60)});
+  const AlertWatcher({super.key, required this.child, this.interval = const Duration(seconds: 60), this.onOpen});
   final Widget child;
+
+  /// Called with a notification's payload when the user taps it in the system tray (see [alertPayload]).
+  final void Function(String payload)? onOpen;
   final Duration interval;
   @override
   ConsumerState<AlertWatcher> createState() => _AlertWatcherState();
@@ -43,6 +47,7 @@ class _AlertWatcherState extends ConsumerState<AlertWatcher> with WidgetsBinding
     priority: Priority.high,
     color: Color(0xFFF5C451),
   );
+  static void Function(String payload)? _onOpen;
   Timer? _timer;
   bool _busy = false;
 
@@ -53,6 +58,7 @@ class _AlertWatcherState extends ConsumerState<AlertWatcher> with WidgetsBinding
   void initState() {
     super.initState();
     if (!_enabled) return;
+    _onOpen = widget.onOpen;
     WidgetsBinding.instance.addObserver(this);
     _init().then((_) => _check());
     _timer = Timer.periodic(widget.interval, (_) => _check());
@@ -73,12 +79,22 @@ class _AlertWatcherState extends ConsumerState<AlertWatcher> with WidgetsBinding
   Future<void> _init() async {
     if (_ready) return;
     try {
-      await _plugin.initialize(settings: const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
+      await _plugin.initialize(
+        settings: const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')),
+        onDidReceiveNotificationResponse: (r) => _open(r.payload),
+      );
+      // The app was started by tapping a notification.
+      final launch = await _plugin.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp == true) _open(launch!.notificationResponse?.payload);
       await _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.requestNotificationsPermission();
       _ready = true;
     } catch (_) {
       // No notifications on this device; the in-app bell still works.
     }
+  }
+
+  static void _open(String? payload) {
+    if (payload != null && payload.isNotEmpty) _onOpen?.call(payload);
   }
 
   Future<void> _check() async {
@@ -107,6 +123,7 @@ class _AlertWatcherState extends ConsumerState<AlertWatcher> with WidgetsBinding
             title: n['title']?.toString() ?? 'Qline',
             body: n['body']?.toString(),
             notificationDetails: const NotificationDetails(android: _channel),
+            payload: alertPayload(n),
           );
         }
         if (fresh.length > 3) {
@@ -133,4 +150,17 @@ List<Map> newAlerts(List<Map> items, String seenIso) {
     final at = DateTime.tryParse('${n['created_at']}');
     return at != null && (seen == null || at.isAfter(seen));
   }).toList();
+}
+
+/// Tap payload for a notification: its ref as JSON when Qline has a screen for it (content jobs), else null.
+String? alertPayload(Map n) {
+  var r = n['ref'];
+  if (r is String) {
+    try {
+      r = jsonDecode(r);
+    } catch (_) {
+      return null;
+    }
+  }
+  return r is Map && r['kind'] == 'content_job' && r['id'] is String ? jsonEncode({'kind': 'content_job', 'id': r['id']}) : null;
 }

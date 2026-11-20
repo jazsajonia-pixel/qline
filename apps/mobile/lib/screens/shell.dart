@@ -9,6 +9,7 @@ import '../ui/theme.dart';
 import '../ui/widgets.dart';
 import 'approvals.dart';
 import 'business.dart';
+import 'content.dart' show pageForRef;
 import 'home.dart';
 import 'library.dart';
 import 'live.dart';
@@ -59,6 +60,10 @@ class _ShellState extends ConsumerState<Shell> {
         confirmExit(context);
       },
       child: AlertWatcher(
+      onOpen: (payload) {
+        final page = pageForRef(payload);
+        if (page != null && mounted) push(context, page);
+      },
       child: Scaffold(
         appBar: AppBar(
           titleSpacing: 12,

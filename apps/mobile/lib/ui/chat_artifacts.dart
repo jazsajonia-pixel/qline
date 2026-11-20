@@ -416,6 +416,9 @@ IconData kindIcon(String? kind) => switch (kind) { 'image' => Icons.image_outlin
 @visibleForTesting
 Future<Object?> Function(String name, Uint8List bytes) saveFileBytes = (name, bytes) => FilePicker.saveFile(fileName: name, bytes: bytes);
 
+/// Public entry for other screens (content handoff PDFs); tests still swap [saveFileBytes].
+Future<Object?> saveDeviceFile(String name, Uint8List bytes) => saveFileBytes(name, bytes);
+
 Future<void> saveFileCopy(BuildContext context, WidgetRef ref, String fileId, String name) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
   try {
