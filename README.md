@@ -41,7 +41,7 @@ Release signing reads `apps/mobile/android/key.properties`. That file and the ke
 
 ## Honest status (v1.10.0)
 
-v1.10.0 expands GitHub beyond issues: the AI can browse repositories, read and search code, inspect branches, commits, pull requests and CI, and, only after you approve a diff, create working branches, commit files and open, edit or comment-review pull requests. It never pushes to the default or a protected branch, merges, force-pushes, changes workflows or reads secrets. Needs API 1.10.0 with migration 0025 and the GitHub App permissions in [docs/24](docs/24-GITHUB_INTEGRATION.md), which also lists what was and wasn't verified.
+v1.10.0 expands GitHub beyond issues: the AI can browse repositories, read and search code, inspect branches, commits, pull requests and CI, and, only after you approve a diff, create working branches, commit files and open, edit or comment-review pull requests. It never pushes to the default or a protected branch, merges, force-pushes, changes workflows or reads secrets. Production runs API 1.10.0 with migration 0025 (applied 2026-11-20). It needs the GitHub App permissions in [docs/24](docs/24-GITHUB_INTEGRATION.md), which also lists what was and wasn't verified.
 
 ### Earlier notes (v1.9.0)
 
