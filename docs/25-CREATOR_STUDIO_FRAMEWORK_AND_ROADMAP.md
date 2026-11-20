@@ -1,4 +1,4 @@
-# 24 — Creator Studio: reusable framework, workflow contract and completion roadmap
+# 25 — Creator Studio: reusable framework, workflow contract and completion roadmap
 
 **Status:** Product specification and roadmap; implementation is partial.  
 **Prepared:** 2026-11-20  
@@ -286,7 +286,7 @@ This roadmap is the parent scope for the remaining Creator Studio product. Each 
 | CS-10 — Unified scheduler and publisher | Calendar/queue, timezone handling, per-platform jobs, approvals, idempotency, rate limits, unknown outcomes, retries and partial failures | No duplicate publish under simulated timeouts/retries; real provider schedule/reconciliation verified |
 | CS-11 — Analytics and community operations | Post-linked metrics, trend summaries, comment inbox/triage and approval-gated responses where supported | Data provenance, platform limitations and tenant isolation verified |
 | CS-12 — Secure skill registry | Discover, inspect, pin, scan, approve, install, test, assign, disable, update and rollback skills | Malicious package fixtures rejected; no unapproved permissions or execution |
-| CS-13 — GitHub administration | Permissioned repository write/admin workflows with diffs, previews, approval and audit | Least-privilege app installation and safe write tests across isolated repos |
+| CS-13 — GitHub administration | Permissioned repository write/admin workflows with diffs, previews, approval and audit. First slice shipped in v1.10.0 ([docs/24](24-GITHUB_INTEGRATION.md)): code/branch/commit/PR/CI reads and approval-gated branch, commit and PR writes; issue/project administration and release workflows remain | Least-privilege app installation and safe write tests across isolated repos |
 | CS-14 — Production hardening and release | Accessibility, responsive/mobile QA, observability, quotas/cost controls, privacy/deletion/export, provider review and disaster recovery | Full CI, security review, real-provider E2E and physical-device checklist pass |
 
 ### Recommended execution order

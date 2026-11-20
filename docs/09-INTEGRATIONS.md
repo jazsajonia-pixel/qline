@@ -58,7 +58,7 @@ The Google scope classifications above (restricted/sensitive) reflect Google's p
 
 Source: `packages/policy/src/index.ts`. Content returned by every connector is wrapped as untrusted data before the model sees it.
 
-Social capability status at Qline v1.9.0: none of Facebook Pages, Instagram Professional, YouTube or TikTok has a native OAuth/publishing implementation yet. The rows above are roadmap requirements, not available connectors. The parent plan and tenant-safe Creator Studio workflow are in [docs/24](24-CREATOR_STUDIO_FRAMEWORK_AND_ROADMAP.md).
+Social capability status at Qline v1.9.0: none of Facebook Pages, Instagram Professional, YouTube or TikTok has a native OAuth/publishing implementation yet. The rows above are roadmap requirements, not available connectors. The parent plan and tenant-safe Creator Studio workflow are in [docs/25](25-CREATOR_STUDIO_FRAMEWORK_AND_ROADMAP.md).
 
 ## 3. Integration UX rules
 

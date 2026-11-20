@@ -45,7 +45,7 @@ v1.10.0 expands GitHub beyond issues: the AI can browse repositories, read and s
 
 ### Earlier notes (v1.9.0)
 
-v1.9.0 adds the first Content Studio slice under Command Center: Drive-based handoffs to an outside editor, with file/metadata verification before human review. This is not the complete Creator Studio. The reusable Creator Studio framework, tenant-safe onboarding, end-to-end production workflow, visual QA, social publishing, scheduler, analytics, skill registry and expanded GitHub administration remain on the roadmap. See [docs/24](docs/24-CREATOR_STUDIO_FRAMEWORK_AND_ROADMAP.md) for the parent scope and completion gates. The handoff requires API 1.9.0 with migrations 0020–0024; editor spec: [docs/23](docs/23-EDITOR_HANDOFF_SPEC.md); implementation evidence: [docs/22](docs/22-CONTENT_HANDOFF_BASELINE.md).
+v1.9.0 adds the first Content Studio slice under Command Center: Drive-based handoffs to an outside editor, with file/metadata verification before human review. This is not the complete Creator Studio. The reusable Creator Studio framework, tenant-safe onboarding, end-to-end production workflow, visual QA, social publishing, scheduler, analytics, skill registry and expanded GitHub administration remain on the roadmap. See [docs/25](docs/25-CREATOR_STUDIO_FRAMEWORK_AND_ROADMAP.md) for the parent scope and completion gates. The handoff requires API 1.9.0 with migrations 0020–0024; editor spec: [docs/23](docs/23-EDITOR_HANDOFF_SPEC.md); implementation evidence: [docs/22](docs/22-CONTENT_HANDOFF_BASELINE.md).
 
 ### Earlier notes (v1.8.0)
 
