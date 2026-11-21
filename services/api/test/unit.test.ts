@@ -695,3 +695,36 @@ describe('v1.11 Facebook Pages (pure)', () => {
     expect(appsecretProof('token', 'secret')).not.toBe(appsecretProof('token', 'other'));
   });
 });
+
+describe('v1.12 live conversation: spoken part vs on-screen details', () => {
+  it('ScreenFilter splits at <qline-screen> even when the marker is cut across tokens, and never leaks it', async () => {
+    const { ScreenFilter } = await import('../src/agent/meta');
+    const f = new ScreenFilter();
+    const parts = ['Here are ', 'your leads. <qli', 'ne-scr', 'een>\n- Ana\n', '- Ben'].flatMap((c) => f.push(c));
+    parts.push(...f.flush());
+    expect(parts.filter((p) => p.say).map((p) => p.text).join('')).toBe('Here are your leads.');
+    const all = parts.map((p) => p.text).join('');
+    expect(all).not.toContain('<qli');
+    expect(all).toContain('- Ana\n- Ben');
+    expect(f.onScreen).toBe(true);
+  });
+
+  it('a lone "<" that is not the marker is still spoken; no marker means everything is spoken', async () => {
+    const { ScreenFilter } = await import('../src/agent/meta');
+    const f = new ScreenFilter();
+    const parts = [...f.push('Is 3 '), ...f.push('<'), ...f.push(' 5? Yes.'), ...f.flush()];
+    expect(parts.every((p) => p.say)).toBe(true);
+    expect(parts.map((p) => p.text).join('')).toBe('Is 3 < 5? Yes.');
+  });
+
+  it('live instructions keep the safety rules for unclear names and numbers and drop the old spoken-line block', async () => {
+    const { liveVoiceInstructions, stripMeta } = await import('../src/agent/meta');
+    const s = liveVoiceInstructions({ mode: 'live', lang: 'fil-PH', confidence: 0.4, alternates: ['<b>Ana</b> Reyes'] });
+    expect(s).toContain('fil-PH');
+    expect(s).toContain('Do not guess names or numbers');
+    expect(s).toContain('Taglish');
+    expect(s).not.toContain('<qline-say>');
+    expect(s).not.toContain('<b>');
+    expect(stripMeta('Spoken.\n<qline-screen>\n- detail<qline-meta>{"speech":""}</qline-meta>')).toBe('Spoken.\n\n- detail');
+  });
+});
