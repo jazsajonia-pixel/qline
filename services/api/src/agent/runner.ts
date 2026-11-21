@@ -5,7 +5,7 @@ import { withTenant, type Q } from '../core/db';
 import { autonomyState, isStopped, reserveExternalAction, settleReservation } from '../core/controls';
 import { safeError, trackExternal, UNKNOWN_SUMMARY } from '../core/external';
 import { currentSnapshot, findReusable, ledgerDigest, ownXid, remember, reusable, type LedgerScope } from './context-ledger';
-import { MetaFilter, SayFilter, voiceInstructions, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
+import { liveVoiceInstructions, MetaFilter, SayFilter, ScreenFilter, voiceInstructions, META_INSTRUCTIONS, parseMeta, stripMeta, type ReplyMeta } from './meta';
 import { reportKey } from './keys';
 import { resolveModel } from './models';
 import { fromModelName, getTool, toolSpecs, toModelName, type Artifact } from './tools';
@@ -47,19 +47,54 @@ export function previewArgs(a: any) {
   return { ...a, files: a.files.map((f: any) => (f && typeof f.content === 'string' ? { ...f, content: `[${f.content.length} characters, shown in the diff]` } : f)) };
 }
 
-export type Emit = (event: string, data: unknown) => Promise<void>;
+export type Emit = ((event: string, data: unknown) => Promise<void>) & { flush?: () => Promise<void> };
 
-/** Persists an event to run_events (for replay on reconnect) and forwards it to the live stream. */
+/** Events that are written live first; their row is stored in order behind them (v1.12: tokens never wait for a DB round trip). */
+const LIVE_FIRST = new Set(['token', 'speech']);
+
+/**
+ * Persists an event to run_events (for replay on reconnect) and forwards it to the live stream.
+ * Rows are written in order through one chain. Token events go to the phone first and are stored right
+ * behind, so streaming speed does not depend on database latency; every other event (tool steps, approvals,
+ * errors, done) is stored before it is sent, and `flush()` waits for everything before the run settles.
+ */
 export function makeEmitter(ctx: RunCtx, runId: string, live?: (seq: number, event: string, data: unknown) => Promise<void>): Emit {
   let seq = 0;
-  return async (event, data) => {
+  let chain: Promise<void> = Promise.resolve();
+  let failure: unknown = null;
+  const store = (s: number, event: string, data: unknown) => {
+    chain = chain.then(() =>
+      withTenant({ orgId: ctx.orgId, userId: ctx.userId }, (q) =>
+        q.exec('insert into run_events (org_id, run_id, seq, event, data) values ($1,$2,$3,$4,$5)', [ctx.orgId, runId, s, event, JSON.stringify(data ?? {})]),
+      ).then(
+        () => undefined,
+        (e) => {
+          failure ??= e;
+        },
+      ),
+    );
+    return chain;
+  };
+  const emit: Emit = async (event, data) => {
     seq += 1;
     const s = seq;
-    await withTenant({ orgId: ctx.orgId, userId: ctx.userId }, (q) =>
-      q.exec('insert into run_events (org_id, run_id, seq, event, data) values ($1,$2,$3,$4,$5)', [ctx.orgId, runId, s, event, JSON.stringify(data ?? {})]),
-    );
+    if (LIVE_FIRST.has(event)) {
+      void store(s, event, data);
+      if (live) await live(s, event, data).catch(() => {});
+      return;
+    }
+    await store(s, event, data);
+    if (failure) {
+      const e = failure;
+      failure = null;
+      throw e;
+    }
     if (live) await live(s, event, data).catch(() => {});
   };
+  emit.flush = async () => {
+    await chain;
+  };
+  return emit;
 }
 
 const SYSTEM_POLICY = `You are an AI agent inside Qline, a business operating system.
@@ -121,9 +156,26 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
   const fresh = !!latest && (latest.meta?.fresh === true || wantsFresh(String(latest.content ?? '')));
   const reuse = { scope: fresh ? null : scope, remember: scope };
   const fileById = new Map(files.map((f) => [f.id, f]));
+  // v1.12 live conversation: the reply itself is spoken as it streams (token events carry say: true).
+  const live = latest?.meta?.voice?.mode === 'live';
+  let firstTokenAt = 0;
 
+  /**
+   * Settles the run. v1.12: only a run that is still 'running' can settle; one that was cancelled (the user
+   * talked over it, pressed Stop or the run expired) keeps its status, and its reply is never stored after
+   * the fact (the cancel already saved what was streamed, marked as interrupted). Returns false then.
+   */
   const finish = async (status: 'completed' | 'failed' | 'waiting_approval', text: string, usage: { i: number; o: number }, error?: string, refs: unknown[] = [], meta?: ReplyMeta & { artifacts?: Artifact[] }) => {
-    await db(async (q) => {
+    await emit.flush?.();
+    return db(async (q) => {
+      const own = await q.one(
+        `update agent_runs set status=$2, input_tokens=$3, output_tokens=$4, error=$5, ended_at=case when $2='waiting_approval' then null else now() end where id=$1 and status='running' returning id`,
+        [runId, status, usage.i, usage.o, error ?? null],
+      );
+      if (!own) {
+        await q.exec('update agent_runs set input_tokens=$2, output_tokens=$3 where id=$1', [runId, usage.i, usage.o]);
+        return false;
+      }
       if (text.trim()) {
         await q.exec(`insert into conversation_messages (org_id, conversation_id, role, content, run_id, refs, meta) values ($1,$2,'assistant',$3,$4,$5,$6)`, [
           ctx.orgId,
@@ -142,13 +194,6 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
           runId,
         ]);
       }
-      await q.exec(`update agent_runs set status=$2, input_tokens=$3, output_tokens=$4, error=$5, ended_at=case when $2='waiting_approval' then null else now() end where id=$1`, [
-        runId,
-        status,
-        usage.i,
-        usage.o,
-        error ?? null,
-      ]);
       await q.exec('update conversations set updated_at=now() where id=$1', [run.conversation_id]);
       await audit(q, {
         orgId: ctx.orgId,
@@ -159,7 +204,15 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
         correlationId: run.correlation_id,
         detail: { inputTokens: usage.i, outputTokens: usage.o },
       });
+      return true;
     });
+  };
+
+  /** v1.12: the run was cancelled while it ran. Nothing more is generated; tool calls already running were allowed to finish. */
+  const settleCancelled = async () => {
+    await finish('completed', '', usage);
+    await emit('done', { usage: { inputTokens: usage.i, outputTokens: usage.o }, status: 'cancelled' });
+    await emit.flush?.();
   };
 
   if (run.agent_status !== 'active') {
@@ -198,7 +251,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
           ]
         : []),
     META_INSTRUCTIONS,
-    ...(latest?.meta?.voice ? [voiceInstructions(latest.meta.voice)] : []),
+    ...(latest?.meta?.voice ? [live ? liveVoiceInstructions(latest.meta.voice) : voiceInstructions(latest.meta.voice)] : []),
   ].join('\n\n');
 
   // v1.6: attachments become untrusted context on their message; images go to vision models with the latest message only.
@@ -208,6 +261,12 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     const h: any = history[i];
     const atts = ((h.meta?.attachments ?? []) as { id: string }[]).map((a) => fileById.get(a.id)).filter((f): f is NonNullable<typeof f> => !!f);
     const added = h.role === 'user' ? ((h.meta?.knowledge ?? []) as { id: string }[]).map((k) => knowledgeById.get(k.id)).filter((k): k is NonNullable<typeof k> => !!k) : [];
+    // v1.12: a reply the user talked over. The model is told what was actually heard, so it neither repeats it nor assumes it landed.
+    if (h.role === 'assistant' && h.meta?.interrupted) {
+      const heard = typeof h.meta.heard === 'string' ? h.meta.heard.trim() : '';
+      messages.push({ role: 'assistant', content: `(This reply was interrupted by the user${heard ? `; they heard only: "${heard.replace(/"/g, "'").slice(0, 1500)}"` : ' before they heard it'}.)\n${h.content}` });
+      continue;
+    }
     const withKnowledge = added.length
       ? `${h.content}\n\nKnowledge the user added to this message (use it; say if an entry is only "proposed"):\n${added.map((k) => untrusted(`knowledge:${k.id}`, { title: k.title, status: k.status, body: k.body })).join('\n')}`
       : h.content;
@@ -250,6 +309,14 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
       let reasoning = '';
       const filter = new MetaFilter();
       let emitted = false;
+      const screen = live ? new ScreenFilter() : null;
+      const sendShown = async (show: string) => {
+        if (!show) return;
+        emitted = true;
+        if (!firstTokenAt) firstTokenAt = Date.now();
+        if (!screen) return emit('token', { text: show });
+        for (const part of screen.push(show)) await emit('token', part.say ? { text: part.text, say: true } : { text: part.text });
+      };
       try {
         for await (const ev of provider.stream({ model, messages, tools: toolCount < maxCalls && tools.length ? tools : undefined, maxTokens: 4096 }, signal)) {
           if (ev.type === 'reasoning') reasoning += ev.text;
@@ -257,17 +324,14 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
             turnText += ev.text;
             const out = say.push(ev.text);
             for (const line of out.said) await emit('speech', { text: line });
-            const show = filter.push(out.show);
-            if (show) {
-              emitted = true;
-              await emit('token', { text: show });
-            }
+            await sendShown(filter.push(out.show));
           } else if (ev.type === 'tool_call') calls.push(ev.call);
           else if (ev.type === 'usage') usage = { i: usage.i + ev.inputTokens, o: usage.o + ev.outputTokens };
         }
       } catch (e) {
         // M10: record the key's health. A rate limit or rejected key before anything was shown or done in this turn
         // is retried once on another eligible key (never for an agent pinned to one key).
+        if (signal?.aborted) throw e;
         const pe = e instanceof ProviderError ? e : null;
         const outcome = pe?.code === 'PROVIDER_RATE_LIMITED' ? 'rate_limited' : pe?.code === 'PROVIDER_AUTH_FAILED' ? 'auth_failed' : 'error';
         const failed = keyId;
@@ -292,16 +356,19 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
         const ok = keyId;
         await db((q) => reportKey(q, ok, 'ok')).catch(() => {});
       }
-      const held = filter.push(say.flush());
-      if (held) await emit('token', { text: held });
-      const tail = filter.flush();
-      if (tail) await emit('token', { text: tail });
+      await sendShown(filter.push(say.flush()));
+      await sendShown(filter.flush());
+      for (const part of screen?.flush() ?? []) await emit('token', part.say ? { text: part.text, say: true } : { text: part.text });
+      if (signal?.aborted) break;
       raw += turnText;
       text += stripMeta(turnText);
       if (!calls.length) break;
 
       messages.push({ role: 'assistant', content: turnText || null, tool_calls: calls, reasoning_content: reasoning || undefined });
       for (const call of calls) {
+        // v1.12: after a cancel, steps that have not started are dropped (nothing was recorded or sent for them);
+        // a step already running is never cut off halfway, it finishes and is recorded once.
+        if (signal?.aborted) break;
         toolCount += 1;
         const name = fromModelName(call.function.name);
         const result = await handleToolCall(ctx, run, name, call, toolCount, allow, policy, emit, reuse);
@@ -320,6 +387,7 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
       }
     }
   } catch (e) {
+    if (signal?.aborted) return settleCancelled();
     const pe = e instanceof ProviderError ? e : new ProviderError('PROVIDER_UNAVAILABLE', (e as Error).message, true);
     const code = pe.code === 'PROVIDER_NOT_CONFIGURED' ? 'AI_PROVIDER_NOT_CONFIGURED' : pe.code;
     const human =
@@ -333,12 +401,16 @@ export async function executeRun(ctx: RunCtx, runId: string, emit: Emit, signal?
     return;
   }
 
+  if (signal?.aborted) return settleCancelled();
   if (refs.length) await emit('citation', { refs });
   const parsed = parseMeta(raw, text);
   const meta = { ...parsed, ...(say.spoken ? { speech: say.spoken } : {}), ...(artifacts.length ? { artifacts } : {}) };
   if (text.trim()) await emit('meta', meta);
-  await finish(parked ? 'waiting_approval' : 'completed', text, usage, undefined, refs, meta);
-  await emit('done', { usage: { inputTokens: usage.i, outputTokens: usage.o }, status: parked ? 'waiting_approval' : 'completed' });
+  const settled = await finish(parked ? 'waiting_approval' : 'completed', text, usage, undefined, refs, meta);
+  // v1.12: server-side timings, so the phone can split its end-to-end latency into network and model time.
+  const timing = { firstTokenMs: firstTokenAt ? firstTokenAt - started : null, totalMs: Date.now() - started };
+  await emit('done', { usage: { inputTokens: usage.i, outputTokens: usage.o }, status: settled ? (parked ? 'waiting_approval' : 'completed') : 'cancelled', timing });
+  await emit.flush?.();
 }
 
 async function handleToolCall(

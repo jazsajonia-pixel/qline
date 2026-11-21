@@ -375,6 +375,8 @@ agentRoutes.post('/conversations/:id/messages', async (c) => {
         // Voice v2: the message was spoken; recogniser language, confidence and alternates help the model read it.
         voice: z
           .object({
+            // v1.12: a live conversation; the reply itself is spoken while it streams (docs/30).
+            mode: z.literal('live').optional(),
             lang: z.string().max(16).regex(/^[A-Za-z-_]*$/).optional(),
             confidence: z.number().min(-1).max(1).optional(),
             alternates: z.array(z.string().max(300)).max(3).optional(),
@@ -493,11 +495,44 @@ agentRoutes.get('/runs/:id', async (c) => {
   return c.json(data);
 });
 
+/**
+ * v1.12: runs executing in this instance, so a cancel stops generation at once. Another instance notices
+ * the cancelled status within [CANCEL_POLL_MS] (the stream polls it), then aborts the same way.
+ */
+const executing = new Map<string, AbortController>();
+export const CANCEL_POLL_MS = 400;
+
 agentRoutes.post('/runs/:id/cancel', async (c) => {
   const t = need(c, 'agents.use');
-  const n = await tx(t, (q) => q.exec(`update agent_runs set status='cancelled', ended_at=now() where id=$1 and initiated_by=$2 and status in ('queued','running')`, [c.req.param('id'), t.userId]));
-  if (!n) throw notFound('Active run');
-  return c.json({ ok: true });
+  const runId = c.req.param('id');
+  // v1.12: a live conversation says how much of the reply the user actually heard before talking over it.
+  const input = await body(c, z.object({ heard: z.string().max(4000).optional(), reason: z.enum(['user', 'barge_in']).optional() }).default({}));
+  const heard = input.heard?.trim() ? input.heard.trim() : undefined;
+  const out = await tx(t, async (q) => {
+    const run = await q.one<{ id: string; status: string; conversation_id: string }>(`select id, status, conversation_id from agent_runs where id=$1 and initiated_by=$2 for update`, [runId, t.userId]);
+    if (!run) throw notFound('Run');
+    if (run.status === 'queued' || run.status === 'running') {
+      await q.exec(`update agent_runs set status='cancelled', ended_at=now() where id=$1`, [runId]);
+      // What was streamed so far (from the stored events, not from the phone) is kept as an interrupted reply,
+      // timed at the cancel so it sorts before anything the user says next.
+      const streamed = await q.one<{ text: string | null }>(`select string_agg(data->>'text', '' order by seq) as text from run_events where run_id=$1 and event='token'`, [runId]);
+      const text = stripMeta(streamed?.text ?? '').trim();
+      if (text && run.conversation_id) {
+        await q.exec(
+          `insert into conversation_messages (org_id, conversation_id, role, content, run_id, meta, created_at) values ($1,$2,'assistant',$3,$4,$5, now())`,
+          [t.orgId, run.conversation_id, text, runId, JSON.stringify({ interrupted: true, ...(heard ? { heard } : {}), reason: input.reason ?? 'user' })],
+        );
+      }
+      return { ok: true, state: 'cancelled' as const };
+    }
+    // Already finished (the voice was still reading it): note what was heard on the stored reply.
+    if (heard || input.reason === 'barge_in') {
+      await q.exec(`update conversation_messages set meta = meta || $2::jsonb where run_id=$1 and role='assistant'`, [runId, JSON.stringify({ interrupted: true, ...(heard ? { heard } : {}) })]);
+    }
+    return { ok: true, state: 'finished' as const, status: run.status };
+  });
+  executing.get(runId)?.abort();
+  return c.json(out);
 });
 
 /**
@@ -516,13 +551,27 @@ agentRoutes.get('/runs/:id/stream', async (c) => {
     const claimed = await tx(t, (q) => q.one(`update agent_runs set status='running', started_at=now() where id=$1 and status='queued' returning id`, [runId]));
     if (claimed) {
       const ac = new AbortController();
+      executing.set(runId, ac);
       stream.onAbort(() => {
         /* keep running so the answer is saved even if the client drops */
       });
+      // v1.12: a cancel from another instance (or an expiry) is noticed here and stops the model.
+      const watch = setInterval(() => {
+        tx(t, (q) => q.one<{ status: string }>('select status from agent_runs where id=$1', [runId]))
+          .then((r) => {
+            if (r && r.status !== 'running' && r.status !== 'queued') ac.abort();
+          })
+          .catch(() => {});
+      }, CANCEL_POLL_MS);
       const emit = makeEmitter({ ...t }, runId, async (seq, event, data) => {
         await stream.writeSSE({ id: String(seq), event, data: JSON.stringify(data) });
       });
-      await executeRun({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId, role: t.role }, runId, emit, ac.signal);
+      try {
+        await executeRun({ orgId: t.orgId, workspaceId: t.workspaceId, userId: t.userId, role: t.role }, runId, emit, ac.signal);
+      } finally {
+        clearInterval(watch);
+        executing.delete(runId);
+      }
       return;
     }
     // Replay + follow.

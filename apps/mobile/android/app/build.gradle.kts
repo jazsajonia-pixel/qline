@@ -52,6 +52,10 @@ android {
 
     buildTypes {
         release {
+            // v1.12: phones only (ARM). Keeps the on-device voice runtime (sherpa-onnx) out of x86 builds.
+            ndk {
+                abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            }
             // Release builds are signed with the Qline upload key when android/key.properties exists
             // (kept outside git). Without it they fall back to debug keys for local runs only.
             signingConfig = if (keystorePropertiesFile.exists()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")

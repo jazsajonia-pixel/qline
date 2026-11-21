@@ -63,6 +63,7 @@ export class MetaFilter {
 export function stripMeta(text: string): string {
   return text
     .replace(/<qline-meta>[\s\S]*?(<\/qline-meta>|$)/g, '')
+    .replace(/\s*<qline-screen>[ \t]*\n?/g, '\n\n')
     .replace(/<qline-say>[\s\S]*?(<\/qline-say>|$)\s*/g, '')
     .trimEnd();
 }
@@ -141,6 +142,8 @@ export class SayFilter {
 }
 
 export interface VoiceTurn {
+  /** v1.12: 'live' = a live spoken conversation: the reply itself is spoken as it streams. */
+  mode?: 'live';
   lang?: string;
   confidence?: number;
   alternates?: string[];
@@ -157,6 +160,74 @@ export function voiceInstructions(v: VoiceTurn): string {
     ...(alts.length ? [`- Other ways the recogniser heard it: ${untrustedInline(alts.join(' | '))}`] : []),
     `- Start your final reply with one short spoken sentence in ${SAY_OPEN}...${SAY_CLOSE} (at most about 25 words, plain words, no markdown), then the written answer. If you need to use tools first, you may start with a brief ${SAY_OPEN}...${SAY_CLOSE} saying what you are checking. When you used ${SAY_OPEN}, leave "speech" in the final meta block empty.`,
   ].join('\n');
+}
+
+/**
+ * v1.12 live conversation (docs/30). The phone speaks the reply itself while it streams, clause by clause,
+ * so the reply must be written to be heard. Anything only useful on screen (a list, a table, code, links)
+ * goes after one line with ${'`'}<qline-screen>${'`'}: it is shown, never spoken.
+ */
+export const SCREEN_MARK = '<qline-screen>';
+
+export function liveVoiceInstructions(v: VoiceTurn): string {
+  const conf = typeof v.confidence === 'number' && v.confidence >= 0 ? v.confidence : null;
+  const alts = (v.alternates ?? []).filter((a) => typeof a === 'string' && a.trim()).slice(0, 3);
+  return [
+    `This is a live spoken conversation. The user's latest message came from speech recognition${v.lang ? ` (${v.lang.replace(/[^\w-]/g, '')})` : ''}${conf !== null ? `, confidence ${conf.toFixed(2)}` : ''} and may contain recognition mistakes. Your reply is read aloud word for word while you write it.`,
+    '- Talk like a capable person on a call: plain spoken sentences, contractions, no markdown, bullets, tables, headings, emojis, links or ids. Say numbers, dates and amounts the way you would say them aloud.',
+    '- Your first sentence is short and useful on its own, so speech can start at once. Then add only what helps; usually one to four sentences in total, longer only when asked.',
+    `- If something is only useful to read (a list of more than three items, a table, code, an address or a link), say a short summary, then write a line with only ${SCREEN_MARK} and put the details after it. Everything after ${SCREEN_MARK} is shown on screen and never spoken. Never put ${SCREEN_MARK} before the spoken part.`,
+    '- Before using a tool, say a few words first (for example "Let me check your calendar."), then call it.',
+    '- Users in the Philippines often mix Filipino and English (Taglish). Understand both and reply in the mix the user used.',
+    '- If a name, number, amount, date or the action itself is unclear and getting it wrong matters (anything that changes data or sends something), ask one short question before acting. Do not guess names or numbers.',
+    '- A reply of yours marked as interrupted was cut off: the user heard only the part quoted. Do not repeat it unless asked; answer what they said next.',
+    `- Leave "speech" in the final meta block empty.`,
+    ...(alts.length ? [`- Other ways the recogniser heard it: ${untrustedInline(alts.join(' | '))}`] : []),
+  ].join('\n');
+}
+
+/**
+ * v1.12: splits a live reply into the spoken part and the on-screen details. Text before the first
+ * ${'`'}<qline-screen>${'`'} line is spoken; the marker is never shown; a partial marker at the end of a chunk is held back.
+ */
+export class ScreenFilter {
+  private buf = '';
+  private screen = false;
+
+  /** Returns the parts of [chunk] that are ready, each marked spoken or on-screen only. */
+  push(chunk: string): { text: string; say: boolean }[] {
+    if (this.screen) return chunk ? [{ text: chunk, say: false }] : [];
+    this.buf += chunk;
+    const at = this.buf.indexOf(SCREEN_MARK);
+    if (at >= 0) {
+      const spoken = this.buf.slice(0, at).replace(/\s+$/, '');
+      const rest = this.buf.slice(at + SCREEN_MARK.length).replace(/^[ \t]*\n?/, '');
+      this.buf = '';
+      this.screen = true;
+      return [...(spoken ? [{ text: spoken, say: true }] : []), { text: `\n\n${rest}`, say: false }];
+    }
+    let keep = 0;
+    for (let k = Math.min(SCREEN_MARK.length - 1, this.buf.length); k > 0; k--) {
+      if (SCREEN_MARK.startsWith(this.buf.slice(-k))) {
+        keep = k;
+        break;
+      }
+    }
+    const out = this.buf.slice(0, this.buf.length - keep);
+    this.buf = this.buf.slice(this.buf.length - keep);
+    return out ? [{ text: out, say: true }] : [];
+  }
+
+  /** Held-back text at the end of a turn (a lone "<"), still spoken. */
+  flush(): { text: string; say: boolean }[] {
+    const out = this.buf;
+    this.buf = '';
+    return out ? [{ text: out, say: !this.screen }] : [];
+  }
+
+  get onScreen(): boolean {
+    return this.screen;
+  }
 }
 
 const untrustedInline = (s: string) => JSON.stringify(s.replace(/[<>]/g, '').slice(0, 300));

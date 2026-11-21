@@ -48,7 +48,9 @@ You can connect other accounts. Each connection is optional, asks only for the p
 ### Voice
 
 - **Listening:** speech recognition uses your phone's speech service (for example, Google speech services on Android). Your phone's provider may process the audio under its own terms. Qline does not record or store audio.
-- **Spoken replies:** if your organisation turns on natural voices, the text of the reply is sent to Google Gemini using your organisation's own Gemini key to create audio. Qline does not store that audio. Otherwise your phone's built-in text-to-speech is used.
+- **Live conversation:** while a live conversation is on, the microphone stays open until you tap End (Android shows a "Qline is listening" notification). Qline checks the sound on your phone to tell when you start and stop talking; only your turns are passed to your phone's speech service. This sound is not saved or sent to Qline.
+- **Qline voice:** if you choose it, replies are turned into speech on your phone by a voice model you download once from the sherpa-onnx project on GitHub. After the download it works offline, and reply text is not sent anywhere to be spoken. You can delete the model in Settings → Voice.
+- **Spoken replies (other voices):** if your organisation turns on natural voices, the text of the reply is sent to Google Gemini using your organisation's own Gemini key to create audio. Qline does not store that audio. Otherwise your phone's built-in text-to-speech is used.
 - Transcripts of what you said are saved as part of the conversation, like typed messages.
 
 ### On your phone

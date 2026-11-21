@@ -4,6 +4,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- v1.11 in-app updates: Android still asks the person to confirm every install. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- v1.12 live conversation (docs/30): keeps listening and talking while Qline is in the background,
+         only while a live session is on, with an ongoing notification and an End button. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <application
         android:label="Qline"
         android:allowBackup="false"
@@ -46,6 +52,7 @@
         </activity>
         <!-- v1.11 in-app updates (docs/28): install results, and reopening Qline after it updates itself. -->
         <receiver android:name=".UpdateStatusReceiver" android:exported="false"/>
+        <service android:name=".LiveService" android:exported="false" android:foregroundServiceType="microphone|mediaPlayback"/>
         <receiver android:name=".UpdatedReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>

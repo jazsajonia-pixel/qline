@@ -43,7 +43,7 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build apk --release --dart-define=QLINE_VERSION=${{ steps.v.outputs.name }} --dart-define=QLINE_BUILD=${{ steps.v.outputs.code }}
+      - run: flutter build apk --release --target-platform android-arm,android-arm64 --dart-define=QLINE_VERSION=${{ steps.v.outputs.name }} --dart-define=QLINE_BUILD=${{ steps.v.outputs.code }}
       - name: Check signature and checksum
         id: sig
         run: |
