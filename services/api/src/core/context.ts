@@ -9,6 +9,8 @@ export interface UserCtx {
   email: string;
   name: string;
   sessionId: string;
+  /** True once the address is proven (Google sign-in). Password sign-up does not verify email yet. */
+  emailVerified?: boolean;
   /** All interactive sessions are human. Service actors never get a Better Auth session. */
   human: true;
 }
@@ -29,6 +31,7 @@ export const requireUser: MiddlewareHandler<Env> = async (c, next) => {
     email: session.user.email,
     name: session.user.name,
     sessionId: session.session.id,
+    emailVerified: session.user.emailVerified === true,
     human: true,
   });
   await next();

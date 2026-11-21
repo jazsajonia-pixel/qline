@@ -189,7 +189,7 @@ integrationRoutes.get('/integrations', async (c) => {
       { id: 'stripe', name: 'Stripe', auth: 'key', registered: true, connection: publicConn(byP.get('stripe')) ?? null, features: STRIPE_FEATURES },
     ],
     other: PLANNED,
-    canSetup: isPlatformAdmin(t.email),
+    canSetup: isPlatformAdmin(t),
     // legacy shape for v1.1 clients
     items: PLANNED.map((x) => ({ ...x, status: x.status === 'available' ? 'available' : 'not_configured' })),
   });
@@ -489,14 +489,14 @@ integrationRoutes.post('/leads/rules/suggest', async (c) => {
 // ---- Platform OAuth app registration (platform admins only) ----------------------------------------
 integrationRoutes.get('/platform/oauth-apps', async (c) => {
   const t = c.get('tenant');
-  if (!isPlatformAdmin(t.email)) throw new ApiError(403, 'FORBIDDEN', 'Only the app owner can do this');
+  if (!isPlatformAdmin(t)) throw new ApiError(403, 'FORBIDDEN', 'Only the app owner can do this');
   const s = await appStatus();
   return c.json({ items: OAUTH_PROVIDERS.map((p) => ({ id: p, name: PROVIDER_META[p].name, console: PROVIDER_META[p].console, redirectUri: redirectUri(p), ...s[p] })) });
 });
 
 integrationRoutes.put('/platform/oauth-apps/:provider', async (c) => {
   const t = c.get('tenant');
-  if (!isPlatformAdmin(t.email)) throw new ApiError(403, 'FORBIDDEN', 'Only the app owner can do this');
+  if (!isPlatformAdmin(t)) throw new ApiError(403, 'FORBIDDEN', 'Only the app owner can do this');
   const p = providerParam(c.req.param('provider'));
   const input = await body(c, z.object({ clientId: z.string().trim().min(6).max(300), clientSecret: z.string().trim().min(6).max(500) }));
   await saveApp(p, input.clientId, input.clientSecret, t.userId);
@@ -506,7 +506,7 @@ integrationRoutes.put('/platform/oauth-apps/:provider', async (c) => {
 
 integrationRoutes.delete('/platform/oauth-apps/:provider', async (c) => {
   const t = c.get('tenant');
-  if (!isPlatformAdmin(t.email)) throw new ApiError(403, 'FORBIDDEN', 'Only the app owner can do this');
+  if (!isPlatformAdmin(t)) throw new ApiError(403, 'FORBIDDEN', 'Only the app owner can do this');
   await deleteApp(providerParam(c.req.param('provider')));
   return c.json({ ok: true });
 });
