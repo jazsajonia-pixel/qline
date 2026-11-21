@@ -121,14 +121,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Verify production API health and readiness (v1.11.0)
+      - name: Verify production API health and readiness (v1.11.1)
         run: |
           node --input-type=module <<'NODE'
           const base = 'https://br-muddy-rain-a1uaplxr-api.compute.c-1.ap-southeast-1.aws.neon.tech';
           const healthResponse = await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(15000) });
           const health = await healthResponse.json();
-          if (!healthResponse.ok || health.status !== 'ok' || health.version !== '1.11.0') {
-            throw new Error(`Expected healthy Qline API v1.11.0, received HTTP ${healthResponse.status}: ${JSON.stringify(health)}`);
+          if (!healthResponse.ok || health.status !== 'ok' || health.version !== '1.11.1') {
+            throw new Error(`Expected healthy Qline API v1.11.1, received HTTP ${healthResponse.status}: ${JSON.stringify(health)}`);
           }
           const readyResponse = await fetch(`${base}/v1/health/ready`, { signal: AbortSignal.timeout(15000) });
           const ready = await readyResponse.json();
