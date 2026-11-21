@@ -50,6 +50,14 @@ android {
         }
     }
 
+    // v1.12: compress native libraries (sherpa-onnx/ONNX Runtime add ~47 MB uncompressed for two ABIs),
+    // so the APK download stays small. Android extracts them once at install time.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     buildTypes {
         release {
             // v1.12: phones only (ARM). Keeps the on-device voice runtime (sherpa-onnx) out of x86 builds.
