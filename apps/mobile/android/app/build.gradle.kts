@@ -55,6 +55,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // sherpa-onnx ships x86/x86_64 libraries, but the release has no x86 Flutter engine: without
+            // these excludes an x86_64 device would pick that folder and fail to start.
+            excludes += listOf("lib/x86/**", "lib/x86_64/**")
         }
     }
 
