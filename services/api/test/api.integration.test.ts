@@ -396,6 +396,11 @@ d('Qline API (integration)', () => {
     const email = me.json.user?.email ?? me.json.email;
     const prevAdmins = process.env.QLINE_PLATFORM_ADMINS;
     process.env.QLINE_PLATFORM_ADMINS = email;
+    // Audit 2026-11-21: a listed email is not enough while it is unverified (password sign-up does not verify).
+    expect((await call(A, 'PUT', '/platform/oauth-apps/google', { clientId: 'client-123456', clientSecret: 'secret-abcdef-XYZ' })).status).toBe(403);
+    expect((await call(A, 'GET', '/integrations')).json.canSetup).toBe(false);
+    const { getPool } = await import('../src/core/db');
+    await getPool().query('update "user" set "emailVerified"=true where lower(email)=lower($1)', [email]);
     const realFetch = globalThis.fetch;
     const appended: any[] = [];
     const j = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
@@ -596,6 +601,40 @@ d('Qline API (integration)', () => {
       const r = await call(A, 'GET', p);
       expect(r.status).toBe(400);
       expect(r.json.code).toBe('INVALID_INPUT');
+    }
+  });
+  it('Google sign-in removes an unverified password and old sessions before linking (audit 2026-11-21)', async () => {
+    const { saveApp, deleteApp } = await import('../src/integrations/oauth');
+    const { finishGoogleSignIn } = await import('../src/modules/google-signin');
+    const squatter = await signUp('Squatter');
+    expect((await call(squatter, 'GET', '/me')).status).toBe(200);
+    await saveApp('google', 'client-123456', 'secret-abcdef-XYZ', 'test');
+    const realFetch = globalThis.fetch;
+    const j = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.startsWith('https://oauth2.googleapis.com/token')) return j({ access_token: 'at-signin', expires_in: 3600, scope: 'openid email profile' });
+      if (url.startsWith('https://openidconnect.googleapis.com')) return j({ sub: 'g-real-owner-1', email: squatter.email, email_verified: true, name: 'Real Owner' });
+      return realFetch(input, init);
+    }) as any;
+    try {
+      const nonce = 'n'.repeat(40) + randomUUID().replace(/-/g, '');
+      const start = await call(null, 'POST', '/google-signin/start', { nonce });
+      expect(start.status).toBe(200);
+      const state = new URL(start.json.url).searchParams.get('state')!;
+      expect((await finishGoogleSignIn(state, 'code-1', undefined)).ok).toBe(true);
+      const fin = await call(null, 'POST', '/google-signin/finish', { nonce });
+      expect(fin.status).toBe(200);
+      // The squatter's session and password no longer work; the Google session does.
+      expect((await call(squatter, 'GET', '/me')).status).toBe(401);
+      const pw = await call(null, 'POST', '/auth/sign-in/email', { email: squatter.email, password: 'correct-horse-battery' });
+      expect(pw.status).not.toBe(200);
+      const me = await call({ token: fin.json.token }, 'GET', '/me');
+      expect(me.status).toBe(200);
+      expect(JSON.stringify(me.json)).toContain(squatter.email!);
+    } finally {
+      globalThis.fetch = realFetch;
+      await deleteApp('google');
     }
   });
 });

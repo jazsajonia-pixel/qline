@@ -113,9 +113,14 @@ export async function appStatus(): Promise<Record<OAuthProvider, { configured: b
   return out;
 }
 
-export function isPlatformAdmin(email: string) {
+/**
+ * Platform admins can replace the OAuth apps every connection uses, so the email must be proven:
+ * password sign-up does not verify addresses, and anyone could otherwise register a listed email first (audit 2026-11-21).
+ */
+export function isPlatformAdmin(user: { email: string; emailVerified?: boolean }) {
+  if (user.emailVerified !== true) return false;
   const list = (process.env.QLINE_PLATFORM_ADMINS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  return list.includes(email.toLowerCase());
+  return list.includes(user.email.toLowerCase());
 }
 
 // ---- Authorization URL ----------------------------------------------------------

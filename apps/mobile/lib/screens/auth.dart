@@ -11,6 +11,7 @@ import '../core/session.dart';
 import '../ui/core_painter.dart';
 import '../ui/theme.dart';
 import '../ui/widgets.dart';
+import 'legal.dart';
 
 class WelcomeScreen extends ConsumerStatefulWidget {
   const WelcomeScreen({super.key});
@@ -181,6 +182,9 @@ class _WelcomeState extends ConsumerState<WelcomeScreen> with WidgetsBindingObse
                   QButton(_signUp ? 'Create account' : 'Sign in', kind: QBtn.halo, expand: true, busy: _busy, onPressed: _submit),
                   const SizedBox(height: 10),
                   QButton('Continue with Google', icon: Icons.account_circle_outlined, expand: true, busy: _google, onPressed: _busy || _google ? null : _startGoogle),
+                  const SizedBox(height: 12),
+                  // Audit 2026-11-21: both buttons can create an account, so the notice covers Google too.
+                  LegalConsentText(prefix: _signUp ? 'By creating an account you agree to the ' : 'By continuing you agree to the '),
                   if (_google) ...[
                     const SizedBox(height: 8),
                     Text('Finish in your browser, then come back here.', textAlign: TextAlign.center, style: qs(13, c: q.text2)),
@@ -260,10 +264,12 @@ class _OrgSetupState extends ConsumerState<OrgSetupScreen> {
           const SizedBox(height: 24),
           SegmentedButton<String>(
             segments: const [
-              ButtonSegment(value: 'me', label: Text('Just me'), icon: Icon(Icons.person_outline)),
-              ButtonSegment(value: 'business', label: Text('Business'), icon: Icon(Icons.add_business_outlined)),
-              ButtonSegment(value: 'join', label: Text('Join'), icon: Icon(Icons.group_add_outlined)),
+              // Audit 2026-11-21: with icons, "Business" broke onto two lines at 360 dp. Labels alone fit.
+              ButtonSegment(value: 'me', label: Text('Just me', maxLines: 1, softWrap: false)),
+              ButtonSegment(value: 'business', label: Text('Business', maxLines: 1, softWrap: false)),
+              ButtonSegment(value: 'join', label: Text('Join', maxLines: 1, softWrap: false)),
             ],
+            showSelectedIcon: false,
             selected: {_mode},
             onSelectionChanged: (s) => setState(() {
               _mode = s.first;

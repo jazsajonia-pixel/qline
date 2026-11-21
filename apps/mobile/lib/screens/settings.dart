@@ -14,6 +14,7 @@ import 'ai.dart';
 import 'autonomy.dart';
 import 'integrations.dart';
 import 'leads.dart';
+import 'legal.dart';
 import 'missions.dart';
 import 'voice_settings.dart';
 import 'setup.dart';
@@ -51,7 +52,7 @@ class SettingsScreen extends ConsumerWidget {
         nav(Icons.flag_outlined, 'Missions & emergency stop', 'Command Center plans, pause, stop everything', const MissionsScreen()),
         nav(Icons.bolt_outlined, 'AI autonomy', 'What the AI can do without asking', const AutonomyScreen()),
         nav(Icons.memory, 'AI providers', 'Your keys for OpenAI, Claude, Gemini, Grok, DeepSeek', const AiProvidersScreen()),
-        nav(Icons.hub_outlined, 'Integrations', 'Gmail, Sheets, Forms, Calendar, Outlook, Slack', const IntegrationsScreen()),
+        nav(Icons.hub_outlined, 'Integrations', 'Gmail, Drive, Calendar, Slack, Notion, GitHub and more', const IntegrationsScreen()),
         nav(Icons.rule, 'Lead rules', 'What counts as a lead, what is urgent', const LeadRulesScreen()),
         nav(Icons.group_outlined, 'Team', 'Members, roles and invite codes', const MembersScreen()),
         if (s.role != 'member' && s.role != 'viewer') nav(Icons.fact_check_outlined, 'Audit log', 'Every change, tamper-evident', const AuditScreen()),
@@ -78,11 +79,14 @@ class SettingsScreen extends ConsumerWidget {
         const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: SectionLabel('About')),
         nav(Icons.health_and_safety_outlined, 'System status', 'Server, storage and AI availability', const StatusScreen()),
         ListTile(leading: const Icon(Icons.system_update_outlined), title: const Text('App updates'), subtitle: Text('Check for a new version', style: qs(13, c: q.text3)), trailing: const Icon(Icons.chevron_right), onTap: () => push(context, const UpdatesScreen())),
+        nav(Icons.gavel_outlined, 'Terms of service', 'The rules for using Qline', const LegalScreen(LegalDoc.terms)),
+        nav(Icons.privacy_tip_outlined, 'Privacy policy', 'What Qline collects, why, and your rights', const LegalScreen(LegalDoc.privacy)),
+        nav(Icons.person_remove_outlined, 'Delete account', 'What is deleted and how to ask', const DeleteAccountScreen()),
         ListTile(leading: const Icon(Icons.info_outline), title: const Text('Version'), subtitle: Text('${AppConfig.version} (${AppConfig.build})', style: qs(13, c: q.text3, family: mono))),
         Padding(
           padding: const EdgeInsets.all(16),
           child: QButton('Sign out', kind: QBtn.destructive, expand: true, onPressed: () async {
-            if (await confirm(context, title: 'Sign out?', body: 'You\'ll need your password to sign back in.', action: 'Sign out', destructive: true)) {
+            if (await confirm(context, title: 'Sign out?', body: 'You\'ll need to sign in again on this phone. Nothing is deleted.', action: 'Sign out', destructive: true)) {
               await ref.read(sessionProvider.notifier).signOut();
               if (context.mounted) Navigator.of(context).popUntil((r) => r.isFirst);
             }
@@ -223,10 +227,11 @@ class SessionsScreen extends ConsumerWidget {
                 ),
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: QButton(others == 0 ? 'No other devices' : 'Sign out $others other device${others == 1 ? '' : 's'}', kind: QBtn.destructive, expand: true, onPressed: others == 0
-                    ? null
-                    : () async {
-                        if (await confirm(context, title: 'Sign out other devices?', body: 'Every other phone or browser signed in to this account will need the password again. This device stays signed in.', action: 'Sign out others', destructive: true)) {
+                // Audit 2026-11-21: a disabled red button read like an error, so with no other devices show a note.
+                child: others == 0
+                    ? Text('This is the only device signed in.', textAlign: TextAlign.center, style: qs(13, c: q.text2))
+                    : QButton('Sign out $others other device${others == 1 ? '' : 's'}', kind: QBtn.destructive, expand: true, onPressed: () async {
+                        if (await confirm(context, title: 'Sign out other devices?', body: 'Every other phone or browser signed in to this account will need to sign in again. This device stays signed in.', action: 'Sign out others', destructive: true)) {
                           if (!context.mounted) return;
                           await act(context, ref, (api) => api.post('/me/sessions/revoke-others'), ok: 'Other devices signed out');
                           await reload();

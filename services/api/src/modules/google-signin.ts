@@ -90,6 +90,13 @@ export async function finishGoogleSignIn(state: string, code: string | undefined
     let userId: string;
     if (found) {
       userId = found.user.id;
+      // Password sign-up does not verify email, so an unverified account may have been created by someone else
+      // before the real owner arrived (account pre-hijacking). Google has now proven who owns the address: remove the
+      // unproven password and sign out every existing session before linking (audit 2026-11-21).
+      if (!found.user.emailVerified) {
+        for (const a of found.accounts as any[]) if (a.providerId === 'credential') await ia.deleteAccount(a.id);
+        await ia.deleteUserSessions(userId);
+      }
       // Google verified this address, so it is safe to link it to the existing Qline account.
       if (!found.accounts.some((a: any) => a.providerId === 'google' && a.accountId === String(who.sub))) {
         await ia.linkAccount({ userId, providerId: 'google', accountId: String(who.sub) } as any);
