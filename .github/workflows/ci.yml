@@ -111,7 +111,7 @@ jobs:
       - run: flutter analyze
       - run: flutter test
       # Unsigned-by-upload-key build (falls back to debug keys) — proves the release build compiles.
-      - run: flutter build apk --release --dart-define=QLINE_BUILD=${{ github.run_number }}
+      - run: flutter build apk --release --target-platform android-arm,android-arm64 --dart-define=QLINE_BUILD=${{ github.run_number }}
 
   production-smoke:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

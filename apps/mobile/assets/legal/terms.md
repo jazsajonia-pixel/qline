@@ -67,6 +67,7 @@ We may remove content, pause automations, or suspend access to protect people, t
 - Install Qline only from the official release page at github.com/jazsajonia-pixel/qline/releases. Copies from anywhere else may be unsafe, and we are not responsible for them.
 - The app can check for and download updates from that page. It verifies each update's checksum and signing certificate before Android asks you to install it. Installing updates is your choice, but older versions may stop working with the API.
 - The source code is publicly visible, but **no open-source licence is granted.** Except where a separate licence says otherwise, Qline's code, design, name and logo are owned by Jazz Sajonia, and all rights are reserved. Third-party components remain under their own licences.
+- The optional Qline voice uses the Supertonic voice models by Supertone, licensed under the OpenRAIL-M licence ([licence](https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE)). That licence restricts how the models and their output may be used, including no use that breaks the law, harms or exploits people, impersonates someone or spreads disinformation. By downloading the voice you agree to follow those restrictions. The voice runs on sherpa-onnx (Apache-2.0) and ONNX Runtime (MIT).
 
 ## 9. Fees
 

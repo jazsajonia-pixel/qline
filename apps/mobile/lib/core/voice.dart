@@ -8,11 +8,19 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
 import 'api.dart';
+import 'live_audio.dart';
+import 'neural_voice.dart';
+import 'speech_text.dart';
 
 /// Voice settings (stored on the device).
 class VoicePrefs {
-  const VoicePrefs({this.engine = 'device', this.voice, this.deviceVoice, this.rate = .5, this.listenLang = 'auto', this.bargeIn = true});
-  final String engine; // device | gemini | openai
+  const VoicePrefs({this.engine = 'device', this.voice, this.deviceVoice, this.rate = .5, this.listenLang = 'auto', this.bargeIn = true, this.qlineModel, this.qlineVoice, this.echoCancel = true});
+  final String engine; // qline | device | gemini | openai
+
+  /// v1.12: the on-device voice model and speaker (docs/30), and whether Live uses the phone's echo canceller.
+  final String? qlineModel;
+  final int? qlineVoice;
+  final bool echoCancel;
   final String? voice; // provider voice id
   final Map<String, String>? deviceVoice; // {name, locale}
   final double rate;
@@ -22,15 +30,18 @@ class VoicePrefs {
 
   /// Voice v2: in hands-free, talking over a reply stops it and Qline listens (barge-in).
   final bool bargeIn;
-  VoicePrefs copy({String? engine, String? voice, Map<String, String>? deviceVoice, double? rate, String? listenLang, bool? bargeIn, bool clearVoice = false}) => VoicePrefs(
+  VoicePrefs copy({String? engine, String? voice, Map<String, String>? deviceVoice, double? rate, String? listenLang, bool? bargeIn, bool clearVoice = false, String? qlineModel, int? qlineVoice, bool? echoCancel}) => VoicePrefs(
         engine: engine ?? this.engine,
         voice: clearVoice ? null : (voice ?? this.voice),
         deviceVoice: deviceVoice ?? this.deviceVoice,
         rate: rate ?? this.rate,
         listenLang: listenLang ?? this.listenLang,
         bargeIn: bargeIn ?? this.bargeIn,
+        qlineModel: qlineModel ?? this.qlineModel,
+        qlineVoice: qlineVoice ?? this.qlineVoice,
+        echoCancel: echoCancel ?? this.echoCancel,
       );
-  Map<String, dynamic> toJson() => {'engine': engine, 'voice': voice, 'deviceVoice': deviceVoice, 'rate': rate, 'listenLang': listenLang, 'bargeIn': bargeIn};
+  Map<String, dynamic> toJson() => {'engine': engine, 'voice': voice, 'deviceVoice': deviceVoice, 'rate': rate, 'listenLang': listenLang, 'bargeIn': bargeIn, 'qlineModel': qlineModel, 'qlineVoice': qlineVoice, 'echoCancel': echoCancel};
   static VoicePrefs fromJson(Map<String, dynamic> j) => VoicePrefs(
         engine: j['engine'] as String? ?? 'device',
         voice: j['voice'] as String?,
@@ -38,6 +49,9 @@ class VoicePrefs {
         rate: (j['rate'] as num?)?.toDouble() ?? .5,
         listenLang: listenLangs.containsKey(j['listenLang']) ? j['listenLang'] as String : 'auto',
         bargeIn: j['bargeIn'] as bool? ?? true,
+        qlineModel: j['qlineModel'] as String?,
+        qlineVoice: (j['qlineVoice'] as num?)?.toInt(),
+        echoCancel: j['echoCancel'] as bool? ?? true,
       );
 }
 
@@ -175,6 +189,26 @@ Duration waitFor(String words, Duration base) {
     ms -= 250;
   }
   return Duration(milliseconds: ms.clamp(800, 2600));
+}
+
+/// v1.12 live conversation: how much silence ends the user's turn, from voice activity rather than the
+/// recogniser, so it can be shorter. Waits longer after a dangling word or a short fragment; 450–2200 ms.
+int liveEndpointMs(String words, {int base = 750}) {
+  final w = words.trim().toLowerCase();
+  final list = w.split(RegExp(r'\s+')).where((x) => x.isNotEmpty).toList();
+  var ms = base;
+  if (list.isEmpty) return (base + 250).clamp(450, 2200);
+  final last = list.last.replaceAll(RegExp(r"[^a-z']"), '');
+  if (w.endsWith(',') || w.endsWith('...') || _trailing.contains(last)) {
+    ms += 750;
+  } else if (RegExp(r'[.?!]$').hasMatch(w)) {
+    ms -= 250;
+  } else if (list.length <= 2) {
+    ms += 300;
+  } else if (list.length >= 8) {
+    ms -= 150;
+  }
+  return ms.clamp(450, 2200);
 }
 
 class UtteranceGate {
@@ -350,6 +384,12 @@ class Speaker {
     try {
       await _tts.stop();
     } catch (_) {}
+    if (_qlinePlaying) {
+      _qlinePlaying = false;
+      try {
+        await PlatformLiveAudio.instance.flush();
+      } catch (_) {}
+    }
   }
 
   Future<void> dispose() async {
@@ -375,6 +415,29 @@ class Speaker {
     final parts = chunk(clean);
     var offset = 0;
     var engine = p.engine;
+    if (engine == 'qline') {
+      // v1.12: Qline's own on-device voice (docs/30).
+      NeuralVoice? v;
+      try {
+        v = await QlineVoiceHub.instance.load(p.qlineModel, voice: p.qlineVoice, speed: neuralSpeed(p.rate));
+      } catch (_) {}
+      if (my != _session) return;
+      if (v != null) {
+        for (final part in parts) {
+          if (my != _session) return;
+          await _speakQline(v, part, offset, my);
+          offset += wordsOf(part).length;
+        }
+        if (my != _session) return;
+        if (_queue.isNotEmpty) return _speakOne(api, _queue.removeAt(0), p);
+        _speaking = false;
+        onLevel(0);
+        onDone();
+        return;
+      }
+      onNotice('Download the Qline voice in Settings → Voice. Using the phone voice for now.');
+      engine = 'device';
+    }
     Future<Map<String, dynamic>?>? next;
     Future<Map<String, dynamic>?> fetch(String part) async {
       try {
@@ -406,6 +469,63 @@ class Speaker {
     _tick?.cancel();
     onLevel(0);
     onDone();
+  }
+
+  bool _qlinePlaying = false;
+
+  /// Speaks [part] with the on-device voice: sentence by sentence, the next one made while this one plays.
+  Future<void> _speakQline(NeuralVoice v, String part, int offset, int my) async {
+    final c = SpeechChunker();
+    final pieces = [...c.add('$part '), ...c.finish()];
+    if (pieces.isEmpty) return;
+    final audio = PlatformLiveAudio.instance;
+    final done = Completer<void>();
+    final starts = <int, int>{};
+    var wordBase = 0;
+    for (var i = 0; i < pieces.length; i++) {
+      starts[i] = wordBase;
+      wordBase += wordsOf(pieces[i]).length;
+    }
+    final durations = <int, int>{};
+    final sub = audio.events.listen((e) {
+      if (my != _session) return;
+      final seq = (e['seq'] as num?)?.toInt();
+      if (e['type'] == 'started' && seq != null && seq >= 0 && seq < pieces.length) {
+        final ws = wordsOf(pieces[seq]);
+        final dur = durations[seq] ?? 1000;
+        final t0 = DateTime.now();
+        _tick?.cancel();
+        _tick = Timer.periodic(const Duration(milliseconds: 60), (t) {
+          if (my != _session) return t.cancel();
+          final f = DateTime.now().difference(t0).inMilliseconds / dur;
+          onWord(offset + starts[seq]! + (f * ws.length).floor().clamp(0, ws.length - 1));
+          onLevel(.35 + .4 * (math.sin(DateTime.now().millisecondsSinceEpoch / 90) + 1) / 2);
+        });
+      } else if (e['type'] == 'drained' && !done.isCompleted) {
+        done.complete();
+      }
+    });
+    _qlinePlaying = true;
+    try {
+      Future<SynthAudio> next = v.synth(normalizeForSpeech(pieces.first));
+      for (var i = 0; i < pieces.length; i++) {
+        final a = await next;
+        if (my != _session) return;
+        if (i + 1 < pieces.length) next = v.synth(normalizeForSpeech(pieces[i + 1]));
+        durations[i] = a.durationMs;
+        await audio.play(i, a.pcm, a.rate);
+      }
+      // Done when the last piece was heard, or when stopped.
+      while (my == _session && !done.isCompleted) {
+        await Future.any([done.future, Future<void>.delayed(const Duration(milliseconds: 200))]);
+      }
+    } catch (e) {
+      if (my == _session) onNotice('The Qline voice could not speak that.');
+    } finally {
+      _tick?.cancel();
+      await sub.cancel();
+      _qlinePlaying = false;
+    }
   }
 
   Future<void> _speakDevice(String part, int offset, VoicePrefs p, int my) async {
