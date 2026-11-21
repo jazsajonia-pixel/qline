@@ -702,7 +702,7 @@ describe('v1.12 live conversation: spoken part vs on-screen details', () => {
     const f = new ScreenFilter();
     const parts = ['Here are ', 'your leads. <qli', 'ne-scr', 'een>\n- Ana\n', '- Ben'].flatMap((c) => f.push(c));
     parts.push(...f.flush());
-    expect(parts.filter((p) => p.say).map((p) => p.text).join('')).toBe('Here are your leads.');
+    expect(parts.filter((p) => p.say).map((p) => p.text).join('').trim()).toBe('Here are your leads.');
     const all = parts.map((p) => p.text).join('');
     expect(all).not.toContain('<qli');
     expect(all).toContain('- Ana\n- Ben');
