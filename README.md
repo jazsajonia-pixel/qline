@@ -43,7 +43,7 @@ Release signing reads `apps/mobile/android/key.properties`. That file and the ke
 
 Production runs API 1.11.0 (Neon deployment #17) with migration 0026, applied 2026-11-20. The v1.11.0 APK is released on [GitHub Releases](https://github.com/jazsajonia-pixel/qline/releases/tag/v1.11.0). New in 1.11: Voice v2 and background continuity ([docs/26](docs/26-VOICE_V2_AND_CONTINUITY.md)), Facebook Pages posting with approval ([docs/27](docs/27-FACEBOOK_PAGES.md)), and in-app updates that are offered, never forced ([docs/28](docs/28-IN_APP_UPDATES.md)). All are tested with automated tests only: no device QA, and Facebook has not been tried against a real Page because no Meta app is registered.
 
-The 2026-11-21 security, UI and legal audit is in [docs/29](docs/29-AUDIT_2026-11-21.md). The Terms of service and Privacy policy live in `apps/mobile/assets/legal/` and the website pages are generated from them with `node scripts/build-legal.mjs`. The audit's API fixes are merged but not deployed until Jazz approves.
+The 2026-11-21 security, UI and legal audit is in [docs/29](docs/29-AUDIT_2026-11-21.md). The Terms of service and Privacy policy live in `apps/mobile/assets/legal/` and the website pages are generated from them with `node scripts/build-legal.mjs`. Version 1.11.1 ships the audit's security fixes and a UX/accessibility pass ([release notes](docs/releases/v1.11.1.md)).
 
 ### Earlier notes (v1.10.0)
 

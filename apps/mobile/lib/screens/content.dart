@@ -141,13 +141,13 @@ class _StudioState extends ConsumerState<ContentStudioScreen> {
           Align(alignment: Alignment.centerLeft, child: QButton('Check Drive for reports', kind: QBtn.ghost, icon: Icons.inbox_outlined, busy: _checking, onPressed: _checking ? null : _checkReports)),
         ],
         const SectionLabel('Handoff monitor'),
-        SingleChildScrollView(
+        EdgeFade(child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(children: [
             for (final (id, label) in _filters)
               Padding(padding: const EdgeInsets.only(right: 6), child: ChoiceChip(label: Text(label), selected: _filter == id, onSelected: (_) => setState(() => _filter = id))),
           ]),
-        ),
+        )),
         const SizedBox(height: 10),
         if (jobs.isEmpty)
           EmptyState(

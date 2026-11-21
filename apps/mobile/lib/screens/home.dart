@@ -84,7 +84,8 @@ class HomeScreen extends ConsumerWidget {
               physics: const NeverScrollableScrollPhysics(),
               mainAxisSpacing: 10,
               crossAxisSpacing: 10,
-              childAspectRatio: 1.55,
+              // UX audit 2026-11-21: a fixed ratio clipped the tiles at 1.3× text. Shorter tiles' height follows the text size.
+              childAspectRatio: 1.55 / MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 2.0),
               children: [
                 for (final w in widgets.take(6))
                   QCard(
