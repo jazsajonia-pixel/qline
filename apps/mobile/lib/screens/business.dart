@@ -66,7 +66,8 @@ class _AgentStrip extends ConsumerWidget {
       skeleton: const SizedBox(height: 120),
       fetch: (api) async => items(await api.get('/agents')),
       builder: (context, list, reload) => SizedBox(
-        height: 128,
+        // UX audit 2026-11-21: fixed 128 clipped agent names at large text.
+        height: 128 * MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.8),
         child: ListView.separated(
           scrollDirection: Axis.horizontal,
           itemCount: list.length + (canManage ? 1 : 0),

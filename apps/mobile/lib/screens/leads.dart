@@ -43,10 +43,10 @@ class _LeadInboxState extends ConsumerState<LeadInboxScreen> {
           return RefreshIndicator(
             onRefresh: reload,
             child: ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 32), children: [
-              SingleChildScrollView(
+              EdgeFade(child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(children: [chip('lead', 'Leads', counts['leads']), chip('urgent', 'Urgent', counts['urgent']), chip('ignored', 'Not leads', counts['ignored']), chip('all', 'All', null)]),
-              ),
+              )),
               const SizedBox(height: 12),
               if (list.isEmpty)
                 EmptyState(
@@ -84,8 +84,9 @@ class _InboxCard extends ConsumerWidget {
           const SizedBox(width: 6),
           Text(_sourceName[src] ?? src, style: qs(12, w: FontWeight.w600, c: q.text3)),
           const SizedBox(width: 6),
-          Text('· ${ago((it['received_at'] ?? it['created_at']) as String?)}', style: qs(12, c: q.text3)),
-          const Spacer(),
+          // UX audit 2026-11-21: at large text the pill pushed this row past the card edge.
+          Expanded(child: Text('· ${ago((it['received_at'] ?? it['created_at']) as String?)}', maxLines: 1, overflow: TextOverflow.ellipsis, style: qs(12, c: q.text3))),
+          const SizedBox(width: 6),
           if (lead) UrgencyPill(it['urgency'] as String?) else const StatusPill('ignored'),
         ]),
         const SizedBox(height: 8),

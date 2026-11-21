@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
@@ -47,7 +48,13 @@ class QButton extends StatelessWidget {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: border)),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: disabled ? null : onPressed,
+          onTap: disabled ? null : () {
+            // UX audit 2026-11-21 (after forui's FHapticFeedback): a light tick for the screen's one human
+            // decision, a firmer one for destructive actions. Android skips it when touch feedback is off.
+            if (kind == QBtn.halo) HapticFeedback.lightImpact();
+            if (kind == QBtn.destructive) HapticFeedback.mediumImpact();
+            onPressed!();
+          },
           child: ConstrainedBox(
             constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
             child: Padding(padding: const EdgeInsets.symmetric(horizontal: 18), child: Center(widthFactor: expand ? null : 1, child: child)),
@@ -279,7 +286,7 @@ class QCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final q = context.q;
-    return Pressable(
+    final card = Pressable(
       enabled: onTap != null,
       scale: .985,
       child: Material(
@@ -288,6 +295,59 @@ class QCard extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         child: InkWell(onTap: onTap, child: Padding(padding: padding, child: child)),
       ),
+    );
+    // UX audit 2026-11-21: without merging, a card whose content is its own semantics container (for
+    // example the Drive status line) was announced as an unlabelled button.
+    return onTap == null ? card : MergeSemantics(child: card);
+  }
+}
+
+/// Fades the edge of a horizontal scroller while more content is hidden there, so a clipped chip or
+/// segment row at large text sizes still shows that it scrolls (UX audit 2026-11-21).
+class EdgeFade extends StatefulWidget {
+  const EdgeFade({super.key, required this.child, this.width = 28});
+  final Widget child;
+  final double width;
+  @override
+  State<EdgeFade> createState() => _EdgeFadeState();
+}
+
+class _EdgeFadeState extends State<EdgeFade> {
+  bool _before = false, _after = false;
+
+  bool _update(ScrollMetrics m) {
+    if (m.axis != Axis.horizontal) return false;
+    final before = m.extentBefore > 1, after = m.extentAfter > 1;
+    if (before != _before || after != _after) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _before = before;
+            _after = after;
+          });
+        }
+      });
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final child = NotificationListener<ScrollMetricsNotification>(
+      onNotification: (n) => _update(n.metrics),
+      child: NotificationListener<ScrollNotification>(onNotification: (n) => _update(n.metrics), child: widget.child),
+    );
+    if (!_before && !_after) return child;
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (r) {
+        final f = (widget.width / r.width).clamp(0.0, .5);
+        return LinearGradient(
+          colors: [if (_before) Colors.transparent else Colors.black, Colors.black, Colors.black, if (_after) Colors.transparent else Colors.black],
+          stops: [0, f, 1 - f, 1],
+        ).createShader(r);
+      },
+      child: child,
     );
   }
 }

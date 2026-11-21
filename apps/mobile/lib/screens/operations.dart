@@ -110,7 +110,7 @@ class _RunsScreenState extends State<RunsScreen> {
       body: Column(children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-          child: SingleChildScrollView(
+          child: EdgeFade(child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: SegmentedButton<String>(
               showSelectedIcon: false,
@@ -118,7 +118,7 @@ class _RunsScreenState extends State<RunsScreen> {
               selected: {_view},
               onSelectionChanged: (s) => setState(() => _view = s.first),
             ),
-          ),
+          )),
         ),
         Expanded(child: _RunList(key: ValueKey(_view), view: _view, workflowId: widget.workflowId)),
       ]),

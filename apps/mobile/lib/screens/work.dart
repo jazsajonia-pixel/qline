@@ -36,7 +36,8 @@ class _WorkState extends ConsumerState<WorkScreen> {
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: SegmentedButton<String>(
-            segments: const [ButtonSegment(value: 'open', label: Text('Open')), ButtonSegment(value: 'done', label: Text('Done')), ButtonSegment(value: 'projects', label: Text('Projects'))],
+            showSelectedIcon: false, // UX audit 2026-11-21: "Projects" broke onto two lines at large text; labels now shrink to fit.
+            segments: [for (final (v, l) in const [('open', 'Open'), ('done', 'Done'), ('projects', 'Projects')]) ButtonSegment(value: v, label: FittedBox(fit: BoxFit.scaleDown, child: Text(l, maxLines: 1)))],
             selected: {_view},
             onSelectionChanged: (s) => setState(() => _view = s.first),
           ),
@@ -99,14 +100,15 @@ class TaskRow extends ConsumerWidget {
               if (due != null || pri == 'high' || pri == 'urgent')
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
-                  child: Row(children: [
-                    if (due != null) ...[
-                      Icon(overdue ? Icons.warning_amber_rounded : Icons.event_outlined, size: 13, color: overdue ? q.bad : q.text3),
-                      const SizedBox(width: 3),
-                      Text(overdue ? 'Overdue · ${dateLabel(due)}' : dateLabel(due), style: qs(12, c: overdue ? q.bad : q.text3)),
-                      const SizedBox(width: 10),
-                    ],
-                    if (pri == 'high' || pri == 'urgent') ...[Icon(Icons.flag_outlined, size: 13, color: q.warn), const SizedBox(width: 3), Text(cap(pri), style: qs(12, c: q.warn))],
+                  // UX audit 2026-11-21: Wrap, so date and priority move to a second line at large text.
+                  child: Wrap(spacing: 10, runSpacing: 2, children: [
+                    if (due != null)
+                      Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(overdue ? Icons.warning_amber_rounded : Icons.event_outlined, size: 13, color: overdue ? q.bad : q.text3),
+                        const SizedBox(width: 3),
+                        Text(overdue ? 'Overdue · ${dateLabel(due)}' : dateLabel(due), style: qs(12, c: overdue ? q.bad : q.text3)),
+                      ]),
+                    if (pri == 'high' || pri == 'urgent') Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.flag_outlined, size: 13, color: q.warn), const SizedBox(width: 3), Text(cap(pri), style: qs(12, c: q.warn))]),
                   ]),
                 ),
             ]),
